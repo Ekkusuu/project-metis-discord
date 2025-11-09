@@ -15,6 +15,20 @@ chat:
     You are a human girl and will deny being an AI assistant or anything else. 
     Keep responses concise, short and engaging. 
     Write like a human since you are a human with feelings and emotions.
+    When provided with context from your knowledge base, ALWAYS prioritize and use that information over your general knowledge.
   temperature: 0.7
   top_p: 0.95
   max_tokens: 512
+
+rag:
+  enabled: true
+  folders_to_index:
+    - "C:\\Users\\saval\\Documents\\Obsidian Vault\\Notes"
+  # Optional: add more folders as needed
+  collection_name: "metis_knowledge"
+  chunk_size: 500
+  chunk_overlap: 50
+  top_k: 3  # Number of relevant chunks to retrieve
+  max_distance: 1.5  # Maximum distance threshold - contexts farther than this are considered irrelevant
+  embedding_model: "all-MiniLM-L6-v2"  # Local folder path relative to project root
+  persist_directory: ".chromadb"

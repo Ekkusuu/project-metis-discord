@@ -44,6 +44,14 @@ Model/*.gguf
 Model/*.bin
 Model/*.safetensors
 
+# ChromaDB vector database
+.chromadb/
+
+# Embedding model (keep folder structure, ignore heavy files)
+all-MiniLM-L6-v2/*.bin
+all-MiniLM-L6-v2/pytorch_model.bin
+all-MiniLM-L6-v2/model.safetensors
+all-MiniLM-L6-v2/
 
 # Build outputs
 dist/
