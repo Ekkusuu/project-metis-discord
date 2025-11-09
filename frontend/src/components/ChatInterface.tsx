@@ -6,6 +6,7 @@ interface Message {
   text: string;
   sender: 'user' | 'ai';
   timestamp: Date;
+  tokensPerSecond?: number;
 }
 
 function ChatInterface() {
@@ -21,6 +22,7 @@ function ChatInterface() {
   const [isTyping, setIsTyping] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const API_URL = (import.meta as any).env?.VITE_API_URL || 'http://localhost:8000';
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -61,17 +63,101 @@ function ChatInterface() {
       textareaRef.current.style.height = 'auto';
     }
 
-    // Simulate AI response (replace with actual API call later)
-    setTimeout(() => {
-      const aiMessage: Message = {
-        id: (Date.now() + 1).toString(),
-        text: 'This is a simulated response. Connect your AI backend here.',
+    // Streaming API call
+    try {
+      const history = [
+        ...messages.map((m) => ({
+          role: m.sender === 'user' ? 'user' : 'assistant',
+          content: m.text,
+        })),
+        { role: 'user', content: userMessage.text },
+      ];
+
+      const resp = await fetch(`${API_URL}/chat/stream`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ messages: history, max_tokens: 512 }),
+      });
+
+      if (!resp.ok) {
+        const detail = await resp.text();
+        throw new Error(`Backend error ${resp.status}: ${detail}`);
+      }
+
+      // Read NDJSON stream
+      const reader = resp.body?.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let firstTokenReceived = false;
+      const aiMessageId = (Date.now() + 1).toString();
+
+      if (!reader) throw new Error('No response body');
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || ''; // Keep incomplete line in buffer
+
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          try {
+            const chunk = JSON.parse(line);
+            if (chunk.delta && chunk.delta.trim()) {
+              // On first token, create the AI message and hide typing indicator
+              if (!firstTokenReceived) {
+                firstTokenReceived = true;
+                setIsTyping(false);
+                const aiMessage: Message = {
+                  id: aiMessageId,
+                  text: chunk.delta,
+                  sender: 'ai',
+                  timestamp: new Date(),
+                };
+                setMessages((prev) => [...prev, aiMessage]);
+              } else {
+                // Append subsequent tokens to the AI message
+                setMessages((prev) =>
+                  prev.map((msg) =>
+                    msg.id === aiMessageId
+                      ? { ...msg, text: msg.text + chunk.delta }
+                      : msg
+                  )
+                );
+              }
+            }
+            // Check for final chunk with performance stats
+            if (chunk.done && chunk.tokens_per_second) {
+              setMessages((prev) =>
+                prev.map((msg) =>
+                  msg.id === aiMessageId
+                    ? { ...msg, tokensPerSecond: chunk.tokens_per_second }
+                    : msg
+                )
+              );
+            }
+          } catch (parseErr) {
+            console.warn('Failed to parse chunk:', line, parseErr);
+          }
+        }
+      }
+
+      // If no tokens were received, hide typing indicator
+      if (!firstTokenReceived) {
+        setIsTyping(false);
+      }
+    } catch (err: any) {
+      setIsTyping(false);
+      const errMsg: Message = {
+        id: (Date.now() + 2).toString(),
+        text: `Error contacting AI backend: ${err?.message || String(err)}`,
         sender: 'ai',
         timestamp: new Date(),
       };
-      setMessages((prev) => [...prev, aiMessage]);
-      setIsTyping(false);
-    }, 1000);
+      setMessages((prev) => [...prev, errMsg]);
+    }
   };
 
   const handleKeyPress = (e: React.KeyboardEvent) => {
@@ -96,6 +182,11 @@ function ChatInterface() {
           >
             <div className="message-content">
               <div className="message-text">{message.text}</div>
+              {message.tokensPerSecond && (
+                <div className="message-meta" style={{ fontSize: '0.75rem', opacity: 0.6, marginTop: '4px' }}>
+                  {message.tokensPerSecond} tokens/sec
+                </div>
+              )}
             </div>
           </div>
         ))}

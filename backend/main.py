@@ -1,6 +1,25 @@
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from backend.routers.chat import router as chat_router
 
 app = FastAPI(title="Project Metis Backend")
+
+# Allow frontend dev server (Vite default 5173) and local origins
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:8000",
+        "*",  # adjust or remove wildcard in production
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.include_router(chat_router)
 
 
 @app.get("/", tags=["root"])

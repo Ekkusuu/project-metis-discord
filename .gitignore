@@ -39,6 +39,12 @@ pnpm-debug.log*
 # yarn.lock
 # pnpm-lock.yaml
 
+# AI model files (ignore contents but keep folder structure)
+Model/*.gguf
+Model/*.bin
+Model/*.safetensors
+
+
 # Build outputs
 dist/
 build/

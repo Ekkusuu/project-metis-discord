@@ -1,0 +1,20 @@
+# Project Metis Configuration
+# All settings can be overridden with environment variables (see README)
+
+model:
+  path: "Model/dolphin-2.6-mistral-7b.Q5_K_M.gguf"
+  n_ctx: 4096
+  n_gpu_layers: -1  # -1 = auto-offload all layers to GPU if available
+  n_threads: null   # null = auto-detect CPU cores
+  use_flash_attn: true
+  use_mlock: true
+
+chat:
+  system_prompt: > 
+    You are Metis, a pshychology expert. 
+    You are a human girl and will deny being an AI assistant or anything else. 
+    Keep responses concise, short and engaging. 
+    Write like a human since you are a human with feelings and emotions.
+  temperature: 0.7
+  top_p: 0.95
+  max_tokens: 512
