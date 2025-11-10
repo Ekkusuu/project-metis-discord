@@ -84,6 +84,9 @@ function ChatInterface() {
         throw new Error(`Backend error ${resp.status}: ${detail}`);
       }
 
+      // Dispatch event to show RAG results immediately (before response completes)
+      window.dispatchEvent(new CustomEvent('ragRetrievalComplete'));
+
       // Read NDJSON stream
       const reader = resp.body?.getReader();
       const decoder = new TextDecoder();
@@ -148,6 +151,9 @@ function ChatInterface() {
       if (!firstTokenReceived) {
         setIsTyping(false);
       }
+
+      // Dispatch event to notify components that message is complete
+      window.dispatchEvent(new CustomEvent('messageComplete'));
     } catch (err: any) {
       setIsTyping(false);
       const errMsg: Message = {
@@ -213,9 +219,10 @@ function ChatInterface() {
           placeholder="Type your message..."
           rows={1}
           className="message-input"
+          disabled={isTyping}
         />
-        <button onClick={handleSend} className="send-button">
-          Send
+        <button onClick={handleSend} className="send-button" disabled={isTyping}>
+          {isTyping ? 'Wait...' : 'Send'}
         </button>
       </div>
     </div>

@@ -2,8 +2,8 @@
   display: flex;
   flex-direction: column;
   height: 100vh;
-  max-width: 1000px;
-  margin: 0 auto;
+  width: 100%;
+  flex: 1;
   background: linear-gradient(to bottom, #0d1117 0%, #161b22 100%);
   padding: 0;
   box-shadow: 0 0 60px rgba(0, 0, 0, 0.5);
@@ -182,6 +182,12 @@
   box-shadow: 0 0 0 3px rgba(88, 96, 105, 0.1), inset 0 2px 4px rgba(0, 0, 0, 0.2);
 }
 
+.message-input:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  background: rgba(22, 27, 34, 0.5);
+}
+
 .message-input::placeholder {
   color: #6e7681;
 }
@@ -201,16 +207,22 @@
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
 }
 
-.send-button:hover {
+.send-button:hover:not(:disabled) {
   background: linear-gradient(135deg, #373e47 0%, #2d333b 100%);
   border-color: rgba(88, 96, 105, 0.5);
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
   transform: translateY(-1px);
 }
 
-.send-button:active {
+.send-button:active:not(:disabled) {
   transform: translateY(0);
   box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+}
+
+.send-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  background: linear-gradient(135deg, #22272e 0%, #1c2128 100%);
 }
 
 @media (max-width: 768px) {

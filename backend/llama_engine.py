@@ -119,6 +119,7 @@ def get_model(model_path: Optional[str | os.PathLike[str]] = None) -> Llama:
         n_gpu_layers=n_gpu_layers,
         use_mlock=use_mlock,
         use_flash_attn=use_flash_attn,
+        chat_format="chatml",  # Use ChatML format to prevent template token leakage
         verbose=False,
     )
     return _llama_model

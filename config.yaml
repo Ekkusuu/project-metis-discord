@@ -3,7 +3,7 @@
 
 model:
   path: "Model/dolphin-2.6-mistral-7b.Q5_K_M.gguf"
-  n_ctx: 4096
+  n_ctx: 8192
   n_gpu_layers: -1  # -1 = auto-offload all layers to GPU if available
   n_threads: null   # null = auto-detect CPU cores
   use_flash_attn: true
@@ -26,9 +26,9 @@ rag:
     - "C:\\Users\\saval\\Documents\\Obsidian Vault\\Notes"
   # Optional: add more folders as needed
   collection_name: "metis_knowledge"
-  chunk_size: 500
+  chunk_size: 1000
   chunk_overlap: 50
-  top_k: 3  # Number of relevant chunks to retrieve
+  top_k: 6  # Number of relevant chunks to retrieve
   max_distance: 1.5  # Maximum distance threshold - contexts farther than this are considered irrelevant
   embedding_model: "all-MiniLM-L6-v2"  # Local folder path relative to project root
   persist_directory: ".chromadb"

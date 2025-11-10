@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import List, Optional, Literal
+from typing import List, Optional, Literal, Dict, Any
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
@@ -10,6 +10,12 @@ from backend.llama_engine import chat_completion, chat_completion_stream, get_co
 from backend.rag_engine import retrieve_context, format_context_for_prompt, index_all_folders
 
 router = APIRouter(prefix="", tags=["chat"])
+
+# Store last RAG retrieval results
+_last_rag_results: List[Dict[str, Any]] = []
+
+# Store current chat context (replaces on each request)
+_current_context: List[Dict[str, Any]] = []
 
 
 class Message(BaseModel):
@@ -98,68 +104,83 @@ def chat_stream(req: ChatRequest):
         ]
 
     # RAG: Retrieve context if enabled
+    global _last_rag_results
     if rag_cfg.get("enabled", False):
         # Get the last user message as the query
         user_messages = [m for m in messages if m.role == "user"]
         if user_messages:
             last_user_query = user_messages[-1].content
-            print(f"\n[RAG] Query: {last_user_query}")
             contexts = retrieve_context(last_user_query)
             
             # Filter contexts by distance threshold
             max_distance = rag_cfg.get("max_distance", 1.5)
             relevant_contexts = [ctx for ctx in contexts if ctx.get("distance", 0) <= max_distance]
             
+            # Store results for the frontend to display
+            _last_rag_results = [
+                {
+                    "source_file": ctx["metadata"].get("source_file", "unknown"),
+                    "distance": ctx.get("distance", 0),
+                    "text_preview": ctx["text"][:200],
+                    "chunk_index": ctx["metadata"].get("chunk_index", 0),
+                    "used": True
+                }
+                for ctx in relevant_contexts
+            ] + [
+                {
+                    "source_file": ctx["metadata"].get("source_file", "unknown"),
+                    "distance": ctx.get("distance", 0),
+                    "text_preview": ctx["text"][:200],
+                    "chunk_index": ctx["metadata"].get("chunk_index", 0),
+                    "used": False
+                }
+                for ctx in contexts if ctx not in relevant_contexts
+            ]
+            
             if relevant_contexts:
-                print(f"[RAG] Retrieved {len(contexts)} contexts, {len(relevant_contexts)} within threshold (max_distance: {max_distance}):")
-                for i, ctx in enumerate(relevant_contexts, 1):
-                    source = ctx["metadata"].get("source_file", "unknown")
-                    distance = ctx.get("distance", 0)
-                    print(f"  [{i}] {source} (distance: {distance:.4f})")
-                    print(f"      Preview: {ctx['text'][:100]}...")
-                
-                # Inject context as part of the user's message
+                # Inject context into the system prompt
                 context_text = format_context_for_prompt(relevant_contexts)
-                print(f"\n[RAG] Formatted context being injected:")
-                print(f"{context_text[:500]}...\n")
                 
-                # Prepend the context to the last user message
-                last_user_msg = messages[-1]
-                enhanced_query = f"""Context from your knowledge base:
-
-{context_text}
-
----
-
-Based on the context above, please answer: {last_user_msg.content}
-
-Remember: Use ONLY the provided context to answer. Do not use your general knowledge if it conflicts with this context."""
-                
-                messages[-1] = Message(role="user", content=enhanced_query)
-                
-                print(f"[RAG] Final message count: {len(messages)}")
-                print(f"[RAG] Message roles: {[m.role for m in messages]}")
+                # Find the system message and append context to it
+                for i, msg in enumerate(messages):
+                    if msg.role == "system":
+                        enhanced_system = f"{msg.content}\n\n---\nRelevant information from your knowledge base:\n\n{context_text}\n\nUse this information to answer the user's question."
+                        messages[i] = Message(role="system", content=enhanced_system)
+                        break
             else:
-                if contexts:
-                    print(f"[RAG] Retrieved {len(contexts)} contexts, but none within distance threshold ({max_distance}). Skipping RAG.")
-                    for i, ctx in enumerate(contexts, 1):
-                        distance = ctx.get("distance", 0)
-                        source = ctx["metadata"].get("source_file", "unknown")
-                        print(f"  [{i}] {source} (distance: {distance:.4f}) - REJECTED")
-                else:
-                    print(f"[RAG] No contexts retrieved for query")
+                # No relevant contexts, clear the results
+                if not contexts:
+                    _last_rag_results = []
 
     # Use request params or fall back to config defaults
     temperature = req.temperature if req.temperature is not None else chat_cfg.get("temperature", 0.7)
     top_p = req.top_p if req.top_p is not None else chat_cfg.get("top_p", 0.95)
     max_tokens = req.max_tokens if req.max_tokens is not None else chat_cfg.get("max_tokens", 512)
 
+    # Store current context (replace, not append)
+    global _current_context
+    import datetime
+    timestamp = datetime.datetime.now().isoformat()
+    
+    # Replace context with current messages
+    _current_context = [
+        {
+            "role": msg.role,
+            "content": msg.content,
+            "timestamp": timestamp
+        }
+        for msg in messages
+    ]
+
     def generate():
         import json
         import time
         
+        global _current_context
+        
         start_time = time.time()
         token_count = 0
+        assistant_response = ""
         
         for token in chat_completion_stream(
             [m.model_dump() for m in messages],
@@ -168,12 +189,20 @@ Remember: Use ONLY the provided context to answer. Do not use your general knowl
             max_tokens=max_tokens,
         ):
             token_count += 1
+            assistant_response += token
             # Send each token as NDJSON (newline-delimited JSON)
             yield json.dumps({"delta": token}) + "\n"
         
         # Calculate tokens per second
         elapsed = time.time() - start_time
         tokens_per_second = token_count / elapsed if elapsed > 0 else 0
+        
+        # Update context with assistant response
+        _current_context.append({
+            "role": "assistant",
+            "content": assistant_response,
+            "timestamp": datetime.datetime.now().isoformat()
+        })
         
         # Final chunk with performance stats
         yield json.dumps({"done": True, "tokens_per_second": round(tokens_per_second, 2)}) + "\n"
@@ -198,3 +227,87 @@ def reindex_knowledge_base(clear_existing: bool = True):
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Indexing failed: {str(e)}")
+
+
+@router.get("/rag/stats")
+def get_rag_stats():
+    """Get RAG system statistics."""
+    try:
+        from backend.rag_engine import get_collection, get_file_metadata_path
+        import json
+        
+        config = get_config()
+        rag_cfg = config.get("rag", {})
+        
+        collection = get_collection()
+        total_chunks = collection.count()
+        
+        # Count unique files from metadata
+        metadata_path = get_file_metadata_path()
+        total_files = 0
+        if metadata_path.exists():
+            with open(metadata_path, "r", encoding="utf-8") as f:
+                file_metadata = json.load(f)
+                total_files = len(file_metadata)
+        
+        return {
+            "total_chunks": total_chunks,
+            "total_files": total_files,
+            "collection_name": rag_cfg.get("collection_name", "metis_knowledge"),
+            "enabled": rag_cfg.get("enabled", False)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get stats: {str(e)}")
+
+
+@router.post("/rag/clear")
+def clear_rag_database():
+    """Clear all embeddings from the RAG database."""
+    try:
+        from backend.rag_engine import get_collection, get_file_metadata_path, save_file_metadata
+        
+        collection = get_collection()
+        count_before = collection.count()
+        
+        # Delete all items in the collection
+        if count_before > 0:
+            all_items = collection.get()
+            if all_items and all_items.get("ids"):
+                collection.delete(ids=all_items["ids"])
+        
+        # Clear file metadata
+        save_file_metadata({})
+        
+        return {
+            "status": "success",
+            "deleted_count": count_before
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Clear failed: {str(e)}")
+
+
+@router.get("/rag/last-retrieval")
+def get_last_rag_retrieval():
+    """Get the last RAG retrieval results."""
+    global _last_rag_results
+    return {
+        "results": _last_rag_results
+    }
+
+
+@router.get("/chat/history")
+def get_chat_history():
+    """Get the current chat context (legacy endpoint - use /chat/context instead)."""
+    global _current_context
+    return {
+        "messages": _current_context
+    }
+
+
+@router.get("/chat/context")
+def get_chat_context():
+    """Get the current chat context."""
+    global _current_context
+    return {
+        "messages": _current_context
+    }
