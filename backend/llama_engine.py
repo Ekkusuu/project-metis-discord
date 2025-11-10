@@ -2,18 +2,14 @@ from __future__ import annotations
 
 import os
 import yaml
+import requests
 from pathlib import Path
 from typing import List, Dict, Optional, Iterator, Any
 
-from llama_cpp import Llama
-
-# Global singleton for the model to avoid re-loading between requests
-_llama_model: Optional[Llama] = None
+# Global configuration
 _config: Optional[Dict[str, Any]] = None
 
-# Default relative model path
-DEFAULT_MODEL_NAME = "dolphin-2.6-mistral-7b.Q5_K_M.gguf"
-DEFAULT_MODEL_PATH = (Path(__file__).resolve().parents[1] / "Model" / DEFAULT_MODEL_NAME)
+# Default paths
 CONFIG_PATH = Path(__file__).resolve().parents[1] / "config.yaml"
 
 
@@ -25,18 +21,19 @@ def load_config() -> Dict[str, Any]:
 
     default_config = {
         "model": {
-            "path": str(DEFAULT_MODEL_PATH),
-            "n_ctx": 4096,
+            "path": "Model/dolphin-2.6-mistral-7b.Q5_K_M.gguf",
+            "n_ctx": 8192,
             "n_gpu_layers": -1,
-            "n_threads": None,
-            "use_flash_attn": True,
-            "use_mlock": True,
         },
         "chat": {
             "system_prompt": "You are Metis, a helpful AI assistant.",
             "temperature": 0.7,
             "top_p": 0.95,
             "max_tokens": 512,
+        },
+        "llm_service": {
+            "host": "localhost",
+            "port": 3000,
         },
     }
 
@@ -66,63 +63,30 @@ def get_config() -> Dict[str, Any]:
     return load_config()
 
 
-def get_model(model_path: Optional[str | os.PathLike[str]] = None) -> Llama:
-    """
-    Lazily load and return the global Llama model instance.
-
-    - model_path: optional explicit path; falls back to config.yaml or default
-    """
-    global _llama_model
-    if _llama_model is not None:
-        return _llama_model
-
+def get_llm_service_url() -> str:
+    """Get the LLM service base URL from config."""
     config = get_config()
-    model_cfg = config["model"]
+    llm_cfg = config.get("llm_service", {})
+    host = llm_cfg.get("host", "localhost")
+    port = llm_cfg.get("port", 3000)
+    return f"http://{host}:{port}"
 
-    # Resolve model path: explicit arg > config.yaml > default
-    if model_path:
-        resolved = Path(model_path)
-    else:
-        configured_path = model_cfg.get("path", str(DEFAULT_MODEL_PATH))
-        # If relative path in config, resolve from project root
-        resolved = Path(configured_path)
-        if not resolved.is_absolute():
-            resolved = (Path(__file__).resolve().parents[1] / configured_path).resolve()
 
-    if not resolved.exists():
-        raise FileNotFoundError(f"LLM model not found at: {resolved}")
-
-    # Load model settings from config with env var overrides
-    n_ctx = int(os.environ.get("LLAMA_CTX", str(model_cfg.get("n_ctx", 4096))))
-
-    # Auto threads: config (null = auto) > env > auto-detect
-    config_threads = model_cfg.get("n_threads")
-    if config_threads is None:
-        auto_threads = os.cpu_count() or 4
-    else:
-        auto_threads = config_threads
-    n_threads = int(os.environ.get("LLAMA_THREADS", str(auto_threads)))
-
-    # GPU layers and other flags
-    n_gpu_layers = int(os.environ.get("LLAMA_N_GPU_LAYERS", str(model_cfg.get("n_gpu_layers", -1))))
-    
-    use_mlock_cfg = model_cfg.get("use_mlock", True)
-    use_mlock = os.environ.get("LLAMA_USE_MLOCK", str(use_mlock_cfg)).lower() in ("1", "true", "yes")
-    
-    use_flash_attn_cfg = model_cfg.get("use_flash_attn", True)
-    use_flash_attn = os.environ.get("LLAMA_USE_FLASH_ATTN", str(use_flash_attn_cfg)).lower() in ("1", "true", "yes")
-
-    _llama_model = Llama(
-        model_path=str(resolved),
-        n_ctx=n_ctx,
-        n_threads=n_threads,
-        n_gpu_layers=n_gpu_layers,
-        use_mlock=use_mlock,
-        use_flash_attn=use_flash_attn,
-        chat_format="chatml",  # Use ChatML format to prevent template token leakage
-        verbose=False,
-    )
-    return _llama_model
+def get_model() -> bool:
+    """
+    Check if the LLM service is available.
+    Returns True if service is reachable, False otherwise.
+    """
+    try:
+        url = f"{get_llm_service_url()}/health"
+        response = requests.get(url, timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            return data.get("model_loaded", False)
+        return False
+    except Exception as e:
+        print(f"Warning: LLM service not reachable: {e}")
+        return False
 
 
 def chat_completion(
@@ -132,26 +96,25 @@ def chat_completion(
     max_tokens: int = 512,
 ) -> str:
     """
-    Run a chat completion using llama.cpp's chat API; messages format:
-    [{"role": "system"|"user"|"assistant", "content": "..."}, ...]
+    Run a chat completion using the Node.js LLM service.
     Returns the assistant reply content as a string.
     """
-    model = get_model()
-
-    # llama-cpp-python uses create_chat_completion with OpenAI-like schema
-    output = model.create_chat_completion(
-        messages=messages,
-        temperature=temperature,
-        top_p=top_p,
-        max_tokens=max_tokens,
-    )
-
     try:
-        # OpenAI-like response structure
-        return output["choices"][0]["message"]["content"].strip()
-    except Exception:
-        # Fallback: attempt legacy format
-        return str(output)
+        url = f"{get_llm_service_url()}/chat/completion"
+        payload = {
+            "messages": messages,
+            "temperature": temperature,
+            "top_p": top_p,
+            "max_tokens": max_tokens,
+        }
+        
+        response = requests.post(url, json=payload, timeout=120)
+        response.raise_for_status()
+        
+        data = response.json()
+        return data["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        raise RuntimeError(f"LLM service error: {e}")
 
 
 def chat_completion_stream(
@@ -161,26 +124,32 @@ def chat_completion_stream(
     max_tokens: int = 512,
 ) -> Iterator[str]:
     """
-    Stream chat completion tokens one by one using llama.cpp's streaming API.
+    Stream chat completion tokens using the Node.js LLM service.
     Yields delta content strings (individual tokens or partial text).
     """
-    model = get_model()
+    try:
+        url = f"{get_llm_service_url()}/chat/stream"
+        payload = {
+            "messages": messages,
+            "temperature": temperature,
+            "top_p": top_p,
+            "max_tokens": max_tokens,
+        }
+        
+        response = requests.post(url, json=payload, stream=True, timeout=120)
+        response.raise_for_status()
+        
+        # Read NDJSON stream line by line
+        for line in response.iter_lines():
+            if line:
+                try:
+                    import json
+                    chunk = json.loads(line)
+                    # Only yield delta content, skip done signals
+                    if "delta" in chunk and chunk["delta"]:
+                        yield chunk["delta"]
+                except json.JSONDecodeError:
+                    continue
+    except Exception as e:
+        raise RuntimeError(f"LLM service streaming error: {e}")
 
-    # Set stream=True to get an iterator of delta chunks
-    stream = model.create_chat_completion(
-        messages=messages,
-        temperature=temperature,
-        top_p=top_p,
-        max_tokens=max_tokens,
-        stream=True,
-    )
-
-    for chunk in stream:
-        # OpenAI streaming format: chunk["choices"][0]["delta"]["content"]
-        try:
-            delta = chunk["choices"][0]["delta"]
-            if "content" in delta:
-                yield delta["content"]
-        except (KeyError, IndexError):
-            # Skip malformed or final chunks
-            continue

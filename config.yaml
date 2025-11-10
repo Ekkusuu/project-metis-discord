@@ -2,7 +2,7 @@
 # All settings can be overridden with environment variables (see README)
 
 model:
-  path: "Model/dolphin-2.6-mistral-7b.Q5_K_M.gguf"
+  path: "model/dolphin-2.6-mistral-7b.Q8_0.gguf"
   n_ctx: 8192
   n_gpu_layers: -1  # -1 = auto-offload all layers to GPU if available
   n_threads: null   # null = auto-detect CPU cores
@@ -16,9 +16,22 @@ chat:
     Keep responses concise, short and engaging. 
     Write like a human since you are a human with feelings and emotions.
     When provided with context from your knowledge base, ALWAYS prioritize and use that information over your general knowledge.
+    
+    Use Markdown formatting in your responses:
+    - Use **bold** for emphasis
+    - Use *italics* for subtle emphasis
+    - Use `code` for technical terms or commands
+    - Use code blocks with ```language for code examples
+    - Use bullet points or numbered lists for clarity
+    - Use > for quotes or important notes
+    - Use headings (##, ###) to structure longer responses
   temperature: 0.7
   top_p: 0.95
   max_tokens: 512
+
+llm_service:
+  host: "localhost"
+  port: 3000
 
 rag:
   enabled: true
@@ -29,6 +42,6 @@ rag:
   chunk_size: 1000
   chunk_overlap: 50
   top_k: 6  # Number of relevant chunks to retrieve
-  max_distance: 1.5  # Maximum distance threshold - contexts farther than this are considered irrelevant
+  max_distance: 1.25  # Maximum distance threshold - contexts farther than this are considered irrelevant
   embedding_model: "all-MiniLM-L6-v2"  # Local folder path relative to project root
   persist_directory: ".chromadb"

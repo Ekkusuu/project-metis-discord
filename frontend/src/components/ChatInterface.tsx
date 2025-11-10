@@ -1,5 +1,8 @@
 import { useState, useRef, useEffect } from 'react';
+import ReactMarkdown from 'react-markdown';
+import rehypeHighlight from 'rehype-highlight';
 import './ChatInterface.css';
+import 'highlight.js/styles/github-dark.css';
 
 interface Message {
   id: string;
@@ -108,7 +111,7 @@ function ChatInterface() {
           if (!line.trim()) continue;
           try {
             const chunk = JSON.parse(line);
-            if (chunk.delta && chunk.delta.trim()) {
+            if (chunk.delta !== undefined && chunk.delta !== '') {
               // On first token, create the AI message and hide typing indicator
               if (!firstTokenReceived) {
                 firstTokenReceived = true;
@@ -187,7 +190,18 @@ function ChatInterface() {
             className={`message ${message.sender === 'user' ? 'user-message' : 'ai-message'}`}
           >
             <div className="message-content">
-              <div className="message-text">{message.text}</div>
+              <div className="message-text">
+                <ReactMarkdown 
+                  rehypePlugins={[rehypeHighlight]}
+                >
+                  {message.text
+                    .replace(/\n{3,}/g, '\n\n')  // Replace 3+ newlines with 2
+                    .replace(/(\d+\.)\n+/g, '$1 ')  // Remove ALL newlines after list numbers
+                    .replace(/\n+(\d+\.)/g, '\n$1')  // Single newline before list numbers
+                    .replace(/\n+([-*])\s/g, '\n$1 ')  // Single newline before bullet points
+                  }
+                </ReactMarkdown>
+              </div>
               {message.tokensPerSecond && (
                 <div className="message-meta" style={{ fontSize: '0.75rem', opacity: 0.6, marginTop: '4px' }}>
                   {message.tokensPerSecond} tokens/sec

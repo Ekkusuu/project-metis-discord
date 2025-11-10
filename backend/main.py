@@ -39,20 +39,29 @@ async def startup_event():
     """Run initialization tasks on backend startup."""
     config = get_config()
     
-    # Preload the LLM model
+    # Check LLM service connectivity
     print("\n" + "="*60)
-    print("Loading LLM model...")
+    print("Checking LLM service...")
     print("="*60)
     try:
-        from backend.llama_engine import get_model
-        model = get_model()
-        print(f"✓ Model loaded successfully")
-        print(f"  Model path: {config['model']['path']}")
-        print(f"  Context size: {config['model'].get('n_ctx', 4096)}")
-        print(f"  GPU layers: {config['model'].get('n_gpu_layers', -1)}")
+        from backend.llama_engine import get_model, get_llm_service_url
+        service_url = get_llm_service_url()
+        is_ready = get_model()
+        if is_ready:
+            print(f"✓ LLM service is ready")
+            print(f"  Service URL: {service_url}")
+            print(f"  Model path: {config['model']['path']}")
+            print(f"  Context size: {config['model'].get('n_ctx', 8192)}")
+        else:
+            print(f"⚠ LLM service is not ready yet")
+            print(f"  Service URL: {service_url}")
+            print(f"  Make sure to start the Node.js LLM service:")
+            print(f"  cd backend/llm_service && npm install && npm start")
         print("="*60 + "\n")
     except Exception as e:
-        print(f"✗ Error loading model: {e}")
+        print(f"✗ Error connecting to LLM service: {e}")
+        print("  Make sure to start the Node.js LLM service:")
+        print("  cd backend/llm_service && npm install && npm start")
         print("="*60 + "\n")
     
     # RAG initialization
