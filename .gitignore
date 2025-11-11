@@ -51,11 +51,16 @@ Model/*.safetensors
 memory/chat_history.json
 
 # Embedding model (keep folder structure, ignore heavy files)
-all-MiniLM-L6-v2/*.bin
-all-MiniLM-L6-v2/pytorch_model.bin
-all-MiniLM-L6-v2/model.safetensors
-all-MiniLM-L6-v2/
-rag-models/
+# Keep folder but ignore its contents; track only .gitkeep placeholder files
+all-MiniLM-L6-v2/*
+!all-MiniLM-L6-v2/.gitkeep
+
+rag-models/*
+!rag-models/.gitkeep
+
+# Local model folder: keep folder but ignore its contents; track only .gitkeep
+model/*
+!model/.gitkeep
 
 # Build outputs
 dist/
