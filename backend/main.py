@@ -2,6 +2,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.routers.chat import router as chat_router
+from backend.routers.history import router as history_router
+from backend.routers.memory import router as memory_router
 from backend.llama_engine import get_config
 
 app = FastAPI(title="Project Metis Backend")
@@ -21,6 +23,8 @@ app.add_middleware(
 )
 
 app.include_router(chat_router)
+app.include_router(history_router)
+app.include_router(memory_router)
 
 
 @app.get("/", tags=["root"])

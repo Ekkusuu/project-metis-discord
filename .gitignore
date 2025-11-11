@@ -47,11 +47,15 @@ Model/*.safetensors
 # ChromaDB vector database
 .chromadb/
 
+# Chat history (local storage)
+memory/chat_history.json
+
 # Embedding model (keep folder structure, ignore heavy files)
 all-MiniLM-L6-v2/*.bin
 all-MiniLM-L6-v2/pytorch_model.bin
 all-MiniLM-L6-v2/model.safetensors
 all-MiniLM-L6-v2/
+rag-models/
 
 # Build outputs
 dist/

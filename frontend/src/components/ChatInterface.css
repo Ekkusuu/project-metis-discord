@@ -16,6 +16,17 @@
   border-bottom: 1px solid rgba(48, 54, 61, 0.5);
 }
 
+.header-content {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1.5rem;
+}
+
+.header-text {
+  flex: 1;
+}
+
 .chat-header h1 {
   font-size: 1.75rem;
   margin: 0;
@@ -31,6 +42,37 @@
   opacity: 0.8;
 }
 
+.reset-button {
+  background: linear-gradient(135deg, rgba(139, 148, 158, 0.15) 0%, rgba(110, 118, 129, 0.1) 100%);
+  color: #e6d5c3;
+  border: 1px solid rgba(139, 148, 158, 0.25);
+  border-radius: 10px;
+  padding: 0.625rem 1.25rem;
+  font-family: 'Courier New', Courier, monospace;
+  font-size: 0.95rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  white-space: nowrap;
+  backdrop-filter: blur(8px);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.15);
+}
+
+.reset-button:hover {
+  background: linear-gradient(135deg, rgba(139, 148, 158, 0.25) 0%, rgba(110, 118, 129, 0.2) 100%);
+  border-color: rgba(139, 148, 158, 0.4);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+  transform: translateY(-1px);
+}
+
+.reset-button:active {
+  transform: translateY(0);
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.15);
+}
+
 .messages-container {
   flex: 1;
   overflow-y: auto;
@@ -39,6 +81,22 @@
   flex-direction: column;
   gap: 1.25rem;
   background: transparent;
+}
+
+.loading-history {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  gap: 1rem;
+  opacity: 0.7;
+}
+
+.loading-history p {
+  color: #8b949e;
+  font-size: 1rem;
+  margin: 0;
 }
 
 .messages-container::-webkit-scrollbar {
@@ -109,7 +167,8 @@
 
 .message-text {
   line-height: 1.65;
-  white-space: pre-wrap;
+  /* Let markdown elements control layout; preserving whitespace here was causing extra gaps */
+  white-space: normal;
   font-size: 1.05rem;
 }
 
@@ -174,6 +233,7 @@
   padding-left: 0.25rem;
 }
 
+/* Inline paragraphs within list items to avoid extra vertical spacing */
 .message-text li p {
   margin: 0;
   display: inline;
@@ -187,9 +247,7 @@
   margin-bottom: 0;
 }
 
-.message-text li p {
-  margin: 0.25rem 0;
-}
+/* Remove duplicate rule that reintroduced margins around list paragraphs */
 
 .message-text li:first-child {
   margin-top: 0;
@@ -361,13 +419,147 @@
   background: linear-gradient(135deg, #22272e 0%, #1c2128 100%);
 }
 
+/* Edit mode styles */
+.edit-mode {
+  width: 100%;
+  animation: fadeIn 0.2s ease-in;
+}
+
+.edit-textarea {
+  width: 100%;
+  min-height: 100px;
+  background: linear-gradient(135deg, rgba(28, 33, 40, 0.95) 0%, rgba(22, 27, 34, 0.9) 100%);
+  border: 1px solid rgba(88, 96, 105, 0.4);
+  border-radius: 10px;
+  padding: 1rem 1.25rem;
+  color: #f0e7d8;
+  font-family: 'Courier New', Courier, monospace;
+  font-size: 1.05rem;
+  resize: vertical;
+  line-height: 1.65;
+  margin-bottom: 0.875rem;
+  box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.3);
+  transition: all 0.3s ease;
+}
+
+.edit-textarea:focus {
+  outline: none;
+  border-color: rgba(139, 148, 158, 0.7);
+  background: linear-gradient(135deg, rgba(28, 33, 40, 1) 0%, rgba(22, 27, 34, 0.95) 100%);
+  box-shadow: 0 0 0 3px rgba(88, 96, 105, 0.15), inset 0 2px 6px rgba(0, 0, 0, 0.3);
+}
+
+.edit-buttons {
+  display: flex;
+  gap: 0.625rem;
+  justify-content: flex-end;
+}
+
+.save-edit-button,
+.cancel-edit-button {
+  padding: 0.625rem 1.5rem;
+  border-radius: 10px;
+  font-family: 'Courier New', Courier, monospace;
+  font-size: 0.95rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.25s ease;
+  border: 1px solid transparent;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
+  letter-spacing: 0.3px;
+}
+
+.save-edit-button {
+  background: linear-gradient(135deg, #3a7f5f 0%, #2d6a4f 100%);
+  color: #f0f6fc;
+  border-color: rgba(58, 127, 95, 0.3);
+}
+
+.save-edit-button:hover {
+  background: linear-gradient(135deg, #4a9d7a 0%, #3a7f5f 100%);
+  border-color: rgba(74, 157, 122, 0.4);
+  box-shadow: 0 4px 12px rgba(58, 127, 95, 0.4);
+  transform: translateY(-1px);
+}
+
+.save-edit-button:active {
+  transform: translateY(0);
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+}
+
+.cancel-edit-button {
+  background: linear-gradient(135deg, #2d333b 0%, #22272e 100%);
+  color: #e6d5c3;
+  border-color: rgba(88, 96, 105, 0.3);
+}
+
+.cancel-edit-button:hover {
+  background: linear-gradient(135deg, #373e47 0%, #2d333b 100%);
+  border-color: rgba(88, 96, 105, 0.5);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+  transform: translateY(-1px);
+}
+
+.cancel-edit-button:active {
+  transform: translateY(0);
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+}
+
+.edit-message-button {
+  position: absolute;
+  top: 0.625rem;
+  right: 0.625rem;
+  background: linear-gradient(135deg, rgba(28, 33, 40, 0.85) 0%, rgba(22, 27, 34, 0.8) 100%);
+  border: 1px solid rgba(88, 96, 105, 0.25);
+  border-radius: 8px;
+  padding: 0.375rem 0.625rem;
+  cursor: pointer;
+  opacity: 0;
+  transition: all 0.25s ease;
+  font-size: 1rem;
+  backdrop-filter: blur(8px);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+}
+
+.message-content {
+  position: relative;
+}
+
+.message-content:hover .edit-message-button {
+  opacity: 0.8;
+}
+
+.edit-message-button:hover {
+  opacity: 1 !important;
+  background: linear-gradient(135deg, rgba(45, 51, 59, 0.95) 0%, rgba(28, 33, 40, 0.9) 100%);
+  border-color: rgba(139, 148, 158, 0.5);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  transform: translateY(-1px);
+}
+
+.edit-message-button:active {
+  transform: translateY(0);
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+}
+
 @media (max-width: 768px) {
   .chat-header {
     padding: 1.5rem 1.75rem;
   }
 
+  .header-content {
+    flex-direction: row;
+    align-items: center;
+    gap: 1rem;
+  }
+
   .chat-header h1 {
     font-size: 1.5rem;
+  }
+
+  .reset-button {
+    padding: 0.5rem 1rem;
+    font-size: 0.875rem;
   }
 
   .messages-container {

@@ -112,8 +112,22 @@ def chat_completion(
         response.raise_for_status()
         
         data = response.json()
-        return data["choices"][0]["message"]["content"].strip()
+        content = data["choices"][0]["message"]["content"]
+        
+        # Handle both string and dict responses
+        if isinstance(content, dict):
+            # Extract the actual response text from the dict
+            if "response" in content:
+                content = content["response"]
+            elif "text" in content:
+                content = content["text"]
+            else:
+                # Fallback: convert to string
+                content = str(content)
+        
+        return content.strip() if isinstance(content, str) else str(content).strip()
     except Exception as e:
+        print(f"LLM service error: {e}")
         raise RuntimeError(f"LLM service error: {e}")
 
 

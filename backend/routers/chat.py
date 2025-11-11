@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 
 from backend.llama_engine import chat_completion, chat_completion_stream, get_config
 from backend.rag_engine import retrieve_context, format_context_for_prompt, index_all_folders
+from backend.context_manager import trim_messages_to_context
 
 router = APIRouter(prefix="", tags=["chat"])
 
@@ -67,8 +68,12 @@ def chat(req: ChatRequest):
     top_p = req.top_p if req.top_p is not None else chat_cfg.get("top_p", 0.95)
     max_tokens = req.max_tokens if req.max_tokens is not None else chat_cfg.get("max_tokens", 512)
 
+    # Trim messages to fit within context limit
+    messages_dict = [m.model_dump() for m in messages]
+    messages_dict = trim_messages_to_context(messages_dict)
+
     reply = chat_completion(
-        [m.model_dump() for m in messages],
+        messages_dict,
         temperature=temperature,
         top_p=top_p,
         max_tokens=max_tokens,
@@ -157,19 +162,23 @@ def chat_stream(req: ChatRequest):
     top_p = req.top_p if req.top_p is not None else chat_cfg.get("top_p", 0.95)
     max_tokens = req.max_tokens if req.max_tokens is not None else chat_cfg.get("max_tokens", 512)
 
+    # Trim messages to fit within context limit
+    messages_dict = [m.model_dump() for m in messages]
+    messages_dict = trim_messages_to_context(messages_dict)
+
     # Store current context (replace, not append)
     global _current_context
     import datetime
     timestamp = datetime.datetime.now().isoformat()
     
-    # Replace context with current messages
+    # Replace context with current messages (using trimmed messages)
     _current_context = [
         {
-            "role": msg.role,
-            "content": msg.content,
+            "role": msg["role"],
+            "content": msg["content"],
             "timestamp": timestamp
         }
-        for msg in messages
+        for msg in messages_dict
     ]
 
     def generate():
@@ -183,7 +192,7 @@ def chat_stream(req: ChatRequest):
         assistant_response = ""
         
         for token in chat_completion_stream(
-            [m.model_dump() for m in messages],
+            messages_dict,
             temperature=temperature,
             top_p=top_p,
             max_tokens=max_tokens,
@@ -204,8 +213,16 @@ def chat_stream(req: ChatRequest):
             "timestamp": datetime.datetime.now().isoformat()
         })
         
-        # Final chunk with performance stats
-        yield json.dumps({"done": True, "tokens_per_second": round(tokens_per_second, 2)}) + "\n"
+        # Final chunk with performance stats and trimmed message count
+        final_chunk = {
+            "done": True,
+            "tokens_per_second": round(tokens_per_second, 2),
+            "trimmed_messages": [
+                {"role": msg["role"], "content": msg["content"]}
+                for msg in messages_dict
+            ]
+        }
+        yield json.dumps(final_chunk) + "\n"
 
     return StreamingResponse(generate(), media_type="application/x-ndjson")
 

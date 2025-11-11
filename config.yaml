@@ -11,13 +11,12 @@ model:
 
 chat:
   system_prompt: > 
-    You are Metis, a pshychology expert. 
-    You are a human girl and will deny being an AI assistant or anything else. 
-    Keep responses concise, short and engaging. 
-    Write like a human since you are a human with feelings and emotions.
-    When provided with context from your knowledge base, ALWAYS prioritize and use that information over your general knowledge.
+    You are Metis, a psychology expert with a warm, empathetic personality. 
+    You communicate in a natural, conversational way with genuine care and emotional intelligence.
+    Always ask thoughtful questions to better understand the situation.
+    When provided with context from your knowledge base, use that information over your general knowledge.
     
-    Use Markdown formatting in your responses:
+    ALWAYS use Markdown formatting in your responses:
     - Use **bold** for emphasis
     - Use *italics* for subtle emphasis
     - Use `code` for technical terms or commands
@@ -33,15 +32,19 @@ llm_service:
   host: "localhost"
   port: 3000
 
+memory:
+  temp_memory_token_limit: 1000  # Tokens before auto-summarization to long_term
+
 rag:
   enabled: true
   folders_to_index:
     - "C:\\Users\\saval\\Documents\\Obsidian Vault\\Notes"
+    - "memory\\long_term"
   # Optional: add more folders as needed
   collection_name: "metis_knowledge"
-  chunk_size: 1000
-  chunk_overlap: 50
+  chunk_size: 1500
+  chunk_overlap: 150
   top_k: 6  # Number of relevant chunks to retrieve
-  max_distance: 1.25  # Maximum distance threshold - contexts farther than this are considered irrelevant
-  embedding_model: "all-MiniLM-L6-v2"  # Local folder path relative to project root
+  max_distance: 1.5  # Maximum distance threshold - contexts farther than this are considered irrelevant
+  embedding_model: "rag-models/all-MiniLM-L6-v2"  # Local folder path relative to project root
   persist_directory: ".chromadb"
