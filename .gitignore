@@ -62,6 +62,17 @@ rag-models/*
 model/*
 !model/.gitkeep
 
+# Memory
+# Keep the memory folder, ignore its contents by default, but allow tracking placeholder files
+memory/*
+!memory/.gitkeep
+# Keep temp memory file ignored explicitly (sensitive)
+memory/temp_memory.txt
+
+# Keep long_term folder but ignore its contents; track only .gitkeep
+memory/long_term/*
+!memory/long_term/.gitkeep
+
 # Build outputs
 dist/
 build/
