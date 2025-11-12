@@ -8,11 +8,14 @@ from typing import List, Optional, Dict, Any
 import chromadb
 from chromadb.config import Settings
 
-from backend.llama_engine import get_config
+from backend.llama_engine import get_config, chat_completion
 
 # Global ChromaDB client
 _chroma_client: Optional[chromadb.Client] = None
 _collection: Optional[chromadb.Collection] = None
+
+# Global reranker model
+_reranker_model = None
 
 # File tracking metadata
 _file_metadata_path: Optional[Path] = None
@@ -180,6 +183,102 @@ def get_collection() -> chromadb.Collection:
         metadata={"description": "Metis RAG knowledge base"}
     )
     return _collection
+
+
+def get_reranker_model():
+    """Get or load the reranker model."""
+    global _reranker_model
+    if _reranker_model is not None:
+        return _reranker_model
+    
+    config = get_config()
+    rag_cfg = config.get("rag", {})
+    
+    # Check if reranker is enabled
+    if not rag_cfg.get("use_reranker", False):
+        return None
+    
+    reranker_model_path = rag_cfg.get("reranker_model", "rag-models/bge-reranker-base")
+    
+    # Resolve reranker model path (relative to project root)
+    model_path = Path(__file__).resolve().parents[1] / reranker_model_path
+    
+    if not model_path.exists():
+        print(f"Warning: Reranker model not found at: {model_path}")
+        print(f"Reranking will be disabled")
+        return None
+    
+    try:
+        from sentence_transformers import CrossEncoder
+        
+        print(f"Loading reranker model from: {model_path}")
+        _reranker_model = CrossEncoder(str(model_path), device='cpu')
+        print("✓ Reranker model loaded successfully")
+        return _reranker_model
+    except ImportError:
+        print("Warning: sentence-transformers not installed. Reranking disabled.")
+        return None
+    except Exception as e:
+        print(f"Error loading reranker model: {e}")
+        return None
+
+
+def rerank_contexts(query: str, contexts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Rerank retrieved contexts using the BGE reranker model.
+    
+    Args:
+        query: The search query
+        contexts: List of context dicts with 'text', 'metadata', and 'distance'
+    
+    Returns:
+        Reranked and filtered list of contexts with added 'rerank_score'
+    """
+    config = get_config()
+    rag_cfg = config.get("rag", {})
+    
+    # Check if reranker is enabled
+    if not rag_cfg.get("use_reranker", False):
+        return contexts
+    
+    if not contexts:
+        return contexts
+    
+    # Get reranker model
+    reranker = get_reranker_model()
+    if reranker is None:
+        print("Reranker not available, returning original contexts")
+        return contexts
+    
+    try:
+        # Prepare query-document pairs for reranking
+        pairs = [[query, ctx['text']] for ctx in contexts]
+        
+        # Get reranking scores
+        rerank_scores = reranker.predict(pairs)
+        
+        # Add rerank scores to contexts
+        for ctx, score in zip(contexts, rerank_scores):
+            ctx['rerank_score'] = float(score)
+        
+        # Sort by rerank score (higher is better)
+        reranked_contexts = sorted(contexts, key=lambda x: x.get('rerank_score', 0), reverse=True)
+        
+        # Get top k after reranking
+        reranker_top_k = rag_cfg.get("reranker_top_k", 3)
+        reranked_contexts = reranked_contexts[:reranker_top_k]
+        
+        print(f"Reranking: {len(contexts)} → {len(reranked_contexts)} contexts")
+        for i, ctx in enumerate(reranked_contexts[:3], 1):
+            print(f"  [{i}] Rerank score: {ctx.get('rerank_score', 0):.4f}, Distance: {ctx.get('distance', 0):.4f}")
+        
+        return reranked_contexts
+        
+    except Exception as e:
+        print(f"Error during reranking: {e}")
+        import traceback
+        traceback.print_exc()
+        return contexts
 
 
 def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> List[str]:
@@ -357,6 +456,85 @@ def index_all_folders(clear_existing: bool = False) -> Dict[str, int]:
     return results
 
 
+def generate_rag_query(messages: List[Dict[str, str]], last_user_message: str) -> str:
+    """
+    Generate a contextual RAG query based on conversation history.
+    
+    Uses the last k messages (configured in rag.query_context_messages) to create
+    a better search query. If the last message is unrelated to previous context,
+    returns just the last message.
+    
+    Args:
+        messages: List of recent message dicts with 'role' and 'content'
+        last_user_message: The most recent user message (fallback)
+    
+    Returns:
+        A search query string optimized for RAG retrieval
+    """
+    config = get_config()
+    rag_cfg = config.get("rag", {})
+    query_context_messages = rag_cfg.get("query_context_messages", 0)
+    
+    # If set to 0 or no conversation history, use simple query
+    if query_context_messages <= 0 or not messages or len(messages) <= 1:
+        return last_user_message
+    
+    # Get the last k messages (excluding system messages)
+    recent_messages = [
+        msg for msg in messages[-query_context_messages-1:]
+        if msg.get("role") in ["user", "assistant"]
+    ]
+    
+    # If not enough context, use simple query
+    if len(recent_messages) <= 1:
+        return last_user_message
+    
+    # Build conversation context
+    conversation_context = "\n".join([
+        f"{'User' if msg['role'] == 'user' else 'AI'}: {msg['content']}"
+        for msg in recent_messages[:-1]  # Exclude the last message
+    ])
+    
+    try:
+        # Get prompts from config
+        system_prompt = rag_cfg.get("query_generation_system_prompt", "")
+        user_prompt_template = rag_cfg.get("query_generation_user_prompt", "")
+        
+        # Format user prompt with conversation context
+        user_prompt = user_prompt_template.format(
+            conversation_context=conversation_context,
+            last_user_message=last_user_message
+        )
+        
+        # Use LLM to generate contextual query
+        llm_messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ]
+        
+        # Generate query with low temperature for consistency
+        generated_query = chat_completion(llm_messages, temperature=0.2, max_tokens=150)
+        
+        # Clean up the query
+        generated_query = generated_query.strip().strip('"').strip("'")
+        
+        # Sanity check: if generated query is empty or too short, use original
+        if len(generated_query) < 3:
+            print(f"Generated query too short, using original: {last_user_message}")
+            return last_user_message
+        
+        print(f"RAG Query Generation:")
+        print(f"  Original: {last_user_message}")
+        print(f"  Contextual: {generated_query}")
+        
+        return generated_query
+        
+    except Exception as e:
+        print(f"Error generating contextual query: {e}")
+        # Fallback to simple query
+        return last_user_message
+
+
 def retrieve_context(query: str, top_k: Optional[int] = None) -> List[Dict[str, Any]]:
     """
     Retrieve relevant context chunks for a query.
@@ -420,6 +598,9 @@ def retrieve_context(query: str, top_k: Optional[int] = None) -> List[Dict[str, 
                 context["distance"] = 0.0
             
             contexts.append(context)
+        
+        # Apply reranking if enabled
+        contexts = rerank_contexts(query, contexts)
         
         return contexts
     except Exception as e:

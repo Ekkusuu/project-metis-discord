@@ -34,6 +34,7 @@ llm_service:
 
 memory:
   temp_memory_token_limit: 1000  # Tokens before auto-summarization to long_term
+  long_term_memory_token_limit: 1000  # Token limit per long-term memory file before creating a new one
 
 rag:
   enabled: true
@@ -44,7 +45,60 @@ rag:
   collection_name: "metis_knowledge"
   chunk_size: 1500
   chunk_overlap: 150
-  top_k: 6  # Number of relevant chunks to retrieve
-  max_distance: 1.5  # Maximum distance threshold - contexts farther than this are considered irrelevant
+  top_k: 15  # Number of relevant chunks to retrieve from vector DB
+  max_distance: 1.5  # Maximum distance threshold - contexts farther than this are considered irrelevant (-1 = no threshold)
   embedding_model: "rag-models/all-MiniLM-L6-v2"  # Local folder path relative to project root
   persist_directory: ".chromadb"
+  query_context_messages: 3  # Number of previous messages to use for contextual query generation (0 = use last message only)
+  
+  # Reranker settings
+  use_reranker: true  # Enable/disable reranking
+  reranker_model: "rag-models/bge-reranker-base"  # Local folder path to reranker model
+  reranker_top_k: 5  # Number of top chunks to keep after reranking (must be <= top_k)
+  reranker_min_score: 0.1  # Minimum rerank score threshold - contexts with lower scores are filtered out (-1 = no threshold)
+  
+  # RAG Query Generation Prompts
+  query_generation_system_prompt: >
+    You are a query optimization assistant. Generate a concise search query based on conversation context.
+    
+    RULES:
+    1. If the last user message is related to previous conversation, create a query that incorporates relevant context
+    2. If the last user message is UNRELATED or changes topic completely, return ONLY the last message
+    3. If the query is about finding information about user use the keyword USER in the query.
+    4. Keep queries concise (max 2-3 sentences)
+    5. Focus on key concepts and search terms
+    6. Remove conversational fluff
+    
+    Output ONLY the search query, nothing else.
+  
+  query_generation_user_prompt: >
+    Previous conversation:
+    {conversation_context}
+    
+    Latest user message: {last_user_message}
+    
+    Generate an optimal search query for retrieving relevant documents.
+
+# Memory System Prompts
+prompts:
+  memory_summarization_system: >
+    You are a memory extraction assistant. Extract ONLY explicitly stated facts about the USER from conversations.
+    
+    CRITICAL RULES:
+    - Only include information the user DIRECTLY stated
+    - DO NOT infer, assume, or elaborate beyond what was said
+    - DO NOT add interpretations or explanations
+    - DO NOT include goals/interests unless explicitly mentioned
+    - Skip any section that has no explicit information
+    - Be extremely literal and conservative
+    - Always use the keyword USER
+    Format as brief bullet points under relevant headings. Only create headings if you have actual facts.
+  
+  memory_summarization_user: >
+    Extract ONLY the explicitly stated facts about the user from this conversation. Do not infer or elaborate:
+    
+    ```
+    {content}
+    ```
+    
+    List only what the user directly said about themselves. Be brief and literal.

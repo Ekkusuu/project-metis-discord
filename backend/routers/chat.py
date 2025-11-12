@@ -7,7 +7,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from backend.llama_engine import chat_completion, chat_completion_stream, get_config
-from backend.rag_engine import retrieve_context, format_context_for_prompt, index_all_folders
+from backend.rag_engine import retrieve_context, format_context_for_prompt, index_all_folders, generate_rag_query
 from backend.context_manager import trim_messages_to_context
 
 router = APIRouter(prefix="", tags=["chat"])
@@ -115,32 +115,58 @@ def chat_stream(req: ChatRequest):
         user_messages = [m for m in messages if m.role == "user"]
         if user_messages:
             last_user_query = user_messages[-1].content
-            contexts = retrieve_context(last_user_query)
             
-            # Filter contexts by distance threshold
+            # Generate contextual RAG query using conversation history
+            messages_for_query = [{"role": m.role, "content": m.content} for m in messages]
+            rag_query = generate_rag_query(messages_for_query, last_user_query)
+            
+            # Retrieve contexts using the generated query
+            contexts = retrieve_context(rag_query)
+            
+            # Filter contexts by thresholds
             max_distance = rag_cfg.get("max_distance", 1.5)
-            relevant_contexts = [ctx for ctx in contexts if ctx.get("distance", 0) <= max_distance]
+            reranker_min_score = rag_cfg.get("reranker_min_score", -1)
+            use_reranker = rag_cfg.get("use_reranker", False)
             
-            # Store results for the frontend to display
-            _last_rag_results = [
-                {
-                    "source_file": ctx["metadata"].get("source_file", "unknown"),
-                    "distance": ctx.get("distance", 0),
-                    "text_preview": ctx["text"][:200],
-                    "chunk_index": ctx["metadata"].get("chunk_index", 0),
-                    "used": True
-                }
-                for ctx in relevant_contexts
-            ] + [
-                {
-                    "source_file": ctx["metadata"].get("source_file", "unknown"),
-                    "distance": ctx.get("distance", 0),
-                    "text_preview": ctx["text"][:200],
-                    "chunk_index": ctx["metadata"].get("chunk_index", 0),
-                    "used": False
-                }
-                for ctx in contexts if ctx not in relevant_contexts
-            ]
+            relevant_contexts = []
+            for ctx in contexts:
+                # Check distance threshold (if not disabled with -1)
+                if max_distance != -1 and ctx.get("distance", 0) > max_distance:
+                    continue
+                
+                # Check rerank score threshold (if reranker is enabled and threshold is not disabled with -1)
+                if use_reranker and reranker_min_score != -1:
+                    if ctx.get("rerank_score") is not None and ctx.get("rerank_score") < reranker_min_score:
+                        continue
+                
+                relevant_contexts.append(ctx)
+            
+            # Store results for the frontend to display, including the generated query
+            _last_rag_results = {
+                "query": rag_query,  # Include the generated query
+                "original_query": last_user_query,  # Include the original user message
+                "results": [
+                    {
+                        "source_file": ctx["metadata"].get("source_file", "unknown"),
+                        "distance": ctx.get("distance", 0),
+                        "rerank_score": ctx.get("rerank_score"),  # Include rerank score if available
+                        "text_preview": ctx["text"][:200],
+                        "chunk_index": ctx["metadata"].get("chunk_index", 0),
+                        "used": True
+                    }
+                    for ctx in relevant_contexts
+                ] + [
+                    {
+                        "source_file": ctx["metadata"].get("source_file", "unknown"),
+                        "distance": ctx.get("distance", 0),
+                        "rerank_score": ctx.get("rerank_score"),  # Include rerank score if available
+                        "text_preview": ctx["text"][:200],
+                        "chunk_index": ctx["metadata"].get("chunk_index", 0),
+                        "used": False
+                    }
+                    for ctx in contexts if ctx not in relevant_contexts
+                ]
+            }
             
             if relevant_contexts:
                 # Inject context into the system prompt
@@ -153,9 +179,13 @@ def chat_stream(req: ChatRequest):
                         messages[i] = Message(role="system", content=enhanced_system)
                         break
             else:
-                # No relevant contexts, clear the results
+                # No relevant contexts, but still include the query info
                 if not contexts:
-                    _last_rag_results = []
+                    _last_rag_results = {
+                        "query": rag_query,
+                        "original_query": last_user_query,
+                        "results": []
+                    }
 
     # Use request params or fall back to config defaults
     temperature = req.temperature if req.temperature is not None else chat_cfg.get("temperature", 0.7)

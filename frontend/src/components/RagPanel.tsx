@@ -11,14 +11,21 @@ interface RagStats {
 interface RagResult {
   source_file: string;
   distance: number;
+  rerank_score?: number;  // Optional rerank score
   text_preview: string;
   chunk_index: number;
   used: boolean;
 }
 
+interface RagRetrievalData {
+  query?: string;
+  original_query?: string;
+  results: RagResult[];
+}
+
 function RagPanel() {
   const [stats, setStats] = useState<RagStats | null>(null);
-  const [ragResults, setRagResults] = useState<RagResult[]>([]);
+  const [ragData, setRagData] = useState<RagRetrievalData>({ results: [] });
   const [isLoading, setIsLoading] = useState(false);
   const [message, setMessage] = useState<{ text: string; type: 'success' | 'error' | 'info' } | null>(null);
   const API_URL = (import.meta as any).env?.VITE_API_URL || 'http://localhost:8000';
@@ -37,7 +44,18 @@ function RagPanel() {
     try {
       const resp = await fetch(`${API_URL}/rag/last-retrieval`);
       const data = await resp.json();
-      setRagResults(data.results || []);
+      // Handle both old array format and new object format
+      if (Array.isArray(data.results)) {
+        setRagData({
+          query: data.results.query,
+          original_query: data.results.original_query,
+          results: data.results.results || []
+        });
+      } else if (data.results) {
+        setRagData(data.results);
+      } else {
+        setRagData({ results: [] });
+      }
     } catch (error) {
       console.error('Failed to fetch RAG results:', error);
     }
@@ -209,11 +227,20 @@ function RagPanel() {
         </div>
       )}
 
-      {ragResults.length > 0 && (
+      {ragData.results.length > 0 && (
         <div className="rag-results">
           <h3>Last Retrieval</h3>
+          
+          {/* Display the generated query if available */}
+          {ragData.query && (
+            <div className="query-display">
+              <div className="query-label">Generated Query:</div>
+              <div className="query-text">{ragData.query}</div>
+            </div>
+          )}
+          
           <div className="results-list">
-            {ragResults.map((result, idx) => (
+            {ragData.results.map((result, idx) => (
               <div key={idx} className={`result-item ${result.used ? 'used' : 'rejected'}`}>
                 <div className="result-header">
                   <span className="result-status">{result.used ? '✓' : '✗'}</span>
@@ -221,6 +248,9 @@ function RagPanel() {
                 </div>
                 <div className="result-meta">
                   <span>Distance: {result.distance.toFixed(4)}</span>
+                  {result.rerank_score !== undefined && result.rerank_score !== null && (
+                    <span className="rerank-score">Rerank: {result.rerank_score.toFixed(4)}</span>
+                  )}
                   <span>Chunk #{result.chunk_index}</span>
                 </div>
                 <div className="result-preview">{result.text_preview}...</div>

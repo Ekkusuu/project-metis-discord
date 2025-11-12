@@ -83,7 +83,8 @@ def check_and_summarize_temp_memory() -> None:
 
 def summarize_and_archive_temp_memory() -> None:
     """
-    Use AI to summarize temp_memory content and save to long_term folder.
+    Use AI to summarize temp_memory content and append to active long_term file.
+    Creates a new long_term file when the current one exceeds the token limit.
     Clears temp_memory after archiving.
     """
     content = get_temp_memory_content()
@@ -96,25 +97,19 @@ def summarize_and_archive_temp_memory() -> None:
     
     # Create summary using AI
     try:
-        system_prompt = """You are a memory extraction assistant. Extract ONLY explicitly stated facts about the user from conversations.
-
-CRITICAL RULES:
-- Only include information the user DIRECTLY stated
-- DO NOT infer, assume, or elaborate beyond what was said
-- DO NOT add interpretations or explanations
-- DO NOT include goals/interests unless explicitly mentioned
-- Skip any section that has no explicit information
-- Be extremely literal and conservative
-
-Format as brief bullet points under relevant headings. Only create headings if you have actual facts."""
-
-        user_prompt = f"""Extract ONLY the explicitly stated facts about the user from this conversation. Do not infer or elaborate:
-
-```
-{content}
-```
-
-List only what the user directly said about themselves. Be brief and literal."""
+        config = get_config()
+        prompts_cfg = config.get("prompts", {})
+        memory_cfg = config.get("memory", {})
+        
+        # Get prompts from config with fallback defaults
+        system_prompt = prompts_cfg.get("memory_summarization_system", 
+            "You are a memory extraction assistant. Extract only explicitly stated facts about the user.")
+        
+        user_prompt_template = prompts_cfg.get("memory_summarization_user",
+            "Extract the key facts about the user from this conversation:\n\n```\n{content}\n```")
+        
+        # Format user prompt with content
+        user_prompt = user_prompt_template.format(content=content)
 
         messages = [
             {"role": "system", "content": system_prompt},
@@ -125,17 +120,57 @@ List only what the user directly said about themselves. Be brief and literal."""
         summary = chat_completion(messages, temperature=0.1, max_tokens=1000)
         print(f"Summary generated: {len(summary)} characters")
         
-        # Save to long_term with timestamp
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        summary_file = LONG_TERM_DIR / f"memory_{timestamp}.md"
+        # Get the most recent long-term memory file
+        long_term_token_limit = memory_cfg.get("long_term_memory_token_limit", 1000)
+        existing_files = sorted(LONG_TERM_DIR.glob("memory_*.md"))
         
-        with open(summary_file, "w", encoding="utf-8") as f:
-            f.write(f"# Memory Summary\n")
-            f.write(f"**Created:** {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-            f.write(f"---\n\n")
-            f.write(summary)
-        
-        print(f"✓ Created long-term memory: {summary_file.name}")
+        # Determine which file to append to
+        if existing_files:
+            latest_file = existing_files[-1]
+            
+            # Read existing content and check token count
+            with open(latest_file, "r", encoding="utf-8") as f:
+                existing_content = f.read()
+            
+            existing_tokens = estimate_token_count(existing_content)
+            new_summary_tokens = estimate_token_count(summary)
+            
+            # If adding the new summary would exceed the limit, create a new file
+            if existing_tokens + new_summary_tokens >= long_term_token_limit:
+                print(f"Current file has {existing_tokens} tokens, new summary is {new_summary_tokens} tokens")
+                print(f"Total would exceed limit ({long_term_token_limit}), creating new file")
+                timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                summary_file = LONG_TERM_DIR / f"memory_{timestamp}.md"
+                
+                with open(summary_file, "w", encoding="utf-8") as f:
+                    f.write(f"# Memory Summary\n")
+                    f.write(f"**Created:** {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+                    f.write(f"---\n\n")
+                    f.write(summary)
+                
+                print(f"✓ Created new long-term memory: {summary_file.name}")
+            else:
+                # Append to existing file
+                print(f"Appending to existing file: {latest_file.name} ({existing_tokens} tokens)")
+                
+                with open(latest_file, "a", encoding="utf-8") as f:
+                    f.write(f"\n\n---\n")
+                    f.write(f"**Updated:** {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+                    f.write(summary)
+                
+                print(f"✓ Appended to long-term memory: {latest_file.name}")
+        else:
+            # No existing files, create the first one
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            summary_file = LONG_TERM_DIR / f"memory_{timestamp}.md"
+            
+            with open(summary_file, "w", encoding="utf-8") as f:
+                f.write(f"# Memory Summary\n")
+                f.write(f"**Created:** {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+                f.write(f"---\n\n")
+                f.write(summary)
+            
+            print(f"✓ Created first long-term memory: {summary_file.name}")
         
         # Clear temp_memory
         TEMP_MEMORY_FILE.write_text("", encoding="utf-8")
