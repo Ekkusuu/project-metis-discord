@@ -53,22 +53,59 @@ async function initModel() {
   console.log("Initializing node-llama-cpp...");
   console.log("=".repeat(60));
 
-  try {
+    try {
     llama = await getLlama();
     console.log("✓ Llama instance created");
 
     const modelPath = join(projectRoot, config.model.path);
     console.log(`Loading model from: ${modelPath}`);
 
-    model = await llama.loadModel({
+    // Read model runtime options from config (fall back to sensible defaults)
+    const modelOpts = config.model || {};
+    const loadOptions = {
       modelPath: modelPath,
-    });
+      // Keep the original keys as-is; node-llama-cpp will accept known keys and ignore unknown ones
+      nGpuLayers: modelOpts.n_gpu_layers ?? modelOpts.nGpuLayers ?? -1,
+      nThreads: modelOpts.n_threads ?? modelOpts.nThreads ?? undefined,
+      useMlock: modelOpts.use_mlock ?? modelOpts.useMlock ?? true,
+      useMmap: modelOpts.use_mmap ?? modelOpts.useMmap ?? false,
+      useFlashAttn: modelOpts.use_flash_attn ?? modelOpts.useFlashAttn ?? true,
+    };
+
+    // Remove undefined values to avoid passing them unnecessarily
+    Object.keys(loadOptions).forEach((k) => loadOptions[k] === undefined && delete loadOptions[k]);
+
+    console.log("Model load options:", loadOptions);
+
+    model = await llama.loadModel(loadOptions);
     console.log("✓ Model loaded successfully");
 
+    const contextSize = config.model.n_ctx || 8192;
     context = await model.createContext({
-      contextSize: config.model.n_ctx || 8192,
+      contextSize: contextSize,
     });
-    console.log(`✓ Context created (size: ${config.model.n_ctx || 8192})`);
+    console.log(`✓ Context created (size: ${contextSize})`);
+
+    // Warmup: run a short, lightweight generation to JIT/cache runtime paths and reduce first-request latency
+    try {
+      const warmupSequence = context.getSequence();
+      const warmupChat = new LlamaChat({
+        contextSequence: warmupSequence,
+        chatWrapper: new ChatMLChatWrapper(),
+      });
+
+      const warmupHistory = [
+        { type: "user", text: "Hello" },
+      ];
+
+      console.log("Running model warmup generation...");
+      // Use small maxTokens and conservative sampling to keep this fast
+      await warmupChat.generateResponse(warmupHistory, { maxTokens: 6, temperature: 0.1 });
+      warmupSequence.dispose();
+      console.log("✓ Warmup complete");
+    } catch (warmupErr) {
+      console.warn("Warmup failed (non-fatal):", warmupErr?.message || warmupErr);
+    }
 
     console.log("=".repeat(60) + "\n");
     return true;
