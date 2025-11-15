@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import List, Dict
 import datetime
 from backend.llama_engine import chat_completion, get_config
-from backend.token_utils import estimate_token_count
+from backend.token_utils import count_tokens
 
 # Memory paths
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -60,9 +60,9 @@ def get_temp_memory_content() -> str:
 
 
 def get_temp_memory_token_count() -> int:
-    """Get the approximate token count of temp_memory."""
+    """Get the accurate token count of temp_memory."""
     content = get_temp_memory_content()
-    return estimate_token_count(content)
+    return count_tokens(content)
 
 
 def check_and_summarize_temp_memory() -> None:
@@ -170,8 +170,8 @@ def summarize_and_archive_temp_memory() -> None:
             with open(latest_file, "r", encoding="utf-8") as f:
                 existing_content = f.read()
             
-            existing_tokens = estimate_token_count(existing_content)
-            new_summary_tokens = estimate_token_count(formatted_summary)
+            existing_tokens = count_tokens(existing_content)
+            new_summary_tokens = count_tokens(formatted_summary)
             
             # If adding the new summary would exceed the limit, create a new file
             if existing_tokens + new_summary_tokens >= long_term_token_limit:

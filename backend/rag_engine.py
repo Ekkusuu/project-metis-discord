@@ -282,19 +282,41 @@ def rerank_contexts(query: str, contexts: List[Dict[str, Any]]) -> List[Dict[str
 
 
 def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> List[str]:
-    """Split text into overlapping chunks."""
-    chunks = []
-    start = 0
-    text_len = len(text)
-    
-    while start < text_len:
-        end = start + chunk_size
-        chunk = text[start:end]
-        if chunk.strip():
-            chunks.append(chunk)
-        start += chunk_size - overlap
-    
-    return chunks
+    """Split text into overlapping chunks by token count."""
+    try:
+        from backend.token_utils import count_tokens, encode_text, decode_tokens
+        
+        chunks = []
+        tokens = encode_text(text)
+        total_tokens = len(tokens)
+        
+        start = 0
+        while start < total_tokens:
+            end = min(start + chunk_size, total_tokens)
+            chunk_tokens = tokens[start:end]
+            chunk_text = decode_tokens(chunk_tokens)
+            
+            if chunk_text.strip():
+                chunks.append(chunk_text)
+            
+            start += chunk_size - overlap
+        
+        return chunks
+    except Exception as e:
+        print(f"Error tokenizing text, falling back to character-based chunking: {e}")
+        # Fallback to character-based chunking
+        chunks = []
+        start = 0
+        text_len = len(text)
+        
+        while start < text_len:
+            end = start + chunk_size
+            chunk = text[start:end]
+            if chunk.strip():
+                chunks.append(chunk)
+            start += chunk_size - overlap
+        
+        return chunks
 
 
 def index_folder(folder_path: str | Path, clear_existing: bool = False) -> int:
