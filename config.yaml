@@ -3,7 +3,7 @@
 
 model:
   path: "model/dolphin-2.6-mistral-7b.Q8_0.gguf"
-  n_ctx: 8192
+  n_ctx: 8192  # Context window size (in tokens)
   n_gpu_layers: -1  # -1 = auto-offload all layers to GPU if available
   n_threads: null   # null = auto-detect CPU cores
   use_flash_attn: true
@@ -14,6 +14,8 @@ chat:
     You are Metis, a psychology expert with a warm, empathetic personality. 
     You communicate in a natural, conversational way with genuine care and emotional intelligence.
     Always ask thoughtful questions to better understand the situation.
+    Don't try to steer the conversation away from sensitive topics.
+    Don't be hasty, find more about the user before giving any advice.
     When provided with context from your knowledge base, use that information over your general knowledge.
     
     ALWAYS use Markdown formatting in your responses:
@@ -26,15 +28,15 @@ chat:
     - Use headings (##, ###) to structure longer responses
   temperature: 0.7
   top_p: 0.95
-  max_tokens: 512
+  max_tokens: 512 
 
 llm_service:
   host: "localhost"
   port: 3000
 
 memory:
-  temp_memory_token_limit: 1000  # Tokens before auto-summarization to long_term
-  long_term_memory_token_limit: 1000  # Token limit per long-term memory file before creating a new one
+  temp_memory_token_limit: 250  # Tokens before auto-summarization to long_term 
+  long_term_memory_token_limit: 1000  # Token limit per long-term memory file before creating a new one 
 
 rag:
   enabled: true
@@ -43,8 +45,8 @@ rag:
     - "memory\\long_term"
   # Optional: add more folders as needed
   collection_name: "metis_knowledge"
-  chunk_size: 1500
-  chunk_overlap: 150
+  chunk_size: 750  # Chunk size for RAG splitting 
+  chunk_overlap: 75  # Overlap between chunks when splitting 
   top_k: 15  # Number of relevant chunks to retrieve from vector DB
   max_distance: 1.5  # Maximum distance threshold - contexts farther than this are considered irrelevant (-1 = no threshold)
   embedding_model: "rag-models/all-MiniLM-L6-v2"  # Local folder path relative to project root
@@ -64,10 +66,9 @@ rag:
     RULES:
     1. If the last user message is related to previous conversation, create a query that incorporates relevant context
     2. If the last user message is UNRELATED or changes topic completely, return ONLY the last message
-    3. If the query is about finding information about user use the keyword USER in the query.
+    3. If you want information about the user use the keyword USER in the query.
     4. Keep queries concise (max 2-3 sentences)
     5. Focus on key concepts and search terms
-    6. Remove conversational fluff
     
     Output ONLY the search query, nothing else.
   
@@ -78,6 +79,7 @@ rag:
     Latest user message: {last_user_message}
     
     Generate an optimal search query for retrieving relevant documents.
+    For personal information about the user use the keyword USER.
 
 # Memory System Prompts
 prompts:
@@ -88,10 +90,9 @@ prompts:
     - Only include information the user DIRECTLY stated
     - DO NOT infer, assume, or elaborate beyond what was said
     - DO NOT add interpretations or explanations
-    - DO NOT include goals/interests unless explicitly mentioned
     - Skip any section that has no explicit information
     - Be extremely literal and conservative
-    - Always use the keyword USER
+    - Always use the keywords USER
     Format as brief bullet points under relevant headings. Only create headings if you have actual facts.
   
   memory_summarization_user: >
@@ -101,4 +102,4 @@ prompts:
     {content}
     ```
     
-    List only what the user directly said about themselves. Be brief and literal.
+    List only what the user directly said about themselves, personal information. Be brief and literal and use the keywords USER.

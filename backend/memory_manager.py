@@ -81,6 +81,41 @@ def check_and_summarize_temp_memory() -> None:
         summarize_and_archive_temp_memory()
 
 
+def format_summary_with_prefix(summary: str) -> str:
+    """
+    Add 'user personal information: ' prefix to each bullet point in the summary.
+    
+    Args:
+        summary: Raw summary text from LLM
+    
+    Returns:
+        Formatted summary with prefixes added
+    """
+    lines = summary.split('\n')
+    formatted_lines = []
+    
+    for line in lines:
+        stripped = line.strip()
+        # Check if line starts with a bullet point (-, *, •)
+        if stripped.startswith('- ') or stripped.startswith('* ') or stripped.startswith('• '):
+            # Get the bullet character and the rest of the line
+            bullet_char = stripped[0]
+            rest_of_line = stripped[2:].strip()
+            
+            # Check if it already has the prefix (avoid double-adding)
+            if not rest_of_line.lower().startswith('user personal information:'):
+                # Add the prefix
+                indentation = len(line) - len(line.lstrip())
+                formatted_lines.append(' ' * indentation + f"{bullet_char} user personal information: {rest_of_line}")
+            else:
+                formatted_lines.append(line)
+        else:
+            # Keep non-bullet lines as-is
+            formatted_lines.append(line)
+    
+    return '\n'.join(formatted_lines)
+
+
 def summarize_and_archive_temp_memory() -> None:
     """
     Use AI to summarize temp_memory content and append to active long_term file.
@@ -120,6 +155,9 @@ def summarize_and_archive_temp_memory() -> None:
         summary = chat_completion(messages, temperature=0.1, max_tokens=1000)
         print(f"Summary generated: {len(summary)} characters")
         
+        # Format summary with user personal information prefix
+        formatted_summary = format_summary_with_prefix(summary)
+        
         # Get the most recent long-term memory file
         long_term_token_limit = memory_cfg.get("long_term_memory_token_limit", 1000)
         existing_files = sorted(LONG_TERM_DIR.glob("memory_*.md"))
@@ -133,7 +171,7 @@ def summarize_and_archive_temp_memory() -> None:
                 existing_content = f.read()
             
             existing_tokens = estimate_token_count(existing_content)
-            new_summary_tokens = estimate_token_count(summary)
+            new_summary_tokens = estimate_token_count(formatted_summary)
             
             # If adding the new summary would exceed the limit, create a new file
             if existing_tokens + new_summary_tokens >= long_term_token_limit:
@@ -146,7 +184,7 @@ def summarize_and_archive_temp_memory() -> None:
                     f.write(f"# Memory Summary\n")
                     f.write(f"**Created:** {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
                     f.write(f"---\n\n")
-                    f.write(summary)
+                    f.write(formatted_summary)
                 
                 print(f"✓ Created new long-term memory: {summary_file.name}")
             else:
@@ -156,7 +194,7 @@ def summarize_and_archive_temp_memory() -> None:
                 with open(latest_file, "a", encoding="utf-8") as f:
                     f.write(f"\n\n---\n")
                     f.write(f"**Updated:** {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-                    f.write(summary)
+                    f.write(formatted_summary)
                 
                 print(f"✓ Appended to long-term memory: {latest_file.name}")
         else:
@@ -168,7 +206,7 @@ def summarize_and_archive_temp_memory() -> None:
                 f.write(f"# Memory Summary\n")
                 f.write(f"**Created:** {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
                 f.write(f"---\n\n")
-                f.write(summary)
+                f.write(formatted_summary)
             
             print(f"✓ Created first long-term memory: {summary_file.name}")
         
