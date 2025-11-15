@@ -138,8 +138,11 @@ def get_collection() -> chromadb.Collection:
     class LocalEmbeddingFunction:
         """Custom embedding function using local SentenceTransformer model."""
         def __init__(self, model_path: Path):
-            self.model = SentenceTransformer(str(model_path), device='cpu')
+            import torch
+            device = 'cuda' if torch.cuda.is_available() else 'cpu'
+            self.model = SentenceTransformer(str(model_path), device=device)
             self._model_path = model_path
+            print(f"✓ Embedding model loaded on: {device}")
         
         def __call__(self, input: List[str]) -> List[List[float]]:
             """Embed a batch of texts."""
@@ -210,10 +213,12 @@ def get_reranker_model():
     
     try:
         from sentence_transformers import CrossEncoder
+        import torch
         
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
         print(f"Loading reranker model from: {model_path}")
-        _reranker_model = CrossEncoder(str(model_path), device='cpu')
-        print("✓ Reranker model loaded successfully")
+        _reranker_model = CrossEncoder(str(model_path), device=device)
+        print(f"✓ Reranker model loaded successfully on: {device}")
         return _reranker_model
     except ImportError:
         print("Warning: sentence-transformers not installed. Reranking disabled.")
