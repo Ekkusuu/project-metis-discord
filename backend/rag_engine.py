@@ -281,7 +281,7 @@ def rerank_contexts(query: str, contexts: List[Dict[str, Any]]) -> List[Dict[str
         return contexts
 
 
-def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> List[str]:
+def chunk_text(text: str, chunk_size: int, overlap: int) -> List[str]:
     """Split text into overlapping chunks by token count."""
     try:
         from backend.token_utils import count_tokens, encode_text, decode_tokens
@@ -328,8 +328,8 @@ def index_folder(folder_path: str | Path, clear_existing: bool = False) -> int:
     """
     config = get_config()
     rag_cfg = config.get("rag", {})
-    chunk_size = rag_cfg.get("chunk_size", 500)
-    chunk_overlap = rag_cfg.get("chunk_overlap", 50)
+    chunk_size = rag_cfg.get("chunk_size", 750)
+    chunk_overlap = rag_cfg.get("chunk_overlap", 75)
 
     collection = get_collection()
     
@@ -493,6 +493,17 @@ def generate_rag_query(messages: List[Dict[str, str]], last_user_message: str) -
     Returns:
         A search query string optimized for RAG retrieval
     """
+    def strip_thinking_tags(text: str) -> str:
+        """Remove <think> tags and their content from reasoning model output."""
+        import re
+        # Remove complete <think>...</think> blocks (handles multiline)
+        text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL | re.IGNORECASE)
+        # Remove everything before </think> if only closing tag is present
+        text = re.sub(r'^.*?</think>\s*', '', text, flags=re.DOTALL | re.IGNORECASE)
+        # Remove any remaining stray tags
+        text = re.sub(r'</?think>', '', text, flags=re.IGNORECASE)
+        return text.strip()
+    
     config = get_config()
     rag_cfg = config.get("rag", {})
     query_context_messages = rag_cfg.get("query_context_messages", 0)
@@ -535,7 +546,10 @@ def generate_rag_query(messages: List[Dict[str, str]], last_user_message: str) -
         ]
         
         # Generate query with low temperature for consistency
-        generated_query = chat_completion(llm_messages, temperature=0.2, max_tokens=150)
+        generated_query = chat_completion(llm_messages, temperature=0.6, max_tokens=1500)
+        
+        # Strip thinking tags from reasoning models
+        generated_query = strip_thinking_tags(generated_query)
         
         # Clean up the query
         generated_query = generated_query.strip().strip('"').strip("'")

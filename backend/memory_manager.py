@@ -84,13 +84,25 @@ def check_and_summarize_temp_memory() -> None:
 def format_summary_with_prefix(summary: str) -> str:
     """
     Add 'user personal information: ' prefix to each bullet point in the summary.
+    Also strips thinking tags from reasoning models.
     
     Args:
         summary: Raw summary text from LLM
     
     Returns:
-        Formatted summary with prefixes added
+        Formatted summary with prefixes added and thinking tags removed
     """
+    import re
+    
+    # Strip thinking tags first
+    # Remove complete <think>...</think> blocks (handles multiline)
+    summary = re.sub(r'<think>.*?</think>', '', summary, flags=re.DOTALL | re.IGNORECASE)
+    # Remove everything before </think> if only closing tag is present
+    summary = re.sub(r'^.*?</think>\s*', '', summary, flags=re.DOTALL | re.IGNORECASE)
+    # Remove any remaining stray tags
+    summary = re.sub(r'</?think>', '', summary, flags=re.IGNORECASE)
+    summary = summary.strip()
+    
     lines = summary.split('\n')
     formatted_lines = []
     

@@ -97,13 +97,20 @@ app.post("/chat/completion", async (req, res) => {
     // Create a new sequence for this request
     sequence = context.getSequence();
     
+    // Check if we should use system prompts (from config or detect from messages)
+    const useSystemPrompt = config.model?.use_system_prompt !== false;
+    
     // Extract system prompt if present
-    let systemPrompt = config.chat.system_prompt;
+    let systemPrompt = null;
     let conversationMessages = messages;
     
-    if (messages.length > 0 && messages[0].role === "system") {
+    if (useSystemPrompt && messages.length > 0 && messages[0].role === "system") {
       systemPrompt = messages[0].content;
       conversationMessages = messages.slice(1);
+    } else if (!useSystemPrompt) {
+      // If not using system prompts, don't filter out system messages
+      // (they should already be converted to user messages by the Python backend)
+      conversationMessages = messages.filter(msg => msg.role !== "system");
     }
     
     // Use LlamaChat for better conversation handling
@@ -136,9 +143,14 @@ app.post("/chat/completion", async (req, res) => {
       }
     }
 
-    // Get the last user message
-    const lastMessage = conversationMessages[conversationMessages.length - 1];
-    if (lastMessage.role !== "user") {
+    // Validate we have messages
+    if (chatHistory.length === 0) {
+      return res.status(400).json({ error: "No valid messages provided" });
+    }
+
+    // Get the last message - should be a user message
+    const lastMsg = chatHistory[chatHistory.length - 1];
+    if (lastMsg.type !== "user") {
       return res.status(400).json({ error: "Last message must be from user" });
     }
 
@@ -189,13 +201,20 @@ app.post("/chat/stream", async (req, res) => {
     // Create a new sequence for this request
     sequence = context.getSequence();
     
+    // Check if we should use system prompts (from config or detect from messages)
+    const useSystemPrompt = config.model?.use_system_prompt !== false;
+    
     // Extract system prompt if present
-    let systemPrompt = config.chat.system_prompt;
+    let systemPrompt = null;
     let conversationMessages = messages;
     
-    if (messages.length > 0 && messages[0].role === "system") {
+    if (useSystemPrompt && messages.length > 0 && messages[0].role === "system") {
       systemPrompt = messages[0].content;
       conversationMessages = messages.slice(1);
+    } else if (!useSystemPrompt) {
+      // If not using system prompts, don't filter out system messages
+      // (they should already be converted to user messages by the Python backend)
+      conversationMessages = messages.filter(msg => msg.role !== "system");
     }
     
     // Use LlamaChat for better conversation handling
@@ -228,9 +247,16 @@ app.post("/chat/stream", async (req, res) => {
       }
     }
 
-    // Get the last user message
-    const lastMessage = conversationMessages[conversationMessages.length - 1];
-    if (lastMessage.role !== "user") {
+    // Validate we have messages
+    if (chatHistory.length === 0) {
+      res.write(JSON.stringify({ error: "No valid messages provided" }) + "\n");
+      if (sequence) sequence.dispose();
+      return res.end();
+    }
+
+    // Get the last message - should be a user message
+    const lastMsg = chatHistory[chatHistory.length - 1];
+    if (lastMsg.type !== "user") {
       res.write(JSON.stringify({ error: "Last message must be from user" }) + "\n");
       if (sequence) sequence.dispose();
       return res.end();
