@@ -551,7 +551,7 @@ def generate_rag_query(messages: List[Dict[str, str]], last_user_message: str) -
         ]
         
         # Generate query with low temperature for consistency
-        generated_query = chat_completion(llm_messages, temperature=0.6, max_tokens=1500)
+        generated_query = chat_completion(llm_messages, temperature=0.2, max_tokens=1500)
         
         # Strip thinking tags from reasoning models
         generated_query = strip_thinking_tags(generated_query)

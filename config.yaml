@@ -2,7 +2,7 @@
 # All settings can be overridden with environment variables (see README)
 
 model:
-  path: "model/qwen2.5-7b-instruct-q8_0-00001-of-00003.gguf"
+  path: "model/openhermes-2.5-mistral-7b.Q8_0.gguf"
   n_ctx: 8192  # Context window size (in tokens)
   n_gpu_layers: -1  # -1 = auto-offload all layers to GPU if available
   n_threads: null   # null = auto-detect CPU cores
@@ -28,7 +28,7 @@ chat:
     - Use headings (##, ###) to structure longer responses
   temperature: 0.7
   top_p: 0.95
-  max_tokens: 512 
+  max_tokens: 1024 
 
 llm_service:
   host: "localhost"
@@ -64,11 +64,11 @@ rag:
     You are a query optimization assistant. Generate a concise search query based on conversation context.
     
     RULES:
-    1. If the last user message is related to previous conversation, create a query that incorporates relevant context
+    1. Create a query that incorporates relevant context
     2. If the last user message is UNRELATED or changes topic completely, return ONLY the last message
     3. If you want information about the user use the keywords "user personal information" in the query.
-    4. Keep queries concise (max 2-3 sentences)
-    5. Focus on key concepts and search terms
+    4. Keep queries concise (max 1-2 sentences)
+    5. Focus on key concepts and search terms and keywords
     
     Output ONLY the search query, nothing else.
   

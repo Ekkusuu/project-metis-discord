@@ -29,19 +29,33 @@ def append_to_temp_memory(messages) -> None:
     if not messages:
         return
     
+    import re
+
+    def _strip_thinking(text: str) -> str:
+        # Remove complete <think>...</think> blocks (multiline)
+        text = re.sub(r'<think>[\s\S]*?<\/think>', '', text, flags=re.IGNORECASE)
+        # If there's a stray closing tag, remove everything before it
+        text = re.sub(r'^[\s\S]*?<\/think>\s*', '', text, flags=re.IGNORECASE)
+        # Remove any remaining stray tags
+        text = re.sub(r'<\/?think>', '', text, flags=re.IGNORECASE)
+        return text.strip()
+
     with open(TEMP_MEMORY_FILE, "a", encoding="utf-8") as f:
         for msg in messages:
             # Handle both dict messages and plain strings
             if isinstance(msg, dict):
                 role = msg.get("role", "user")
                 content = msg.get("content", "")
+                # Strip thinking tags from assistant/user content before saving
+                content = _strip_thinking(str(content))
                 if role == "user":
                     f.write(f"User: {content}\n")
                 elif role == "assistant":
                     f.write(f"AI: {content}\n")
             else:
                 # Plain string (legacy support)
-                f.write(f"User: {msg}\n")
+                clean = _strip_thinking(str(msg))
+                f.write(f"User: {clean}\n")
         f.write("\n")  # Add blank line between conversation chunks
     
     print(f"Appended {len(messages)} message(s) to temp_memory")

@@ -12,6 +12,98 @@ interface Message {
   tokensPerSecond?: number;
 }
 
+// Component: render message text and collapse any <think> sections by default
+function MessageText({ rawText, messageId }: { rawText: string; messageId: string }) {
+  const [expanded, setExpanded] = useState<Record<number, boolean>>({});
+
+  const normalize = (t: string) =>
+    t
+      .replace(/\r\n/g, '\n')
+      .replace(/\r/g, '\n')
+      .replace(/\n{3,}/g, '\n\n')
+      .replace(/(\d+\.)[ \t]*\n+/g, '$1 ')
+      .replace(/\n+(\d+\.)/g, '\n$1')
+      .replace(/\n+[ \t]*([-*])\s/g, '\n$1 ')
+      .replace(/([^\n])\n(?!\n)/g, '$1  \n');
+
+  // Parse think blocks. Support three cases:
+  // - <think>...</think>
+  // - stray </think> (treat preceding text as thinking)
+  // - stray <think> without close (treat rest as thinking)
+  const parseParts = (text: string) => {
+    const parts: Array<{ type: 'text' | 'think'; content: string }> = [];
+
+    // If there's an opening tag without a closing tag, treat remainder as think
+    if (/\<think\>/i.test(text) && !/\<\/think\>/i.test(text)) {
+      const openIdx = text.search(/\<think\>/i);
+      if (openIdx > -1) {
+        const before = text.slice(0, openIdx);
+        const thinkContent = text.slice(openIdx + 7);
+        if (before) parts.push({ type: 'text', content: before });
+        parts.push({ type: 'think', content: thinkContent });
+        return parts;
+      }
+    }
+
+    // Find normal <think>...</think> blocks
+    const re = /<think>([\s\S]*?)<\/think>/i;
+    let remaining = text;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(remaining)) !== null) {
+      const idx = m.index;
+      const before = remaining.slice(0, idx);
+      if (before) parts.push({ type: 'text', content: before });
+      parts.push({ type: 'think', content: m[1] });
+      remaining = remaining.slice(idx + m[0].length);
+    }
+
+    // If there were no normal blocks but there's a stray closing tag, treat up-to-close as think
+    if (parts.length === 0 && /<\/think>/i.test(remaining) && !/\<think\>/i.test(text)) {
+      const closeIdx = remaining.search(/<\/think>/i);
+      if (closeIdx > -1) {
+        const thinkContent = remaining.slice(0, closeIdx);
+        const after = remaining.slice(closeIdx + 8);
+        parts.push({ type: 'think', content: thinkContent });
+        if (after) parts.push({ type: 'text', content: after });
+        return parts;
+      }
+    }
+
+    if (remaining) parts.push({ type: 'text', content: remaining });
+    return parts;
+  };
+
+  const parts = parseParts(rawText);
+
+  const toggle = (i: number) => setExpanded((s) => ({ ...s, [i]: !s[i] }));
+
+  return (
+    <>
+      {parts.map((p, i) =>
+        p.type === 'text' ? (
+          <ReactMarkdown key={`${messageId}-txt-${i}`} rehypePlugins={[rehypeHighlight]}>
+            {normalize(p.content)}
+          </ReactMarkdown>
+        ) : (
+          <div key={`${messageId}-think-${i}`} className="think-block">
+            <button
+              className="think-toggle"
+              onClick={() => toggle(i)}
+              aria-expanded={!!expanded[i]}
+            >
+              {expanded[i] ? 'Hide reasoning' : 'Show reasoning'}
+            </button>
+            {expanded[i] && (
+              <div className="think-content">
+                <ReactMarkdown rehypePlugins={[rehypeHighlight]}>{normalize(p.content)}</ReactMarkdown>
+              </div>
+            )}
+          </div>
+        )
+      )}
+    </>
+  );
+}
 function ChatInterface() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
@@ -458,25 +550,7 @@ function ChatInterface() {
                 // Normal display mode
                 <>
                   <div className="message-text">
-                    <ReactMarkdown 
-                      rehypePlugins={[rehypeHighlight]}
-                    >
-                      {message.text
-                        // Normalize Windows newlines first
-                        .replace(/\r\n/g, '\n')
-                        .replace(/\r/g, '\n')
-                        // Replace 3+ newlines with 2 to avoid tall gaps
-                        .replace(/\n{3,}/g, '\n\n')
-                        // Ensure numbered list marker sticks to following content (e.g., "1. **Title**")
-                        .replace(/(\d+\.)[ \t]*\n+/g, '$1 ')
-                        // Normalize a single newline before list numbers (avoid extra space above items)
-                        .replace(/\n+(\d+\.)/g, '\n$1')
-                        // Normalize a single newline before bullets and remove stray indent spaces
-                        .replace(/\n+[ \t]*([-*])\s/g, '\n$1 ')
-                        // Convert remaining single newlines to hard line breaks without touching paragraph breaks
-                        .replace(/([^\n])\n(?!\n)/g, '$1  \n')
-                      }
-                    </ReactMarkdown>
+                    <MessageText rawText={message.text} messageId={message.id} />
                   </div>
                   {message.sender === 'user' && (
                     <button
