@@ -24,6 +24,28 @@ CHAT_HISTORY_FILE = MEMORY_DIR / "chat_history.json"
 # Ensure memory directory exists
 MEMORY_DIR.mkdir(exist_ok=True)
 
+# Ensure chat history file exists with a sensible default
+if not CHAT_HISTORY_FILE.exists():
+    try:
+        from datetime import datetime as _dt
+        default = {
+            "messages": [
+                {
+                    "id": "1",
+                    "text": "Hello! How can I assist you today?",
+                    "sender": "ai",
+                    "timestamp": _dt.now().isoformat(),
+                    "tokensPerSecond": None,
+                }
+            ],
+            "lastUpdated": _dt.now().isoformat(),
+        }
+        with open(CHAT_HISTORY_FILE, "w", encoding="utf-8") as _f:
+            json.dump(default, _f, indent=2, ensure_ascii=False)
+    except Exception as _e:
+        # Non-fatal: just log the issue and continue
+        print(f"Warning: Failed to create default chat history file: {_e}")
+
 
 class Message(BaseModel):
     id: str

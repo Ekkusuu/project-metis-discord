@@ -18,6 +18,13 @@ LONG_TERM_DIR = MEMORY_DIR / "long_term"
 MEMORY_DIR.mkdir(exist_ok=True)
 LONG_TERM_DIR.mkdir(exist_ok=True)
 
+# Ensure temp memory file exists
+if not TEMP_MEMORY_FILE.exists():
+    try:
+        TEMP_MEMORY_FILE.write_text("", encoding="utf-8")
+    except Exception as _e:
+        print(f"Warning: Failed to create temp memory file: {_e}")
+
 
 def append_to_temp_memory(messages) -> None:
     """
