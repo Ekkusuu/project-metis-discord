@@ -108,6 +108,7 @@ function ChatInterface() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [isTyping, setIsTyping] = useState(false);
+  const [showTypingIndicator, setShowTypingIndicator] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [editingText, setEditingText] = useState('');
@@ -122,10 +123,47 @@ function ChatInterface() {
 
   // Save chat history whenever messages change (but not on initial load)
   useEffect(() => {
-    if (!isLoading && messages.length > 0) {
-      saveChatHistory();
+    // Avoid saving while the AI is actively streaming tokens (isTyping)
+    // Streaming updates mutate `messages` many times per response which causes
+    // repeated POSTs to `/history/save`. Only save when not typing.
+    if (!isLoading && !isTyping && messages.length > 0) {
+      scheduleSave();
     }
-  }, [messages]);
+  }, [messages, isTyping, isLoading]);
+
+  // Also save once when a message has finished streaming. The streaming
+  // handler dispatches a `messageComplete` CustomEvent when finished.
+  useEffect(() => {
+    const handleMessageComplete = () => {
+      // Save safely (fire-and-forget)
+      saveChatHistory();
+    };
+
+    window.addEventListener('messageComplete', handleMessageComplete);
+    return () => window.removeEventListener('messageComplete', handleMessageComplete);
+  }, []);
+
+  // Debounced save helper: prevents rapid consecutive POSTs if state updates
+  // happen in bursts. `scheduleSave` will call `saveChatHistory` after a short
+  // delay unless another save is scheduled.
+  const saveTimeoutRef = useRef<number | null>(null);
+  const scheduleSave = () => {
+    if (saveTimeoutRef.current) {
+      window.clearTimeout(saveTimeoutRef.current);
+    }
+    // Delay slightly to coalesce rapid updates
+    saveTimeoutRef.current = window.setTimeout(() => {
+      saveChatHistory();
+      saveTimeoutRef.current = null;
+    }, 800);
+  };
+
+  // Clear pending timeouts on unmount
+  useEffect(() => {
+    return () => {
+      if (saveTimeoutRef.current) window.clearTimeout(saveTimeoutRef.current);
+    };
+  }, []);
 
   const loadChatHistory = async () => {
     try {
@@ -226,6 +264,7 @@ function ChatInterface() {
     setMessages((prev) => [...prev, userMessage]);
     setInput('');
     setIsTyping(true);
+    setShowTypingIndicator(true);
     
     // Reset textarea height
     if (textareaRef.current) {
@@ -278,10 +317,12 @@ function ChatInterface() {
           try {
             const chunk = JSON.parse(line);
             if (chunk.delta !== undefined && chunk.delta !== '') {
-              // On first token, create the AI message and hide typing indicator
+              // On first token, create the AI message (keep `isTyping` true until
+              // the entire stream completes to avoid autosave during streaming).
               if (!firstTokenReceived) {
                 firstTokenReceived = true;
-                setIsTyping(false);
+                // Hide the three-dot typing indicator as soon as streaming starts
+                setShowTypingIndicator(false);
                 const aiMessage: Message = {
                   id: aiMessageId,
                   text: chunk.delta,
@@ -330,15 +371,15 @@ function ChatInterface() {
         }
       }
 
-      // If no tokens were received, hide typing indicator
-      if (!firstTokenReceived) {
-        setIsTyping(false);
-      }
+      // Stream finished — hide typing indicator and clear typing state.
+      setIsTyping(false);
+      setShowTypingIndicator(false);
 
       // Dispatch event to notify components that message is complete
       window.dispatchEvent(new CustomEvent('messageComplete'));
     } catch (err: any) {
       setIsTyping(false);
+      setShowTypingIndicator(false);
       const errMsg: Message = {
         id: (Date.now() + 2).toString(),
         text: `Error contacting AI backend: ${err?.message || String(err)}`,
@@ -387,6 +428,7 @@ function ChatInterface() {
     setEditingMessageId(null);
     setEditingText('');
     setIsTyping(true);
+    setShowTypingIndicator(true);
 
     // Send the edited message to get a new AI response
     try {
@@ -432,9 +474,12 @@ function ChatInterface() {
           try {
             const chunk = JSON.parse(line);
             if (chunk.delta !== undefined && chunk.delta !== '') {
+              // Create the AI message on first token but keep `isTyping` true
+              // until the entire stream completes to avoid autosave spamming.
               if (!firstTokenReceived) {
                 firstTokenReceived = true;
-                setIsTyping(false);
+                // Hide the three-dot typing indicator when streaming starts
+                setShowTypingIndicator(false);
                 const aiMessage: Message = {
                   id: aiMessageId,
                   text: chunk.delta,
@@ -479,13 +524,14 @@ function ChatInterface() {
         }
       }
 
-      if (!firstTokenReceived) {
-        setIsTyping(false);
-      }
+      // Stream finished — now hide typing indicator.
+      setIsTyping(false);
+      setShowTypingIndicator(false);
 
       window.dispatchEvent(new CustomEvent('messageComplete'));
     } catch (err: any) {
       setIsTyping(false);
+      setShowTypingIndicator(false);
       const errMsg: Message = {
         id: (Date.now() + 2).toString(),
         text: `Error contacting AI backend: ${err?.message || String(err)}`,
@@ -571,7 +617,7 @@ function ChatInterface() {
             </div>
           </div>
         ))}
-        {isTyping && (
+        {showTypingIndicator && (
           <div className="message ai-message">
             <div className="message-content">
               <div className="typing-indicator">

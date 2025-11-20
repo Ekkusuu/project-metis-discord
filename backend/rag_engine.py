@@ -289,23 +289,49 @@ def rerank_contexts(query: str, contexts: List[Dict[str, Any]]) -> List[Dict[str
 def chunk_text(text: str, chunk_size: int, overlap: int) -> List[str]:
     """Split text into overlapping chunks by token count."""
     try:
-        from backend.token_utils import count_tokens, encode_text, decode_tokens
-        
+        from backend.token_utils import count_tokens, encode_text, decode_tokens, get_tokenizer
+
+        # Prefer using the tokenizer's built-in overflowing tokenization if available
+        tokenizer = get_tokenizer()
+        try:
+            # Some fast tokenizers support automatic overflowing split via these kwargs
+            enc = tokenizer(
+                text,
+                truncation=True,
+                max_length=chunk_size,
+                stride=overlap,
+                return_overflowing_tokens=True,
+                add_special_tokens=False,
+            )
+
+            input_ids = enc.get("input_ids")
+            if input_ids and isinstance(input_ids[0], list):
+                chunks = []
+                for ids in input_ids:
+                    chunk_txt = tokenizer.decode(ids, skip_special_tokens=True)
+                    if chunk_txt.strip():
+                        chunks.append(chunk_txt)
+                return chunks
+        except Exception:
+            # If tokenizer doesn't support overflowing or fails, fall back
+            pass
+
+        # Fallback: tokenize in-memory and slice token ids (older approach)
         chunks = []
         tokens = encode_text(text)
         total_tokens = len(tokens)
-        
+
         start = 0
         while start < total_tokens:
             end = min(start + chunk_size, total_tokens)
             chunk_tokens = tokens[start:end]
             chunk_text = decode_tokens(chunk_tokens)
-            
+
             if chunk_text.strip():
                 chunks.append(chunk_text)
-            
+
             start += chunk_size - overlap
-        
+
         return chunks
     except Exception as e:
         print(f"Error tokenizing text, falling back to character-based chunking: {e}")
