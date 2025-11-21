@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 import yaml
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util import Retry
 from pathlib import Path
 from typing import List, Dict, Optional, Iterator, Any
 
@@ -72,6 +74,30 @@ def get_llm_service_url() -> str:
     return f"http://{host}:{port}"
 
 
+# Reuse a single HTTP session for all LLM service requests to improve
+# performance by keeping connections alive and reusing the pool.
+_http_session: Optional[requests.Session] = None
+
+
+def get_http_session() -> requests.Session:
+    global _http_session
+    if _http_session is not None:
+        return _http_session
+
+    session = requests.Session()
+    # Configure a sensible HTTPAdapter with retries and a larger pool
+    retries = Retry(total=3, backoff_factor=0.2, status_forcelist=(502, 503, 504))
+    adapter = HTTPAdapter(pool_connections=100, pool_maxsize=100, max_retries=retries)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+
+    # Keep default headers for keep-alive
+    session.headers.update({"Connection": "keep-alive"})
+
+    _http_session = session
+    return _http_session
+
+
 def get_model() -> bool:
     """
     Check if the LLM service is available.
@@ -79,7 +105,8 @@ def get_model() -> bool:
     """
     try:
         url = f"{get_llm_service_url()}/health"
-        response = requests.get(url, timeout=5)
+        session = get_http_session()
+        response = session.get(url, timeout=5)
         if response.status_code == 200:
             data = response.json()
             return data.get("model_loaded", False)
@@ -107,10 +134,11 @@ def chat_completion(
             "top_p": top_p,
             "max_tokens": max_tokens,
         }
-        
-        response = requests.post(url, json=payload, timeout=120)
+
+        session = get_http_session()
+        response = session.post(url, json=payload, timeout=120)
         response.raise_for_status()
-        
+
         data = response.json()
         content = data["choices"][0]["message"]["content"]
         
@@ -149,12 +177,13 @@ def chat_completion_stream(
             "top_p": top_p,
             "max_tokens": max_tokens,
         }
-        
-        response = requests.post(url, json=payload, stream=True, timeout=120)
+
+        session = get_http_session()
+        response = session.post(url, json=payload, stream=True, timeout=120)
         response.raise_for_status()
-        
+
         # Read NDJSON stream line by line
-        for line in response.iter_lines():
+        for line in response.iter_lines(decode_unicode=True):
             if line:
                 try:
                     import json

@@ -214,9 +214,26 @@ def get_reranker_model():
     try:
         from sentence_transformers import CrossEncoder
         import torch
-        
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        print(f"Loading reranker model from: {model_path}")
+
+        # Allow configuring reranker device in config.yaml under rag.reranker_device
+        # Default to 'cpu' to avoid competing with the LLM model for GPU resources.
+        device_pref = rag_cfg.get("reranker_device", "cpu")
+        if isinstance(device_pref, str):
+            device_pref = device_pref.lower()
+
+        if device_pref == "auto":
+            device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        elif device_pref == "cuda":
+            if torch.cuda.is_available():
+                device = 'cuda'
+            else:
+                print("Requested reranker device 'cuda' not available; falling back to 'cpu'")
+                device = 'cpu'
+        else:
+            # Default or explicit 'cpu'
+            device = 'cpu'
+
+        print(f"Loading reranker model from: {model_path} on device: {device}")
         _reranker_model = CrossEncoder(str(model_path), device=device)
         print(f"✓ Reranker model loaded successfully on: {device}")
         return _reranker_model
