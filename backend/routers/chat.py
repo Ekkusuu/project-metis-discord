@@ -7,7 +7,13 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from backend.llama_engine import chat_completion, chat_completion_stream, get_config
-from backend.rag_engine import retrieve_context, format_context_for_prompt, index_all_folders, generate_rag_query
+from backend.rag_engine import (
+    retrieve_context,
+    format_context_for_prompt,
+    index_all_folders,
+    generate_rag_query,
+    generate_rag_queries,
+)
 from backend.context_manager import trim_messages_to_context
 
 router = APIRouter(prefix="", tags=["chat"])
@@ -116,56 +122,104 @@ def chat_stream(req: ChatRequest):
         if user_messages:
             last_user_query = user_messages[-1].content
             
-            # Generate contextual RAG query using conversation history
+            # Generate contextual RAG queries using conversation history
             messages_for_query = [{"role": m.role, "content": m.content} for m in messages]
-            rag_query = generate_rag_query(messages_for_query, last_user_query)
-            
-            # Retrieve contexts using the generated query
-            contexts = retrieve_context(rag_query)
-            
-            # Filter contexts by thresholds
-            max_distance = rag_cfg.get("max_distance", 1.5)
-            reranker_min_score = rag_cfg.get("reranker_min_score", -1)
-            use_reranker = rag_cfg.get("use_reranker", False)
-            
-            relevant_contexts = []
-            for ctx in contexts:
-                # Check distance threshold (if not disabled with -1)
-                if max_distance != -1 and ctx.get("distance", 0) > max_distance:
-                    continue
-                
-                # Check rerank score threshold (if reranker is enabled and threshold is not disabled with -1)
-                if use_reranker and reranker_min_score != -1:
-                    if ctx.get("rerank_score") is not None and ctx.get("rerank_score") < reranker_min_score:
-                        continue
-                
-                relevant_contexts.append(ctx)
-            
-            # Store results for the frontend to display, including the generated query
+            rag_queries = generate_rag_queries(messages_for_query, last_user_query)
+
+            # Record generated queries so the UI can display them immediately,
+            # even if later no chunks are found for these queries.
             _last_rag_results = {
-                "query": rag_query,  # Include the generated query
-                "original_query": last_user_query,  # Include the original user message
-                "results": [
-                    {
-                        "source_file": ctx["metadata"].get("source_file", "unknown"),
-                        "distance": ctx.get("distance", 0),
-                        "rerank_score": ctx.get("rerank_score"),  # Include rerank score if available
-                        "text_preview": ctx["text"][:200],
-                        "chunk_index": ctx["metadata"].get("chunk_index", 0),
-                        "used": True
-                    }
-                    for ctx in relevant_contexts
-                ] + [
-                    {
-                        "source_file": ctx["metadata"].get("source_file", "unknown"),
-                        "distance": ctx.get("distance", 0),
-                        "rerank_score": ctx.get("rerank_score"),  # Include rerank score if available
-                        "text_preview": ctx["text"][:200],
-                        "chunk_index": ctx["metadata"].get("chunk_index", 0),
-                        "used": False
-                    }
-                    for ctx in contexts if ctx not in relevant_contexts
-                ]
+                "queries": rag_queries,
+                "original_query": last_user_query,
+                "results": []
+            }
+
+            # Run separate retrievals for each generated query and combine results
+            combined_contexts: List[Dict[str, Any]] = []
+            seen = set()
+            # Collect per-query buckets without deduplication (queries are independent)
+            per_query_results: List[Dict[str, Any]] = []
+            for q in rag_queries:
+                try:
+                    results = retrieve_context(q)
+                except Exception:
+                    results = {"accepted": [], "rejected_by_distance": []}
+
+                per_query_results.append({
+                    "query": q,
+                    "accepted": results.get("accepted", []),
+                    "rejected": results.get("rejected_by_distance", []),
+                })
+
+            # Now combine accepted chunks across queries, but dedupe only at this final stage
+            combined_accepted: List[Dict[str, Any]] = []
+            seen = set()
+            for bucket in per_query_results:
+                for ctx in bucket["accepted"]:
+                    md = ctx.get("metadata", {})
+                    src = md.get("source_file")
+                    idx = md.get("chunk_index")
+                    if src is None or idx is None:
+                        key = (None, ctx.get("text", "")[:160])
+                    else:
+                        key = (src, idx)
+
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    combined_accepted.append(ctx)
+
+            # For the UI, also collect unique rejected-by-distance chunks (but keep per-query buckets separately)
+            combined_rejected: List[Dict[str, Any]] = []
+            for bucket in per_query_results:
+                for ctx in bucket["rejected"]:
+                    md = ctx.get("metadata", {})
+                    src = md.get("source_file")
+                    idx = md.get("chunk_index")
+                    if src is None or idx is None:
+                        key = (None, ctx.get("text", "")[:160])
+                    else:
+                        key = (src, idx)
+
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    if "rejection_reason" not in ctx:
+                        ctx["rejection_reason"] = "distance"
+                    combined_rejected.append(ctx)
+
+            # Combined contexts for UI/injection: accepted first, then unique rejected
+            combined_contexts = combined_accepted + combined_rejected
+
+            # Per-query retrieval already applied distance/rerank/min-score filters.
+            # `retrieve_context` returns the final per-query chunks. We simply combine them here.
+            contexts = combined_contexts
+            # Only include accepted chunks (those without a rejection_reason)
+            relevant_contexts = [c for c in contexts if "rejection_reason" not in c]
+            
+            # Store results for the frontend to display, including the generated queries
+            # Build results list: mark items rejected by distance as used=False
+            results_list = []
+            for ctx in combined_contexts:
+                md = ctx.get("metadata", {})
+                is_used = "rejection_reason" not in ctx
+                item = {
+                    "source_file": md.get("source_file", "unknown"),
+                    "distance": ctx.get("distance", 0),
+                    "rerank_score": ctx.get("rerank_score"),
+                    "text_preview": ctx.get("text", "")[:200],
+                    "chunk_index": md.get("chunk_index", 0),
+                    "used": is_used,
+                }
+                if not is_used:
+                    item["rejection_reason"] = ctx.get("rejection_reason")
+                results_list.append(item)
+
+            _last_rag_results = {
+                "queries": rag_queries,
+                "original_query": last_user_query,
+                "per_query_results": per_query_results,
+                "results": results_list,
             }
             
             if relevant_contexts:
@@ -179,10 +233,10 @@ def chat_stream(req: ChatRequest):
                         messages[i] = Message(role="system", content=enhanced_system)
                         break
             else:
-                # No relevant contexts, but still include the query info
+                # No relevant contexts, but still include the generated queries info
                 if not contexts:
                     _last_rag_results = {
-                        "query": rag_query,
+                        "queries": rag_queries,
                         "original_query": last_user_query,
                         "results": []
                     }

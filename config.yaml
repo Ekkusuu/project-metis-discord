@@ -2,7 +2,7 @@
 # All settings can be overridden with environment variables (see README)
 
 model:
-  path: "model/openhermes-2.5-mistral-7b.Q8_0.gguf"
+  path: "model/psychologistv2-8.0B-Q4_0.gguf"
   tokenizer_path: "rag-models/embeddinggemma-300m"
   n_ctx: 8192  # Context window size (in tokens)
   n_gpu_layers: -1  # -1 = auto-offload all layers to GPU if available
@@ -16,11 +16,12 @@ chat:
     You communicate in a natural, conversational way with genuine care and emotional intelligence.
     Always ask thoughtful questions to better understand the situation.
     Don't try to steer the conversation away from sensitive topics.
-    Don't be hasty, find more about the user before giving any advice.
+    Ask questions about the user's feelings, thoughts, and experiences, find more about the user before giving any advice.
     When provided with context from your knowledge base, use that information over your general knowledge.
-    
-    ALWAYS use Markdown formatting in your responses:
-    - Use **bold** for emphasis
+    Keep your responses concise and to the point.
+
+    You can use Markdown formatting in your responses:
+    - Use **bold** for emphasis making important points stand out
     - Use *italics* for subtle emphasis
     - Use `code` for technical terms or commands
     - Use code blocks with ```language for code examples
@@ -48,7 +49,7 @@ rag:
   collection_name: "metis_knowledge"
   chunk_size: 750  # Chunk size for RAG splitting 
   chunk_overlap: 75  # Overlap between chunks when splitting 
-  top_k: 15  # Number of relevant chunks to retrieve from vector DB
+  top_k: 6  # Number of relevant chunks to retrieve from vector DB
   max_distance: 1.5  # Maximum distance threshold - contexts farther than this are considered irrelevant (-1 = no threshold)
   embedding_model: "rag-models/embeddinggemma-300m"  # Local folder path relative to project root
   persist_directory: ".chromadb"
@@ -57,7 +58,7 @@ rag:
   # Reranker settings
   use_reranker: true  # Enable/disable reranking
   reranker_model: "rag-models/bge-reranker-base"  # Local folder path to reranker model
-  reranker_top_k: 5  # Number of top chunks to keep after reranking (must be <= top_k)
+  reranker_top_k: 2  # Number of top chunks to keep after reranking (must be <= top_k)
   reranker_min_score: 0.1  # Minimum rerank score threshold - contexts with lower scores are filtered out (-1 = no threshold)
   
   # RAG Query Generation Prompts
@@ -72,6 +73,9 @@ rag:
     5. Focus on key concepts and search terms and keywords
     
     Output ONLY the search query, nothing else.
+  # When set >1, the query generator will produce multiple queries (one per line)
+  # which will be used to run separate RAG searches and then combined.
+  query_generation_count: 3
   
   query_generation_user_prompt: >
     Previous conversation:
@@ -79,7 +83,11 @@ rag:
     
     Latest user message: {last_user_message}
     
-    Generate an optimal search query for retrieving relevant documents.
+    Generate THREE concise search queries (one per line) for retrieving relevant documents.
+    Write the queries and nothing else.
+    Each query should focus on slightly different facets or keywords related to the context and latest message.
+    The queries should be designed to maximize retrieval of useful information.
+    The queries should be short and focused on keywords.
     For personal information about the user use the keywords "user personal information".
 
 # Memory System Prompts

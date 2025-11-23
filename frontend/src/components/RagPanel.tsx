@@ -15,10 +15,12 @@ interface RagResult {
   text_preview: string;
   chunk_index: number;
   used: boolean;
+  rejection_reason?: string;
 }
 
 interface RagRetrievalData {
   query?: string;
+  queries?: string[];
   original_query?: string;
   results: RagResult[];
 }
@@ -227,17 +229,26 @@ function RagPanel() {
         </div>
       )}
 
-      {ragData.results.length > 0 && (
+      {( (ragData.queries && ragData.queries.length > 0) || ragData.results.length > 0 ) && (
         <div className="rag-results">
           <h3>Last Retrieval</h3>
           
-          {/* Display the generated query if available */}
-          {ragData.query && (
+          {/* Display the generated queries if available */}
+          {ragData.queries && ragData.queries.length > 0 ? (
+            <div className="query-display">
+              <div className="query-label">Generated Queries:</div>
+              <div className="query-text">
+                {ragData.queries.map((q, i) => (
+                  <div key={i} className="query-line">{i + 1}. {q}</div>
+                ))}
+              </div>
+            </div>
+          ) : ragData.query ? (
             <div className="query-display">
               <div className="query-label">Generated Query:</div>
               <div className="query-text">{ragData.query}</div>
             </div>
-          )}
+          ) : null}
           
           <div className="results-list">
             {ragData.results.map((result, idx) => (
@@ -252,6 +263,9 @@ function RagPanel() {
                     <span className="rerank-score">Rerank: {result.rerank_score.toFixed(4)}</span>
                   )}
                   <span>Chunk #{result.chunk_index}</span>
+                  {!result.used && result.rejection_reason && (
+                    <span className="rejection-reason">Rejected: {result.rejection_reason}</span>
+                  )}
                 </div>
                 <div className="result-preview">{result.text_preview}...</div>
               </div>

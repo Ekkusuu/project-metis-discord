@@ -245,7 +245,7 @@ def get_reranker_model():
         return None
 
 
-def rerank_contexts(query: str, contexts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def rerank_contexts(query: str, contexts: List[Dict[str, Any]], top_k: Optional[int] = None) -> List[Dict[str, Any]]:
     """
     Rerank retrieved contexts using the BGE reranker model.
     
@@ -258,7 +258,7 @@ def rerank_contexts(query: str, contexts: List[Dict[str, Any]]) -> List[Dict[str
     """
     config = get_config()
     rag_cfg = config.get("rag", {})
-    
+
     # Check if reranker is enabled
     if not rag_cfg.get("use_reranker", False):
         return contexts
@@ -275,25 +275,28 @@ def rerank_contexts(query: str, contexts: List[Dict[str, Any]]) -> List[Dict[str
     try:
         # Prepare query-document pairs for reranking
         pairs = [[query, ctx['text']] for ctx in contexts]
-        
+
         # Get reranking scores
         rerank_scores = reranker.predict(pairs)
-        
+
         # Add rerank scores to contexts
         for ctx, score in zip(contexts, rerank_scores):
             ctx['rerank_score'] = float(score)
-        
+
         # Sort by rerank score (higher is better)
         reranked_contexts = sorted(contexts, key=lambda x: x.get('rerank_score', 0), reverse=True)
-        
-        # Get top k after reranking
-        reranker_top_k = rag_cfg.get("reranker_top_k", 3)
-        reranked_contexts = reranked_contexts[:reranker_top_k]
-        
+
+        # If caller requested a top_k, use that; otherwise fall back to rag config
+        if top_k is None:
+            top_k = rag_cfg.get("reranker_top_k", None)
+
+        if top_k is not None:
+            reranked_contexts = reranked_contexts[:int(top_k)]
+
         print(f"Reranking: {len(contexts)} → {len(reranked_contexts)} contexts")
         for i, ctx in enumerate(reranked_contexts[:3], 1):
             print(f"  [{i}] Rerank score: {ctx.get('rerank_score', 0):.4f}, Distance: {ctx.get('distance', 0):.4f}")
-        
+
         return reranked_contexts
         
     except Exception as e:
@@ -587,12 +590,12 @@ def generate_rag_query(messages: List[Dict[str, str]], last_user_message: str) -
             last_user_message=last_user_message
         )
         
-        # Use LLM to generate contextual query
+        # Use LLM to generate contextual query (single-query path)
         llm_messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt}
         ]
-        
+
         # Generate query with low temperature for consistency
         generated_query = chat_completion(llm_messages, temperature=0.2, max_tokens=1500)
         
@@ -619,7 +622,82 @@ def generate_rag_query(messages: List[Dict[str, str]], last_user_message: str) -
         return last_user_message
 
 
-def retrieve_context(query: str, top_k: Optional[int] = None) -> List[Dict[str, Any]]:
+def generate_rag_queries(messages: List[Dict[str, str]], last_user_message: str) -> List[str]:
+    """Generate multiple contextual RAG queries (list of strings).
+
+    This function reads `rag.query_generation_count` from config and attempts
+    to generate that many concise queries in a single LLM call. It returns a
+    list of queries (falling back to the original last_user_message if needed).
+    """
+    config = get_config()
+    rag_cfg = config.get("rag", {})
+    req_count = int(rag_cfg.get("query_generation_count", 1))
+
+    # If only one query requested, reuse existing generator
+    if req_count <= 1:
+        return [generate_rag_query(messages, last_user_message)]
+
+    # Build conversation context as before
+    query_context_messages = rag_cfg.get("query_context_messages", 0)
+    if query_context_messages <= 0 or not messages or len(messages) <= 1:
+        # Return repeated simple queries (same last message) if no context
+        return [last_user_message] * req_count
+
+    recent_messages = [
+        msg for msg in messages[-query_context_messages-1:]
+        if msg.get("role") in ["user", "assistant"]
+    ]
+
+    if len(recent_messages) <= 1:
+        return [last_user_message] * req_count
+
+    conversation_context = "\n".join([
+        f"{'User' if msg['role'] == 'user' else 'AI'}: {msg['content']}"
+        for msg in recent_messages[:-1]
+    ])
+
+    try:
+        system_prompt = rag_cfg.get("query_generation_system_prompt", "")
+        user_prompt_template = rag_cfg.get("query_generation_user_prompt", "")
+
+        # Encourage the model to emit exactly N queries, one per line
+        user_prompt = user_prompt_template.format(
+            conversation_context=conversation_context,
+            last_user_message=last_user_message
+        ) + f"\n\nPlease output {req_count} queries, one per line."
+
+        llm_messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ]
+
+        # Use deterministic sampling and a small token budget; queries should be short
+        generated = chat_completion(llm_messages, temperature=0.0, top_p=0.5, max_tokens=128)
+        if not generated:
+            return [last_user_message] * req_count
+
+        # Split into lines and extract up to req_count non-empty lines
+        lines = [line.strip() for line in generated.splitlines() if line.strip()]
+        queries: List[str] = []
+        for ln in lines:
+            # If the model emits numbered lines like '1. ...', strip numbering
+            import re
+            q = re.sub(r'^\s*\d+\s*[-.)]*\s*', '', ln)
+            queries.append(q.strip())
+            if len(queries) >= req_count:
+                break
+
+        # If we didn't get enough, pad with the last user message
+        while len(queries) < req_count:
+            queries.append(last_user_message)
+
+        return queries
+    except Exception as e:
+        print(f"Error generating multiple RAG queries: {e}")
+        return [last_user_message] * req_count
+
+
+def retrieve_context(query: str, top_k: Optional[int] = None) -> Dict[str, List[Dict[str, Any]]]:
     """
     Retrieve relevant context chunks for a query.
     
@@ -632,7 +710,7 @@ def retrieve_context(query: str, top_k: Optional[int] = None) -> List[Dict[str, 
         return []
     
     if top_k is None:
-        top_k = rag_cfg.get("top_k", 3)
+        top_k = int(rag_cfg.get("top_k", 3))
     
     collection = get_collection()
     
@@ -647,46 +725,76 @@ def retrieve_context(query: str, top_k: Optional[int] = None) -> List[Dict[str, 
         return []
     
     try:
+        # Request up to `top_k` from the vector DB
         results = collection.query(
             query_texts=[query],
             n_results=min(top_k, count)  # Don't request more than available
         )
-        
+
         contexts = []
         # Safely extract results with multiple checks
         if not results:
-            return []
-        
+            return {"accepted": [], "rejected_by_distance": []}
+
         documents = results.get("documents", [])
         metadatas = results.get("metadatas", [])
         distances = results.get("distances", [])
-        
+
         # Check if we have documents in the first list
         if not documents or len(documents) == 0 or not documents[0]:
             return []
-        
-        # Iterate through documents
+
+        # Iterate through documents and build initial contexts
         for i, doc in enumerate(documents[0]):
             context = {"text": doc}
-            
+
             # Safely get metadata
             if metadatas and len(metadatas) > 0 and len(metadatas[0]) > i:
                 context["metadata"] = metadatas[0][i]
             else:
                 context["metadata"] = {}
-            
+
             # Safely get distance
             if distances and len(distances) > 0 and len(distances[0]) > i:
                 context["distance"] = distances[0][i]
             else:
                 context["distance"] = 0.0
-            
+
             contexts.append(context)
-        
-        # Apply reranking if enabled
-        contexts = rerank_contexts(query, contexts)
-        
-        return contexts
+
+        # PER-QUERY PIPELINE:
+        # 1) Apply max_distance filter (if configured)
+        max_distance = rag_cfg.get("max_distance", 1.5)
+        if max_distance != -1:
+            rejected_by_distance = [c for c in contexts if c.get("distance", 0) > max_distance]
+            candidates = [c for c in contexts if c.get("distance", 0) <= max_distance]
+        else:
+            rejected_by_distance = []
+            candidates = contexts
+
+        # 2) If reranker enabled, rerank the remaining candidates and keep top `top_k`
+        use_reranker = rag_cfg.get("use_reranker", False)
+        reranker_min_score = rag_cfg.get("reranker_min_score", -1)
+
+        final_chunks: List[Dict[str, Any]] = []
+
+        if use_reranker and candidates:
+            # Rerank and request no more than `top_k` results after reranking
+            ranked = rerank_contexts(query, candidates, top_k=top_k)
+            # After reranking we may additionally filter by min score if configured
+            if reranker_min_score != -1:
+                ranked = [c for c in ranked if c.get("rerank_score") is None or c.get("rerank_score") >= float(reranker_min_score)]
+            # Ensure we keep at most top_k after filtering
+            final_chunks = ranked[:int(top_k)]
+        else:
+            # No reranker: just keep at most top_k distance-filtered chunks
+            final_chunks = candidates[:int(top_k)]
+
+        # Mark rejected items with a reason where appropriate
+        for r in rejected_by_distance:
+            r["rejection_reason"] = "distance"
+
+        return {"accepted": final_chunks, "rejected_by_distance": rejected_by_distance}
     except Exception as e:
         import traceback
         print(f"Error retrieving context: {e}")
