@@ -777,13 +777,22 @@ def retrieve_context(query: str, top_k: Optional[int] = None) -> Dict[str, List[
         reranker_min_score = rag_cfg.get("reranker_min_score", -1)
 
         final_chunks: List[Dict[str, Any]] = []
+        rejected_by_score: List[Dict[str, Any]] = []
 
         if use_reranker and candidates:
             # Rerank and request no more than `top_k` results after reranking
             ranked = rerank_contexts(query, candidates, top_k=top_k)
             # After reranking we may additionally filter by min score if configured
             if reranker_min_score != -1:
-                ranked = [c for c in ranked if c.get("rerank_score") is None or c.get("rerank_score") >= float(reranker_min_score)]
+                kept = []
+                for c in ranked:
+                    score = c.get("rerank_score")
+                    if score is None or float(score) >= float(reranker_min_score):
+                        kept.append(c)
+                    else:
+                        c["rejection_reason"] = "score"
+                        rejected_by_score.append(c)
+                ranked = kept
             # Ensure we keep at most top_k after filtering
             final_chunks = ranked[:int(top_k)]
         else:
@@ -794,7 +803,7 @@ def retrieve_context(query: str, top_k: Optional[int] = None) -> Dict[str, List[
         for r in rejected_by_distance:
             r["rejection_reason"] = "distance"
 
-        return {"accepted": final_chunks, "rejected_by_distance": rejected_by_distance}
+        return {"accepted": final_chunks, "rejected_by_distance": rejected_by_distance, "rejected_by_score": rejected_by_score}
     except Exception as e:
         import traceback
         print(f"Error retrieving context: {e}")

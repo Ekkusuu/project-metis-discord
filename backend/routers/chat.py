@@ -145,10 +145,13 @@ def chat_stream(req: ChatRequest):
                 except Exception:
                     results = {"accepted": [], "rejected_by_distance": []}
 
+                # Combine rejected lists (distance and score) so UI shows both reasons
+                rejected_distance = results.get("rejected_by_distance", []) or []
+                rejected_score = results.get("rejected_by_score", []) or []
                 per_query_results.append({
                     "query": q,
                     "accepted": results.get("accepted", []),
-                    "rejected": results.get("rejected_by_distance", []),
+                    "rejected": rejected_distance + rejected_score,
                 })
 
             # Now combine accepted chunks across queries, but dedupe only at this final stage
@@ -198,9 +201,35 @@ def chat_stream(req: ChatRequest):
             relevant_contexts = [c for c in contexts if "rejection_reason" not in c]
             
             # Store results for the frontend to display, including the generated queries
-            # Build results list: mark items rejected by distance as used=False
+            # Sort and build results list: accepted by rerank_score (highest first),
+            # rejected by distance (lowest first).
+            accepted_list = [c for c in combined_contexts if "rejection_reason" not in c]
+            rejected_list = [c for c in combined_contexts if "rejection_reason" in c]
+
+            # Sort per-query buckets too
+            for bucket in per_query_results:
+                acc = bucket.get("accepted", [])
+                rej = bucket.get("rejected", [])
+                # If rerank scores present, sort accepted by rerank_score desc, else by distance asc
+                if any(x.get("rerank_score") is not None for x in acc):
+                    acc.sort(key=lambda x: float(x.get("rerank_score") or -1e9), reverse=True)
+                else:
+                    acc.sort(key=lambda x: float(x.get("distance", 0)))
+                # Sort rejected by distance asc
+                rej.sort(key=lambda x: float(x.get("distance", 0)))
+                bucket["accepted"] = acc
+                bucket["rejected"] = rej
+
+            # Now sort the combined lists for display
+            if any(x.get("rerank_score") is not None for x in accepted_list):
+                accepted_list.sort(key=lambda x: float(x.get("rerank_score") or -1e9), reverse=True)
+            else:
+                accepted_list.sort(key=lambda x: float(x.get("distance", 0)))
+
+            rejected_list.sort(key=lambda x: float(x.get("distance", 0)))
+
             results_list = []
-            for ctx in combined_contexts:
+            for ctx in accepted_list + rejected_list:
                 md = ctx.get("metadata", {})
                 is_used = "rejection_reason" not in ctx
                 item = {
