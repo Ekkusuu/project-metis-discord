@@ -27,3 +27,11 @@ vite@^7.1.7
 # Notes:
 # - This file is informational and can be used to reproduce/compare frontend dependencies.
 # - Use `install_frontend_deps.bat` to install the packages in `frontend` (it runs `npm ci` if a lockfile exists, otherwise `npm install`).
+
+
+# backend/llm_service dependencies (for the Node LLM service)
+# These are required by `backend/llm_service/server.js` and should be installed in that folder.
+node-llama-cpp@^3.1.1
+express@^4.21.2
+cors@^2.8.5
+js-yaml@^4.1.0
