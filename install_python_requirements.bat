@@ -20,6 +20,12 @@ IF %ERRORLEVEL% NEQ 0 (
 
 echo Installing PyTorch wheels for CUDA 12.6 (torch, torchvision, torchaudio)
 echo This uses the official PyTorch index for cu126 wheels.
+echo Uninstalling any existing torch/torchvision/torchaudio packages (CPU or GPU builds)
+pip uninstall -y torch torchvision torchaudio || (
+    echo No existing torch packages or uninstall failed; continuing...
+)
+
+echo Installing GPU (cu126) PyTorch wheels
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126
 IF %ERRORLEVEL% NEQ 0 (
     echo PyTorch install failed. If you don't have a compatible NVIDIA driver or CUDA, consider installing the CPU-only wheel or check the error message above.
