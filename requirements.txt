@@ -5,3 +5,9 @@ chromadb>=0.4.22
 sentence-transformers>=2.2.2
 transformers>=4.30.0
 requests>=2.31.0
+
+# NOTE: PyTorch is required and must match your CUDA version.
+# This project expects PyTorch built for CUDA 12.6 on machines with an NVIDIA GPU
+# (installing the appropriate wheel ensures GPU acceleration for embedding and reranker models).
+# Do NOT add a plain 'torch' line here because the exact wheel depends on your CUDA toolchain.
+# See `PYTORCH_CUDA_12_6.md` for platform-specific install instructions.
