@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from backend.routers.chat import router as chat_router
 from backend.routers.history import router as history_router
 from backend.routers.memory import router as memory_router
+from backend.routers.discord import router as discord_router
 from backend.llama_engine import get_config
 
 app = FastAPI(title="Project Metis Backend")
@@ -25,6 +26,7 @@ app.add_middleware(
 app.include_router(chat_router)
 app.include_router(history_router)
 app.include_router(memory_router)
+app.include_router(discord_router)
 
 
 @app.get("/", tags=["root"])
@@ -41,7 +43,28 @@ async def health():
 @app.on_event("startup")
 async def startup_event():
     """Run initialization tasks on backend startup."""
+    import asyncio
+    from threading import Thread
+    
     config = get_config()
+    
+    # Start Discord bot in background thread
+    def start_discord_bot():
+        try:
+            from backend.discord_bot import run_bot
+            print("\n" + "="*60)
+            print("Starting Discord Bot...")
+            print("="*60 + "\n")
+            run_bot()
+        except Exception as e:
+            print(f"Failed to start Discord bot: {e}")
+    
+    discord_thread = Thread(target=start_discord_bot, daemon=True)
+    discord_thread.start()
+    
+    # Initialize Discord history (reset and save to temp_memory)
+    from backend.routers.discord import initialize_discord_history
+    initialize_discord_history()
     
     # Check LLM service connectivity
     print("\n" + "="*60)

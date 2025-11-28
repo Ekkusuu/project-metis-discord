@@ -63,28 +63,65 @@ function RagPanel() {
     }
   };
 
+  const connectToRagStream = () => {
+    try {
+      const eventSource = new EventSource(`${API_URL}/rag/stream`);
+
+      eventSource.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.results) {
+            if (Array.isArray(data.results)) {
+              setRagData({
+                query: data.results.query,
+                original_query: data.results.original_query,
+                results: data.results.results || []
+              });
+            } else {
+              setRagData(data.results);
+            }
+          }
+        } catch (err) {
+          console.error('Failed to parse RAG update:', err);
+        }
+      };
+
+      eventSource.onerror = (err) => {
+        console.error('RAG stream error:', err);
+        eventSource.close();
+        // Reconnect after 5 seconds
+        setTimeout(() => {
+          connectToRagStream();
+        }, 5000);
+      };
+
+      return eventSource;
+    } catch (error) {
+      console.error('Failed to connect to RAG stream:', error);
+      return null;
+    }
+  };
+
   useEffect(() => {
     // Initial fetch
     fetchStats();
     fetchRagResults();
 
-    // Listen for RAG retrieval completion (shows embeddings immediately)
-    const handleRagRetrieval = () => {
-      fetchRagResults();
-    };
+    // Connect to real-time RAG stream
+    const ragStream = connectToRagStream();
 
     // Listen for message completion events (updates stats)
     const handleMessageComplete = () => {
       fetchStats();
-      fetchRagResults();
     };
 
-    window.addEventListener('ragRetrievalComplete', handleRagRetrieval);
     window.addEventListener('messageComplete', handleMessageComplete);
     
     return () => {
-      window.removeEventListener('ragRetrievalComplete', handleRagRetrieval);
       window.removeEventListener('messageComplete', handleMessageComplete);
+      if (ragStream) {
+        ragStream.close();
+      }
     };
   }, []);
 

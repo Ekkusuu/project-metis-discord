@@ -10,6 +10,8 @@ interface Message {
   sender: 'user' | 'ai';
   timestamp: Date;
   tokensPerSecond?: number;
+  discord_user?: string;
+  channel_name?: string;
 }
 
 // Component: render message text and collapse any <think> sections by default
@@ -112,62 +114,91 @@ function ChatInterface() {
   const [isLoading, setIsLoading] = useState(true);
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [editingText, setEditingText] = useState('');
+  const [discordConnected, setDiscordConnected] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const eventSourceRef = useRef<EventSource | null>(null);
   const API_URL = (import.meta as any).env?.VITE_API_URL || 'http://localhost:8000';
 
-  // Load chat history on mount
+  // Load chat history on mount and connect to Discord stream
   useEffect(() => {
     loadChatHistory();
-  }, []);
-
-  // Save chat history whenever messages change (but not on initial load)
-  useEffect(() => {
-    // Avoid saving while the AI is actively streaming tokens (isTyping)
-    // Streaming updates mutate `messages` many times per response which causes
-    // repeated POSTs to `/history/save`. Only save when not typing.
-    if (!isLoading && !isTyping && messages.length > 0) {
-      scheduleSave();
-    }
-  }, [messages, isTyping, isLoading]);
-
-  // Also save once when a message has finished streaming. The streaming
-  // handler dispatches a `messageComplete` CustomEvent when finished.
-  useEffect(() => {
-    const handleMessageComplete = () => {
-      // Save safely (fire-and-forget)
-      saveChatHistory();
-    };
-
-    window.addEventListener('messageComplete', handleMessageComplete);
-    return () => window.removeEventListener('messageComplete', handleMessageComplete);
-  }, []);
-
-  // Debounced save helper: prevents rapid consecutive POSTs if state updates
-  // happen in bursts. `scheduleSave` will call `saveChatHistory` after a short
-  // delay unless another save is scheduled.
-  const saveTimeoutRef = useRef<number | null>(null);
-  const scheduleSave = () => {
-    if (saveTimeoutRef.current) {
-      window.clearTimeout(saveTimeoutRef.current);
-    }
-    // Delay slightly to coalesce rapid updates
-    saveTimeoutRef.current = window.setTimeout(() => {
-      saveChatHistory();
-      saveTimeoutRef.current = null;
-    }, 800);
-  };
-
-  // Clear pending timeouts on unmount
-  useEffect(() => {
+    connectToDiscordStream();
+    
     return () => {
-      if (saveTimeoutRef.current) window.clearTimeout(saveTimeoutRef.current);
+      // Cleanup: close EventSource on unmount
+      if (eventSourceRef.current) {
+        eventSourceRef.current.close();
+      }
     };
   }, []);
+
+  // Note: Chat history saving is disabled - messages come from Discord
+  // The Discord bot handles all message storage and retrieval
+
+  const connectToDiscordStream = () => {
+    try {
+      const eventSource = new EventSource(`${API_URL}/discord/stream`);
+      eventSourceRef.current = eventSource;
+
+      eventSource.onmessage = (event) => {
+        try {
+          const message = JSON.parse(event.data);
+          
+          // Only add message if it has content (prevent empty bubbles)
+          if (!message.text || message.text.trim() === '') {
+            console.log('Skipping empty message:', message);
+            return;
+          }
+          
+          // Add Discord message to the messages state
+          setMessages((prev) => {
+            // Check if message already exists (by id)
+            if (prev.some(m => m.id === message.id)) {
+              return prev;
+            }
+            return [...prev, {
+              id: message.id,
+              text: message.text,
+              sender: message.sender,
+              timestamp: new Date(message.timestamp),
+              tokensPerSecond: message.tokensPerSecond
+            }];
+          });
+          
+          setDiscordConnected(true);
+        } catch (err) {
+          console.error('Failed to parse Discord message:', err);
+        }
+      };
+
+      eventSource.onerror = (err) => {
+        console.error('Discord stream error:', err);
+        setDiscordConnected(false);
+        
+        // Attempt to reconnect after 5 seconds
+        setTimeout(() => {
+          if (eventSourceRef.current) {
+            eventSourceRef.current.close();
+          }
+          connectToDiscordStream();
+        }, 5000);
+      };
+
+      eventSource.onopen = () => {
+        console.log('Connected to Discord message stream');
+        setDiscordConnected(true);
+      };
+    } catch (error) {
+      console.error('Failed to connect to Discord stream:', error);
+      setDiscordConnected(false);
+    }
+  };
 
   const loadChatHistory = async () => {
     try {
-      const response = await fetch(`${API_URL}/history/load`);
+      // Load existing Discord messages instead of chat history
+      const response = await fetch(`${API_URL}/discord/messages`);
       if (response.ok) {
         const data = await response.json();
         setMessages(data.messages.map((msg: any) => ({
@@ -176,58 +207,29 @@ function ChatInterface() {
         })));
       }
     } catch (error) {
-      console.error('Failed to load chat history:', error);
-      // Fallback to default message
-      setMessages([
-        {
-          id: '1',
-          text: 'Hello! How can I assist you today?',
-          sender: 'ai',
-          timestamp: new Date(),
-        },
-      ]);
+      console.error('Failed to load Discord messages:', error);
+      // Start with empty message list - Discord messages will come via stream
+      setMessages([]);
     } finally {
       setIsLoading(false);
     }
   };
 
-  const saveChatHistory = async () => {
-    try {
-      await fetch(`${API_URL}/history/save`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          messages: messages.map((msg) => ({
-            ...msg,
-            timestamp: msg.timestamp.toISOString(),
-          })),
-          lastUpdated: new Date().toISOString(),
-        }),
-      });
-    } catch (error) {
-      console.error('Failed to save chat history:', error);
-    }
-  };
-
-  const handleResetChat = async () => {
-    if (!confirm('Are you sure you want to reset the chat? This will delete all messages.')) {
+  const handleClearMessages = async () => {
+    if (!confirm('Clear all Discord messages from the UI? (This will not affect Discord conversation)')) {
       return;
     }
 
     try {
-      const response = await fetch(`${API_URL}/history/reset`, {
+      const response = await fetch(`${API_URL}/discord/clear`, {
         method: 'POST',
       });
       
       if (response.ok) {
-        const data = await response.json();
-        setMessages(data.messages.map((msg: any) => ({
-          ...msg,
-          timestamp: new Date(msg.timestamp),
-        })));
+        setMessages([]);
       }
     } catch (error) {
-      console.error('Failed to reset chat:', error);
+      console.error('Failed to clear messages:', error);
     }
   };
 
@@ -251,295 +253,13 @@ function ChatInterface() {
     autoResizeTextarea();
   }, [input]);
 
+  // Input is disabled - all messages come from Discord
   const handleSend = async () => {
-    if (!input.trim()) return;
-
-    const userMessage: Message = {
-      id: Date.now().toString(),
-      text: input,
-      sender: 'user',
-      timestamp: new Date(),
-    };
-
-    setMessages((prev) => [...prev, userMessage]);
-    setInput('');
-    setIsTyping(true);
-    setShowTypingIndicator(true);
-    
-    // Reset textarea height
-    if (textareaRef.current) {
-      textareaRef.current.style.height = 'auto';
-    }
-
-    // Streaming API call
-    try {
-      const history = [
-        ...messages.map((m) => ({
-          role: m.sender === 'user' ? 'user' : 'assistant',
-          content: m.text,
-        })),
-        { role: 'user', content: userMessage.text },
-      ];
-
-      const resp = await fetch(`${API_URL}/chat/stream`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages: history, max_tokens: 512 }),
-      });
-
-      if (!resp.ok) {
-        const detail = await resp.text();
-        throw new Error(`Backend error ${resp.status}: ${detail}`);
-      }
-
-      // Dispatch event to show RAG results immediately (before response completes)
-      window.dispatchEvent(new CustomEvent('ragRetrievalComplete'));
-
-      // Read NDJSON stream
-      const reader = resp.body?.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-      let firstTokenReceived = false;
-      const aiMessageId = (Date.now() + 1).toString();
-
-      if (!reader) throw new Error('No response body');
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || ''; // Keep incomplete line in buffer
-
-        for (const line of lines) {
-          if (!line.trim()) continue;
-          try {
-            const chunk = JSON.parse(line);
-            if (chunk.delta !== undefined && chunk.delta !== '') {
-              // On first token, create the AI message (keep `isTyping` true until
-              // the entire stream completes to avoid autosave during streaming).
-              if (!firstTokenReceived) {
-                firstTokenReceived = true;
-                // Hide the three-dot typing indicator as soon as streaming starts
-                setShowTypingIndicator(false);
-                const aiMessage: Message = {
-                  id: aiMessageId,
-                  text: chunk.delta,
-                  sender: 'ai',
-                  timestamp: new Date(),
-                };
-                setMessages((prev) => [...prev, aiMessage]);
-              } else {
-                // Append subsequent tokens to the AI message
-                setMessages((prev) =>
-                  prev.map((msg) =>
-                    msg.id === aiMessageId
-                      ? { ...msg, text: msg.text + chunk.delta }
-                      : msg
-                  )
-                );
-              }
-            }
-            // Check for final chunk with performance stats
-            if (chunk.done && chunk.tokens_per_second) {
-              setMessages((prev) =>
-                prev.map((msg) =>
-                  msg.id === aiMessageId
-                    ? { ...msg, tokensPerSecond: chunk.tokens_per_second }
-                    : msg
-                )
-              );
-              
-              // Handle context trimming - remove messages that were trimmed by backend
-              if (chunk.trimmed_messages && Array.isArray(chunk.trimmed_messages)) {
-                const trimmedCount = history.length - chunk.trimmed_messages.length;
-                if (trimmedCount > 0) {
-                  console.log(`Context limit reached: removed ${trimmedCount} oldest message(s)`);
-                  // Remove oldest messages from frontend state (keep system + trimmed messages + new AI response)
-                  setMessages((prev) => {
-                    // Find how many messages to remove from the start (excluding initial AI greeting)
-                    const messagesToKeep = prev.length - trimmedCount;
-                    return prev.slice(-messagesToKeep);
-                  });
-                }
-              }
-            }
-          } catch (parseErr) {
-            console.warn('Failed to parse chunk:', line, parseErr);
-          }
-        }
-      }
-
-      // Stream finished — hide typing indicator and clear typing state.
-      setIsTyping(false);
-      setShowTypingIndicator(false);
-
-      // Dispatch event to notify components that message is complete
-      window.dispatchEvent(new CustomEvent('messageComplete'));
-    } catch (err: any) {
-      setIsTyping(false);
-      setShowTypingIndicator(false);
-      const errMsg: Message = {
-        id: (Date.now() + 2).toString(),
-        text: `Error contacting AI backend: ${err?.message || String(err)}`,
-        sender: 'ai',
-        timestamp: new Date(),
-      };
-      setMessages((prev) => [...prev, errMsg]);
-    }
+    // Disabled - messages come from Discord only
   };
 
   const handleKeyPress = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      handleSend();
-    }
-  };
-
-  const handleEditMessage = (messageId: string, currentText: string) => {
-    setEditingMessageId(messageId);
-    setEditingText(currentText);
-  };
-
-  const handleCancelEdit = () => {
-    setEditingMessageId(null);
-    setEditingText('');
-  };
-
-  const handleSaveEdit = async (messageId: string) => {
-    if (!editingText.trim()) return;
-
-    // Find the index of the message being edited
-    const messageIndex = messages.findIndex((m) => m.id === messageId);
-    if (messageIndex === -1) return;
-
-    // Delete all messages after this one
-    const updatedMessages = messages.slice(0, messageIndex);
-    
-    // Update the edited message
-    const editedMessage: Message = {
-      ...messages[messageIndex],
-      text: editingText,
-      timestamp: new Date(),
-    };
-
-    setMessages([...updatedMessages, editedMessage]);
-    setEditingMessageId(null);
-    setEditingText('');
-    setIsTyping(true);
-    setShowTypingIndicator(true);
-
-    // Send the edited message to get a new AI response
-    try {
-      const history = [
-        ...updatedMessages.map((m) => ({
-          role: m.sender === 'user' ? 'user' : 'assistant',
-          content: m.text,
-        })),
-        { role: 'user', content: editingText },
-      ];
-
-      const resp = await fetch(`${API_URL}/chat/stream`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages: history, max_tokens: 512 }),
-      });
-
-      if (!resp.ok) {
-        const detail = await resp.text();
-        throw new Error(`Backend error ${resp.status}: ${detail}`);
-      }
-
-      window.dispatchEvent(new CustomEvent('ragRetrievalComplete'));
-
-      const reader = resp.body?.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-      let firstTokenReceived = false;
-      const aiMessageId = (Date.now() + 1).toString();
-
-      if (!reader) throw new Error('No response body');
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
-
-        for (const line of lines) {
-          if (!line.trim()) continue;
-          try {
-            const chunk = JSON.parse(line);
-            if (chunk.delta !== undefined && chunk.delta !== '') {
-              // Create the AI message on first token but keep `isTyping` true
-              // until the entire stream completes to avoid autosave spamming.
-              if (!firstTokenReceived) {
-                firstTokenReceived = true;
-                // Hide the three-dot typing indicator when streaming starts
-                setShowTypingIndicator(false);
-                const aiMessage: Message = {
-                  id: aiMessageId,
-                  text: chunk.delta,
-                  sender: 'ai',
-                  timestamp: new Date(),
-                };
-                setMessages((prev) => [...prev, aiMessage]);
-              } else {
-                setMessages((prev) =>
-                  prev.map((msg) =>
-                    msg.id === aiMessageId
-                      ? { ...msg, text: msg.text + chunk.delta }
-                      : msg
-                  )
-                );
-              }
-            }
-            if (chunk.done && chunk.tokens_per_second) {
-              setMessages((prev) =>
-                prev.map((msg) =>
-                  msg.id === aiMessageId
-                    ? { ...msg, tokensPerSecond: chunk.tokens_per_second }
-                    : msg
-                )
-              );
-              
-              // Handle context trimming
-              if (chunk.trimmed_messages && Array.isArray(chunk.trimmed_messages)) {
-                const trimmedCount = history.length - chunk.trimmed_messages.length;
-                if (trimmedCount > 0) {
-                  console.log(`Context limit reached: removed ${trimmedCount} oldest message(s)`);
-                  setMessages((prev) => {
-                    const messagesToKeep = prev.length - trimmedCount;
-                    return prev.slice(-messagesToKeep);
-                  });
-                }
-              }
-            }
-          } catch (parseErr) {
-            console.warn('Failed to parse chunk:', line, parseErr);
-          }
-        }
-      }
-
-      // Stream finished — now hide typing indicator.
-      setIsTyping(false);
-      setShowTypingIndicator(false);
-
-      window.dispatchEvent(new CustomEvent('messageComplete'));
-    } catch (err: any) {
-      setIsTyping(false);
-      setShowTypingIndicator(false);
-      const errMsg: Message = {
-        id: (Date.now() + 2).toString(),
-        text: `Error contacting AI backend: ${err?.message || String(err)}`,
-        sender: 'ai',
-        timestamp: new Date(),
-      };
-      setMessages((prev) => [...prev, errMsg]);
-    }
+    // Disabled - input comes from Discord only
   };
 
   return (
@@ -547,11 +267,13 @@ function ChatInterface() {
       <div className="chat-header">
         <div className="header-content">
           <div className="header-text">
-            <h1>Metis AI</h1>
-            <p className="subtitle">Your AI Assistant</p>
+            <h1>Metis AI - Discord Bot</h1>
+            <p className="subtitle">
+              {discordConnected ? '🟢 Connected to Discord' : '🔴 Connecting...'}
+            </p>
           </div>
-          <button onClick={handleResetChat} className="reset-button" title="Reset chat">
-            🔄 Reset
+          <button onClick={handleClearMessages} className="reset-button" title="Clear messages">
+            🗑️ Clear
           </button>
         </div>
       </div>
@@ -574,45 +296,13 @@ function ChatInterface() {
             className={`message ${message.sender === 'user' ? 'user-message' : 'ai-message'}`}
           >
             <div className="message-content">
-              {editingMessageId === message.id ? (
-                // Edit mode
-                <div className="edit-mode">
-                  <textarea
-                    value={editingText}
-                    onChange={(e) => setEditingText(e.target.value)}
-                    className="edit-textarea"
-                    autoFocus
-                  />
-                  <div className="edit-buttons">
-                    <button onClick={() => handleSaveEdit(message.id)} className="save-edit-button">
-                      Save
-                    </button>
-                    <button onClick={handleCancelEdit} className="cancel-edit-button">
-                      Cancel
-                    </button>
-                  </div>
+              <div className="message-text">
+                <MessageText rawText={message.text} messageId={message.id} />
+              </div>
+              {message.tokensPerSecond && (
+                <div className="message-meta" style={{ fontSize: '0.75rem', opacity: 0.6, marginTop: '4px' }}>
+                  {message.tokensPerSecond} tokens/sec
                 </div>
-              ) : (
-                // Normal display mode
-                <>
-                  <div className="message-text">
-                    <MessageText rawText={message.text} messageId={message.id} />
-                  </div>
-                  {message.sender === 'user' && (
-                    <button
-                      onClick={() => handleEditMessage(message.id, message.text)}
-                      className="edit-message-button"
-                      title="Edit message"
-                    >
-                      ✏️
-                    </button>
-                  )}
-                  {message.tokensPerSecond && (
-                    <div className="message-meta" style={{ fontSize: '0.75rem', opacity: 0.6, marginTop: '4px' }}>
-                      {message.tokensPerSecond} tokens/sec
-                    </div>
-                  )}
-                </>
               )}
             </div>
           </div>
@@ -633,19 +323,21 @@ function ChatInterface() {
         )}
       </div>
 
-      <div className="input-container">
+      <div className="input-container" style={{ backgroundColor: '#2a2a2a', padding: '1rem', borderTop: '1px solid #444' }}>
+        <div style={{ textAlign: 'center', color: '#888', fontSize: '0.9rem' }}>
+          💬 Input disabled - All messages come from Discord
+        </div>
         <textarea
           ref={textareaRef}
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyPress={handleKeyPress}
-          placeholder="Type your message..."
+          value=""
+          placeholder="Messages are sent from Discord..."
           rows={1}
           className="message-input"
-          disabled={isTyping}
+          disabled={true}
+          style={{ opacity: 0.5, cursor: 'not-allowed' }}
         />
-        <button onClick={handleSend} className="send-button" disabled={isTyping}>
-          {isTyping ? 'Wait...' : 'Send'}
+        <button className="send-button" disabled={true} style={{ opacity: 0.5, cursor: 'not-allowed' }}>
+          Disabled
         </button>
       </div>
     </div>

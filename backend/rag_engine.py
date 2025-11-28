@@ -637,24 +637,26 @@ def generate_rag_queries(messages: List[Dict[str, str]], last_user_message: str)
     if req_count <= 1:
         return [generate_rag_query(messages, last_user_message)]
 
-    # Build conversation context as before
+    # Build conversation context
     query_context_messages = rag_cfg.get("query_context_messages", 0)
-    if query_context_messages <= 0 or not messages or len(messages) <= 1:
-        # Return repeated simple queries (same last message) if no context
-        return [last_user_message] * req_count
-
-    recent_messages = [
-        msg for msg in messages[-query_context_messages-1:]
-        if msg.get("role") in ["user", "assistant"]
-    ]
-
-    if len(recent_messages) <= 1:
-        return [last_user_message] * req_count
-
-    conversation_context = "\n".join([
-        f"{'User' if msg['role'] == 'user' else 'AI'}: {msg['content']}"
-        for msg in recent_messages[:-1]
-    ])
+    
+    # Get recent messages for context
+    recent_messages = []
+    if query_context_messages > 0 and messages and len(messages) > 1:
+        recent_messages = [
+            msg for msg in messages[-query_context_messages-1:]
+            if msg.get("role") in ["user", "assistant"]
+        ]
+    
+    # Build conversation context string (may be empty for first message)
+    if len(recent_messages) > 1:
+        conversation_context = "\n".join([
+            f"{'User' if msg['role'] == 'user' else 'AI'}: {msg['content']}"
+            for msg in recent_messages[:-1]
+        ])
+    else:
+        # First message - no prior context
+        conversation_context = "(No previous conversation)"
 
     try:
         system_prompt = rag_cfg.get("query_generation_system_prompt", "")

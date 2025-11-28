@@ -425,6 +425,41 @@ def get_last_rag_retrieval():
     }
 
 
+@router.get("/rag/stream")
+async def stream_rag_updates():
+    """Stream RAG updates in real-time via SSE."""
+    import asyncio
+    import json
+    
+    async def event_generator():
+        global _last_rag_results
+        last_sent = None
+        
+        while True:
+            # Check if RAG results changed
+            current = json.dumps(_last_rag_results, sort_keys=True)
+            
+            if current != last_sent:
+                # Send new RAG data
+                data = json.dumps({"results": _last_rag_results})
+                yield f"data: {data}\n\n"
+                last_sent = current
+            
+            # Heartbeat
+            yield f": heartbeat\n\n"
+            await asyncio.sleep(1)
+    
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )
+
+
 @router.get("/chat/history")
 def get_chat_history():
     """Get the current chat context (legacy endpoint - use /chat/context instead)."""

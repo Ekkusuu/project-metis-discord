@@ -1,0 +1,267 @@
+"""
+Discord bot service for Project Metis.
+Connects Discord messages to the existing chat API.
+"""
+import asyncio
+import os
+import sys
+from pathlib import Path
+from typing import Dict, List, Optional
+from datetime import datetime
+import json
+
+import discord
+from discord.ext import commands
+from dotenv import load_dotenv
+import requests
+
+# Add project root to path for imports
+PROJECT_ROOT = Path(__file__).parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+
+from backend.llama_engine import get_config
+
+# Load environment variables
+load_dotenv()
+
+# Configuration
+DISCORD_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
+if not DISCORD_TOKEN:
+    print("ERROR: DISCORD_BOT_TOKEN not found in .env file!")
+    sys.exit(1)
+
+config = get_config()
+API_URL = "http://localhost:8000"
+
+# Store conversation context per Discord channel
+# Structure: {channel_id: [{"role": "user/assistant", "content": "..."}]}
+channel_contexts: Dict[int, List[Dict[str, str]]] = {}
+
+# Discord bot setup
+intents = discord.Intents.default()
+intents.message_content = True
+intents.messages = True
+intents.guilds = True
+bot = commands.Bot(command_prefix="!", intents=intents)
+
+
+def get_channel_context(channel_id: int) -> List[Dict[str, str]]:
+    """Get or create context for a channel."""
+    if channel_id not in channel_contexts:
+        # Initialize with system prompt
+        system_prompt = config.get("chat", {}).get("system_prompt", "You are Metis, a helpful AI assistant.")
+        channel_contexts[channel_id] = [
+            {"role": "system", "content": system_prompt}
+        ]
+    return channel_contexts[channel_id]
+
+
+def add_to_message_queue(message_data: Dict):
+    """Add a message to the queue for broadcasting to UI."""
+    try:
+        # Send message to FastAPI endpoint
+        requests.post(
+            f"{API_URL}/discord/add-message",
+            json=message_data,
+            timeout=5
+        )
+    except Exception as e:
+        print(f"Failed to add message to queue: {e}")
+
+
+def save_to_chat_history(message_data: Dict):
+    """Save message to chat_history.json file."""
+    import json
+    from pathlib import Path
+    
+    MEMORY_DIR = PROJECT_ROOT / "memory"
+    CHAT_HISTORY_FILE = MEMORY_DIR / "chat_history.json"
+    
+    try:
+        # Load existing history
+        if CHAT_HISTORY_FILE.exists():
+            with open(CHAT_HISTORY_FILE, "r", encoding="utf-8") as f:
+                try:
+                    data = json.load(f)
+                except json.JSONDecodeError:
+                    data = {"messages": [], "lastUpdated": datetime.now().isoformat()}
+        else:
+            data = {"messages": [], "lastUpdated": datetime.now().isoformat()}
+        
+        # Add new message
+        data["messages"].append(message_data)
+        data["lastUpdated"] = datetime.now().isoformat()
+        
+        # Save back to file
+        with open(CHAT_HISTORY_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+            
+    except Exception as e:
+        print(f"Failed to save to chat_history.json: {e}")
+
+
+@bot.event
+async def on_ready():
+    """Called when the bot is ready."""
+    print("\n" + "="*60)
+    print(f"Discord Bot Connected!")
+    print(f"Bot Username: {bot.user}")
+    print(f"Bot ID: {bot.user.id}")
+    print("="*60 + "\n")
+    print("Bot is ready to receive messages!")
+    print("Listening in all channels where the bot has access.")
+    print("="*60 + "\n")
+
+
+@bot.event
+async def on_message(message: discord.Message):
+    """Handle incoming Discord messages."""
+    # Ignore messages from the bot itself
+    if message.author == bot.user:
+        return
+    
+    # Ignore bot commands
+    if message.content.startswith("!"):
+        await bot.process_commands(message)
+        return
+    
+    # Get channel context
+    channel_id = message.channel.id
+    context = get_channel_context(channel_id)
+    
+    # Format user message with username
+    user_display = f"{message.author.name}#{message.author.discriminator}" if message.author.discriminator != "0" else message.author.name
+    user_content = f"[{user_display}]: {message.content}"
+    
+    # Add user message to context
+    context.append({
+        "role": "user",
+        "content": user_content
+    })
+    
+    # Broadcast user message to UI
+    user_msg_data = {
+        "id": str(message.id),
+        "text": user_content,
+        "sender": "user",
+        "timestamp": message.created_at.isoformat(),
+        "discord_user": user_display,
+        "channel_name": message.channel.name if hasattr(message.channel, 'name') else "DM"
+    }
+    add_to_message_queue(user_msg_data)
+    save_to_chat_history(user_msg_data)
+    
+    # Show typing indicator in Discord
+    async with message.channel.typing():
+        try:
+            # Call chat API with streaming
+            chat_cfg = config.get("chat", {})
+            payload = {
+                "messages": context,
+                "temperature": chat_cfg.get("temperature", 0.7),
+                "top_p": chat_cfg.get("top_p", 0.95),
+                "max_tokens": chat_cfg.get("max_tokens", 512)
+            }
+            
+            response = requests.post(
+                f"{API_URL}/chat/stream",
+                json=payload,
+                stream=True,
+                timeout=300
+            )
+            
+            if not response.ok:
+                error_text = response.text
+                await message.channel.send(f"❌ Error: {error_text[:500]}")
+                return
+            
+            # Stream response - accumulate full response before sending
+            ai_response = ""
+            
+            for line in response.iter_lines():
+                if not line:
+                    continue
+                
+                try:
+                    chunk = json.loads(line.decode('utf-8'))
+                    
+                    if "delta" in chunk and chunk["delta"]:
+                        ai_response += chunk["delta"]
+                    
+                    if chunk.get("done"):
+                        break
+                        
+                except json.JSONDecodeError:
+                    continue
+            
+            # Send complete message once (no editing, no "edited" tag)
+            discord_msg = None
+            if ai_response:
+                # Discord has 2000 char limit, send in chunks if needed
+                if len(ai_response) <= 2000:
+                    discord_msg = await message.channel.send(ai_response)
+                else:
+                    # Split long messages
+                    discord_msg = await message.channel.send(ai_response[:2000])
+                    remaining = ai_response[2000:]
+                    while remaining:
+                        await message.channel.send(remaining[:2000])
+                        remaining = remaining[2000:]
+            
+            # Add AI response to context
+            context.append({
+                "role": "assistant",
+                "content": ai_response
+            })
+            
+            # Broadcast AI message to UI (only if we have a response)
+            if ai_response and discord_msg:
+                ai_msg_data = {
+                    "id": str(discord_msg.id),
+                    "text": ai_response,
+                    "sender": "ai",
+                    "timestamp": datetime.now().isoformat(),
+                    "channel_name": message.channel.name if hasattr(message.channel, 'name') else "DM"
+                }
+                add_to_message_queue(ai_msg_data)
+                save_to_chat_history(ai_msg_data)
+            
+        except Exception as e:
+            error_msg = f"❌ Error processing message: {str(e)}"
+            await message.channel.send(error_msg)
+            print(f"Error in on_message: {e}")
+
+
+@bot.command(name="reset")
+async def reset_context(ctx):
+    """Reset the conversation context for this channel."""
+    channel_id = ctx.channel.id
+    if channel_id in channel_contexts:
+        del channel_contexts[channel_id]
+    await ctx.send("🔄 Conversation context has been reset!")
+
+
+@bot.command(name="status")
+async def status(ctx):
+    """Show bot status and context size."""
+    channel_id = ctx.channel.id
+    context = get_channel_context(channel_id)
+    msg_count = len(context) - 1  # Exclude system message
+    await ctx.send(f"✅ Bot is online!\n📝 Messages in context: {msg_count}")
+
+
+
+
+
+def run_bot():
+    """Start the Discord bot."""
+    try:
+        print("Starting Discord bot...")
+        bot.run(DISCORD_TOKEN)
+    except Exception as e:
+        print(f"Failed to start Discord bot: {e}")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    run_bot()

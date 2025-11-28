@@ -5,6 +5,8 @@ chromadb>=0.4.22
 sentence-transformers>=2.2.2
 transformers>=4.30.0
 requests>=2.31.0
+discord.py>=2.3.2
+python-dotenv>=1.0.0
 
 # NOTE: PyTorch is required and must match your CUDA version.
 # This project expects PyTorch built for CUDA 12.6 on machines with an NVIDIA GPU

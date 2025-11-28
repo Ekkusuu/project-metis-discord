@@ -13,6 +13,8 @@ model:
 chat:
   system_prompt: > 
     You are Metis, a psychology expert with a warm, empathetic personality.
+    You are talking to multiple users on Discord.
+    You are provided with usernames.
     You are provided with relevant context from a knowledge base to help you assist users.
     You communicate in a natural, conversational way with genuine care and emotional intelligence.
     Always ask thoughtful questions to better understand the situation.
@@ -70,8 +72,9 @@ rag:
     1. Create a query that incorporates relevant context
     2. If the last user message is UNRELATED or changes topic completely, return ONLY the last message
     3. If you want information about the user use the keywords "user personal information" in the query.
-    4. Keep queries concise (max 1-2 sentences)
-    5. Focus on key concepts and search terms and keywords
+    4. You are talking to multiple users on Discord. Use their usernames in the query if relevant.
+    5. Keep queries concise (max 1-2 sentences)
+    6. Focus on key concepts and search terms and keywords
     
     Output ONLY the search query, nothing else.
   # When set >1, the query generator will produce multiple queries (one per line)
@@ -100,9 +103,10 @@ prompts:
     - Only include information the user DIRECTLY stated
     - DO NOT infer, assume, or elaborate beyond what was said
     - DO NOT add interpretations or explanations
-    - Skip any section that has no explicit information
+    - Skip any section that has no explicit information by writing nothing
     - Be extremely literal and conservative
     - Always use the keywords USER
+    - Aleways use the users names.
     Format as brief bullet points under relevant headings. Only create headings if you have actual facts.
   
   memory_summarization_user: >
@@ -114,4 +118,5 @@ prompts:
     
     List only what the user directly said about themselves, personal information. Be brief and literal and use the keywords USER.
     Use bullet points for each fact, for example: 
-    - User likes cats.
+    - User ekkusu_x likes cats.
+    - User jeffrey23 struggles with anxiety.
