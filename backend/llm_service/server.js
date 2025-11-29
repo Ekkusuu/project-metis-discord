@@ -121,6 +121,93 @@ app.get("/health", (req, res) => {
   res.json({ status: "ok", model_loaded: model !== undefined });
 });
 
+// Judgment endpoint - uses temporary model loading to avoid VRAM issues
+app.post("/judgment", async (req, res) => {
+  const { messages, system_prompt } = req.body;
+  
+  if (!messages || !Array.isArray(messages)) {
+    return res.status(400).json({ error: "messages array required" });
+  }
+
+  let sequence = null;
+  
+  try {
+    console.log(`Using main model for judgment`);
+    
+    // Use the already-loaded main model and context
+    sequence = context.getSequence();
+    
+    // Use LlamaChat for judgment
+    const chat = new LlamaChat({
+      contextSequence: sequence,
+      chatWrapper: new ChatMLChatWrapper(),
+    });
+    
+    // Format chat history
+    const systemMsg = system_prompt || config.judgment?.system_prompt || "You are a judgment AI.";
+    
+    // Split messages into context (all but last) and last message
+    const contextMessages = messages.slice(0, -1).map(m => `${m.role === 'user' ? 'User' : 'AI'}: ${m.content}`).join('\\n');
+    const lastMessage = messages.length > 0 ? `${messages[messages.length - 1].role === 'user' ? 'User' : 'AI'}: ${messages[messages.length - 1].content}` : '';
+    
+    let userMsg = config.judgment?.user_prompt || '{context}\\n\\n{last_message}\\n\\nShould AI respond?';
+    userMsg = userMsg.replace('{context}', contextMessages).replace('{last_message}', lastMessage).replace('{conversation}', messages.map(m => `${m.role === 'user' ? 'User' : 'AI'}: ${m.content}`).join('\\n'));
+    
+    const chatHistory = [
+      {
+        type: "system",
+        text: systemMsg,
+      },
+      {
+        type: "user",
+        text: userMsg,
+      },
+    ];
+    
+    // Get judgment with minimal tokens
+    const response = await chat.generateResponse(chatHistory, {
+      temperature: 0.3,
+      maxTokens: 100,
+      stopStrings: ['<|im_end|>', '<|im_start|>', '|</im_end|>', '|<im_start|>'],
+    });
+    
+    // Extract text from response (it may be an array or object)
+    let judgmentText = '';
+    if (typeof response === 'string') {
+      judgmentText = response;
+    } else if (Array.isArray(response)) {
+      judgmentText = response.join('');
+    } else if (response && response.response) {
+      judgmentText = Array.isArray(response.response) ? response.response.join('') : String(response.response);
+    } else {
+      judgmentText = String(response);
+    }
+    
+    // Clean up any template tokens or extra content
+    judgmentText = judgmentText.split('|')[0].trim();
+    
+    console.log(`Judgment result: ${judgmentText}`);
+    
+    // Dispose sequence after use
+    if (sequence) sequence.dispose();
+    
+    res.json({ judgment: judgmentText });
+    
+  } catch (error) {
+    console.error("Judgment error:", error);
+    console.error("Stack:", error.stack);
+    
+    // Clean up on error
+    try {
+      if (sequence) sequence.dispose();
+    } catch (cleanupErr) {
+      console.error("Cleanup error:", cleanupErr);
+    }
+    
+    res.status(500).json({ error: error.message, stack: error.stack });
+  }
+});
+
 // Non-streaming chat completion
 app.post("/chat/completion", async (req, res) => {
   let sequence = null;

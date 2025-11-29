@@ -13,7 +13,7 @@ import json
 import discord
 from discord.ext import commands
 from dotenv import load_dotenv
-import requests
+import aiohttp
 
 # Add project root to path for imports
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -37,6 +37,9 @@ API_URL = "http://localhost:8000"
 # Structure: {channel_id: [{"role": "user/assistant", "content": "..."}]}
 channel_contexts: Dict[int, List[Dict[str, str]]] = {}
 
+# Track latest message timestamp per channel for interruption handling
+latest_message_time: Dict[int, datetime] = {}
+
 # Discord bot setup
 intents = discord.Intents.default()
 intents.message_content = True
@@ -56,15 +59,77 @@ def get_channel_context(channel_id: int) -> List[Dict[str, str]]:
     return channel_contexts[channel_id]
 
 
-def add_to_message_queue(message_data: Dict):
+async def should_respond_to_message(context: List[Dict[str, str]]) -> bool:
+    """Use judgment model to determine if AI should respond."""
+    judgment_cfg = config.get("judgment", {})
+    
+    if not judgment_cfg.get("enabled", True):
+        return True  # Always respond if judgment disabled
+    
+    # Get recent messages for judgment (exclude system message)
+    context_messages = judgment_cfg.get("context_messages", 5)
+    recent_messages = [
+        msg for msg in context[-context_messages:]
+        if msg.get("role") in ["user", "assistant"]
+    ]
+    
+    if not recent_messages:
+        return True  # Respond if no context
+    
+    try:
+        # Call judgment endpoint
+        system_prompt = judgment_cfg.get("system_prompt", "You are a judgment AI.")
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"{API_URL.replace('8000', '3000')}/judgment",
+                json={
+                    "messages": recent_messages,
+                    "system_prompt": system_prompt
+                },
+                timeout=aiohttp.ClientTimeout(total=30)
+            ) as response:
+                if not response.ok:
+                    print(f"Judgment request failed: {response.status}")
+                    return True  # Default to responding on error
+                
+                data = await response.json()
+                judgment = data.get("judgment", "")
+        
+        # Calculate similarity with "positive" and "negative"
+        from difflib import SequenceMatcher
+        
+        positive_similarity = SequenceMatcher(None, judgment.lower(), "positive").ratio()
+        negative_similarity = SequenceMatcher(None, judgment.lower(), "negative").ratio()
+        
+        print(f"Judgment: '{judgment}' | Positive: {positive_similarity:.2f} | Negative: {negative_similarity:.2f}")
+        
+        # Respond if judgment is closer to "positive" than "negative"
+        should_respond = positive_similarity > negative_similarity
+        
+        if not should_respond:
+            print("❌ Judgment: AI will NOT respond to this message")
+        else:
+            print("✅ Judgment: AI will respond to this message")
+        
+        return should_respond
+        
+    except Exception as e:
+        print(f"Error in judgment: {e}")
+        return True  # Default to responding on error
+
+
+async def add_to_message_queue(message_data: Dict):
     """Add a message to the queue for broadcasting to UI."""
     try:
-        # Send message to FastAPI endpoint
-        requests.post(
-            f"{API_URL}/discord/add-message",
-            json=message_data,
-            timeout=5
-        )
+        # Send message to FastAPI endpoint using aiohttp
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"{API_URL}/discord/add-message",
+                json=message_data,
+                timeout=aiohttp.ClientTimeout(total=5)
+            ) as response:
+                await response.text()
     except Exception as e:
         print(f"Failed to add message to queue: {e}")
 
@@ -129,6 +194,10 @@ async def on_message(message: discord.Message):
     channel_id = message.channel.id
     context = get_channel_context(channel_id)
     
+    # Update latest message timestamp for this channel
+    message_timestamp = message.created_at
+    latest_message_time[channel_id] = message_timestamp
+    
     # Format user message with username
     user_display = f"{message.author.name}#{message.author.discriminator}" if message.author.discriminator != "0" else message.author.name
     user_content = f"[{user_display}]: {message.content}"
@@ -148,8 +217,18 @@ async def on_message(message: discord.Message):
         "discord_user": user_display,
         "channel_name": message.channel.name if hasattr(message.channel, 'name') else "DM"
     }
-    add_to_message_queue(user_msg_data)
+    await add_to_message_queue(user_msg_data)
     save_to_chat_history(user_msg_data)
+    
+    # Check if AI should respond using judgment model
+    if not await should_respond_to_message(context):
+        print(f"Skipping response to message from {user_display} (judgment: negative)")
+        return
+    
+    # Check if a newer message arrived during judgment
+    if latest_message_time.get(channel_id) != message_timestamp:
+        print(f"Message interrupted by newer message, skipping response")
+        return
     
     # Show typing indicator in Discord
     async with message.channel.typing():
@@ -163,40 +242,51 @@ async def on_message(message: discord.Message):
                 "max_tokens": chat_cfg.get("max_tokens", 512)
             }
             
-            response = requests.post(
-                f"{API_URL}/chat/stream",
-                json=payload,
-                stream=True,
-                timeout=300
-            )
-            
-            if not response.ok:
-                error_text = response.text
-                await message.channel.send(f"❌ Error: {error_text[:500]}")
-                return
-            
-            # Stream response - accumulate full response before sending
             ai_response = ""
             
-            for line in response.iter_lines():
-                if not line:
-                    continue
-                
-                try:
-                    chunk = json.loads(line.decode('utf-8'))
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{API_URL}/chat/stream",
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=300)
+                ) as response:
+                    if not response.ok:
+                        error_text = await response.text()
+                        await message.channel.send(f"❌ Error: {error_text[:500]}")
+                        return
                     
-                    if "delta" in chunk and chunk["delta"]:
-                        ai_response += chunk["delta"]
-                    
-                    if chunk.get("done"):
-                        break
+                    # Stream response - accumulate full response before sending
+                    async for line in response.content:
+                        if not line:
+                            continue
                         
-                except json.JSONDecodeError:
-                    continue
+                        # Check if a newer message arrived during streaming
+                        if latest_message_time.get(channel_id) != message_timestamp:
+                            print(f"Response interrupted by newer message, aborting")
+                            return
+                        
+                        try:
+                            chunk = json.loads(line.decode('utf-8'))
+                            
+                            if "delta" in chunk and chunk["delta"]:
+                                ai_response += chunk["delta"]
+                            
+                            if chunk.get("done"):
+                                break
+                                
+                        except json.JSONDecodeError:
+                            continue
             
             # Send complete message once (no editing, no "edited" tag)
             discord_msg = None
             if ai_response:
+                # Remove AI name prefix if present (e.g., "[Metis]:", "Metis:", etc.)
+                import re
+                ai_response = re.sub(r'^\[?Metis\]?\s*:\s*', '', ai_response, flags=re.IGNORECASE)
+                
+                # Remove excessive spacing - replace double newlines with single
+                ai_response = ai_response.replace('\n\n', '\n')
+                
                 # Discord has 2000 char limit, send in chunks if needed
                 if len(ai_response) <= 2000:
                     discord_msg = await message.channel.send(ai_response)
@@ -223,7 +313,7 @@ async def on_message(message: discord.Message):
                     "timestamp": datetime.now().isoformat(),
                     "channel_name": message.channel.name if hasattr(message.channel, 'name') else "DM"
                 }
-                add_to_message_queue(ai_msg_data)
+                await add_to_message_queue(ai_msg_data)
                 save_to_chat_history(ai_msg_data)
             
         except Exception as e:

@@ -108,15 +108,9 @@ function MessageText({ rawText, messageId }: { rawText: string; messageId: strin
 }
 function ChatInterface() {
   const [messages, setMessages] = useState<Message[]>([]);
-  const [input, setInput] = useState('');
-  const [isTyping, setIsTyping] = useState(false);
-  const [showTypingIndicator, setShowTypingIndicator] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
-  const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
-  const [editingText, setEditingText] = useState('');
   const [discordConnected, setDiscordConnected] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
   const API_URL = (import.meta as any).env?.VITE_API_URL || 'http://localhost:8000';
 
@@ -237,30 +231,11 @@ function ChatInterface() {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   };
 
-  const autoResizeTextarea = () => {
-    const textarea = textareaRef.current;
-    if (textarea) {
-      textarea.style.height = 'auto';
-      textarea.style.height = `${textarea.scrollHeight}px`;
-    }
-  };
-
   useEffect(() => {
     scrollToBottom();
   }, [messages]);
 
-  useEffect(() => {
-    autoResizeTextarea();
-  }, [input]);
-
   // Input is disabled - all messages come from Discord
-  const handleSend = async () => {
-    // Disabled - messages come from Discord only
-  };
-
-  const handleKeyPress = (e: React.KeyboardEvent) => {
-    // Disabled - input comes from Discord only
-  };
 
   return (
     <div className="chat-container">
@@ -307,17 +282,6 @@ function ChatInterface() {
             </div>
           </div>
         ))}
-        {showTypingIndicator && (
-          <div className="message ai-message">
-            <div className="message-content">
-              <div className="typing-indicator">
-                <span></span>
-                <span></span>
-                <span></span>
-              </div>
-            </div>
-          </div>
-        )}
         <div ref={messagesEndRef} />
           </>
         )}
@@ -328,7 +292,6 @@ function ChatInterface() {
           💬 Input disabled - All messages come from Discord
         </div>
         <textarea
-          ref={textareaRef}
           value=""
           placeholder="Messages are sent from Discord..."
           rows={1}
