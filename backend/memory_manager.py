@@ -7,6 +7,7 @@ from typing import List, Dict
 import datetime
 from backend.llama_engine import chat_completion, get_config
 from backend.token_utils import count_tokens
+from backend.prompt_loader import resolve_prompt
 
 # Memory paths
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -170,11 +171,11 @@ def summarize_and_archive_temp_memory() -> None:
         memory_cfg = config.get("memory", {})
         
         # Get prompts from config with fallback defaults
-        system_prompt = prompts_cfg.get("memory_summarization_system", 
-            "You are a memory extraction assistant. Extract only explicitly stated facts about the user.")
+        system_prompt = resolve_prompt(prompts_cfg.get("memory_summarization_system", 
+            "You are a memory extraction assistant. Extract only explicitly stated facts about the user."))
         
-        user_prompt_template = prompts_cfg.get("memory_summarization_user",
-            "Extract the key facts about the user from this conversation:\n\n```\n{content}\n```")
+        user_prompt_template = resolve_prompt(prompts_cfg.get("memory_summarization_user",
+            "Extract the key facts about the user from this conversation:\n\n```\n{content}\n```"))
         
         # Format user prompt with content
         user_prompt = user_prompt_template.format(content=content)

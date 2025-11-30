@@ -9,6 +9,7 @@ import chromadb
 from chromadb.config import Settings
 
 from backend.llama_engine import get_config, chat_completion
+from backend.prompt_loader import resolve_prompt
 
 # Global ChromaDB client
 _chroma_client: Optional[chromadb.Client] = None
@@ -581,8 +582,8 @@ def generate_rag_query(messages: List[Dict[str, str]], last_user_message: str) -
     
     try:
         # Get prompts from config
-        system_prompt = rag_cfg.get("query_generation_system_prompt", "")
-        user_prompt_template = rag_cfg.get("query_generation_user_prompt", "")
+        system_prompt = resolve_prompt(rag_cfg.get("query_generation_system_prompt", ""))
+        user_prompt_template = resolve_prompt(rag_cfg.get("query_generation_user_prompt", ""))
         
         # Format user prompt with conversation context
         user_prompt = user_prompt_template.format(
@@ -659,8 +660,8 @@ def generate_rag_queries(messages: List[Dict[str, str]], last_user_message: str)
         conversation_context = "(No previous conversation)"
 
     try:
-        system_prompt = rag_cfg.get("query_generation_system_prompt", "")
-        user_prompt_template = rag_cfg.get("query_generation_user_prompt", "")
+        system_prompt = resolve_prompt(rag_cfg.get("query_generation_system_prompt", ""))
+        user_prompt_template = resolve_prompt(rag_cfg.get("query_generation_user_prompt", ""))
 
         # Encourage the model to emit exactly N queries, one per line
         user_prompt = user_prompt_template.format(

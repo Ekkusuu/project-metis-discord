@@ -1,8 +1,16 @@
-# Project Metis Configuration
-# All settings can be overridden with environment variables (see README)
+# ============================================================================
+# Global Personality Setting
+# ============================================================================
+# Options: therapist, casual, mean
+# This automatically selects the matching prompts from system_prompts.yaml
+# To add more: just add new personality sections in system_prompts.yaml
+personality: "mean"
 
+# ============================================================================
+# LLM Model Settings
+# ============================================================================
 model:
-  path: "model/psychologistv2-8.0B-Q4_0.gguf"
+  path: "model/openhermes-2.5-mistral-7b.Q8_0-discord.gguf"
   tokenizer_path: "rag-models/embeddinggemma-300m"
   n_ctx: 8192  # Context window size (in tokens)
   n_gpu_layers: -1  # -1 = auto-offload all layers to GPU if available
@@ -10,64 +18,58 @@ model:
   use_flash_attn: true
   use_mlock: true
 
-chat:
-  system_prompt: > 
-    You are Metis, a psychology expert with a warm, empathetic personality.
-    You are talking to multiple users on Discord.
-    You are provided with usernames.
-    You are provided with relevant context from a knowledge base to help you assist users.
-    Write very concise, clear, and helpful responses. Use slang, casual language and abbreviations as appropriate for Discord.
-    You communicate in a natural, conversational way with genuine care and emotional intelligence.
-    Always ask thoughtful questions to better understand the situation.
-    Don't try to steer the conversation away from sensitive topics.
-    Ask questions about the user's feelings, thoughts, and experiences, find more about the user before giving any advice.
-    When provided with context from your knowledge base, use that information over your general knowledge.
-    Keep your responses concise and to the point.
-
-    You can use Markdown formatting in your responses:
-    - Use **bold** for emphasis making important points stand out
-    - Use *italics* for subtle emphasis
-    - Use `code` for technical terms or commands
-    - Use code blocks with ```language for code examples
-    - Use bullet points or numbered lists for clarity
-    - Use > for quotes or important notes
-    - Use headings (##, ###) to structure longer responses
-  temperature: 0.7
-  top_p: 0.95
-  max_tokens: 2024 
-
 llm_service:
   host: "localhost"
   port: 3000
 
-judgment:
-  enabled: true
-  context_messages: 5  # Number of recent messages to consider for judgment
-  system_prompt: >
-    You are Metis, a friendly and helpful psychology expert AI on Discord.
-    
-    You SHOULD respond (say "positive") when:
-    - Someone asks a question or seeks help
-    - Someone mentions you or addresses you
-    - The conversation is about psychology, mental health, or emotions
-    - You could add value or be helpful to the discussion
-    - Someone seems to need support or guidance
-    
-    You should NOT respond (say "negative") ONLY when:
-    - Users are clearly having a private conversation that doesn't need your input
-    - The topic is completely unrelated and your input would be intrusive
-    
-    Default to responding if unsure. Be helpful and engaged.
-    
-    Reply format: "positive" or "negative" followed by brief reason (one sentence).
-  user_prompt: >
-    Previous messages:
-    {context}
-    
-    Latest message:
-    {last_message}
-    
-    Should Metis respond?
+# ============================================================================
+# Text Chat Settings (Discord text channels)
+# ============================================================================
+chat:
+  temperature: 0.7
+  top_p: 0.95
+  max_tokens: 2024
+
+  # Text Chat Judgment Settings
+  judgment:
+    enabled: true
+    context_messages: 5
+    system_prompt: "@judgment.text"  # Judgment prompt (not affected by personality)
+    user_prompt: >
+      Previous messages:
+      {context}
+      
+      Latest message:
+      {last_message}
+      
+      Should Metis respond?
+
+# ============================================================================
+# Voice Chat Settings (Discord voice channels)
+# ============================================================================
+voice:
+  # Audio Processing
+  stt_model_path: "model/parakeet-tdt-0.6b-v2.nemo"
+  tts_voice: "af_heart"  # Options: af_heart, af_sarah, etc.
+  tts_lang_code: "a"  # 'a' = American English
+  sample_rate: 24000
+  listen_timeout: 1.5  # Seconds of silence before stopping recording
+  chunk_duration: 0.5  # Audio chunk duration in seconds
+  name_correction_threshold: 0.70  # Minimum similarity (0.0-1.0) for fuzzy name matching
+  
+  # Voice Chat Judgment Settings
+  judgment:
+    enabled: true
+    context_messages: 5
+    system_prompt: "@judgment.voice"  # Judgment prompt (not affected by personality)
+    user_prompt: >
+      Previous voice messages:
+      {context}
+      
+      Latest voice input:
+      {last_message}
+      
+      Should Metis respond?
 
 
 memory:
@@ -95,59 +97,14 @@ rag:
   reranker_top_k: 2  # Number of top chunks to keep after reranking (must be <= top_k)
   reranker_min_score: 0.1  # Minimum rerank score threshold - contexts with lower scores are filtered out (-1 = no threshold)
   
-  # RAG Query Generation Prompts
-  query_generation_system_prompt: >
-    You are a query optimization assistant. Generate a concise search query based on conversation context.
-    
-    RULES:
-    1. Create a query that incorporates relevant context
-    2. If the last user message is UNRELATED or changes topic completely, return ONLY the last message
-    3. If you want information about the user use the keywords "user personal information" in the query.
-    4. You are talking to multiple users on Discord. Use their usernames in the query if relevant.
-    5. Keep queries concise (max 1-2 sentences)
-    6. Focus on key concepts and search terms and keywords
-    
-    Output ONLY the search query, nothing else.
-  # When set >1, the query generator will produce multiple queries (one per line)
-  # which will be used to run separate RAG searches and then combined.
+  # RAG Query Generation
   query_generation_count: 3
-  
-  query_generation_user_prompt: >
-    Previous conversation:
-    {conversation_context}
-    
-    Latest user message: {last_user_message}
-    
-    Generate THREE concise search queries (one per line) for retrieving relevant documents.
-    Write the queries and nothing else.
-    Each query should focus on slightly different facets or keywords related to the context and latest message.
-    The queries should be designed to maximize retrieval of useful information.
-    The queries should be short and focused on keywords.
-    For personal information about the user use the keywords "user personal information".
+  query_generation_system_prompt: "@rag.query_generation_system"
+  query_generation_user_prompt: "@rag.query_generation_user"
 
-# Memory System Prompts
+# ============================================================================
+# Memory System Settings
+# ============================================================================
 prompts:
-  memory_summarization_system: >
-    You are a memory extraction assistant. Extract ONLY explicitly stated facts about the USER from conversations.
-    
-    CRITICAL RULES:
-    - Only include information the user DIRECTLY stated
-    - DO NOT infer, assume, or elaborate beyond what was said
-    - DO NOT add interpretations or explanations
-    - Skip any section that has no explicit information by writing nothing
-    - Be extremely literal and conservative
-    - Always use the keywords USER
-    - Aleways use the users names.
-    Format as brief bullet points under relevant headings. Only create headings if you have actual facts.
-  
-  memory_summarization_user: >
-    Extract ONLY the explicitly stated facts about the user from this conversation. Do not infer or elaborate:
-    
-    ```
-    {content}
-    ```
-    
-    List only what the user directly said about themselves, personal information. Be brief and literal and use the keywords USER.
-    Use bullet points for each fact, for example: 
-    - User ekkusu_x likes cats.
-    - User jeffrey23 struggles with anxiety.
+  memory_summarization_system: "@memory.summarization_system"
+  memory_summarization_user: "@memory.summarization_user"
