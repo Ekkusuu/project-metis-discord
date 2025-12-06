@@ -16,6 +16,7 @@ import discord.ext.voice_recv as voice_recv
 from dotenv import load_dotenv
 import aiohttp
 import io
+import numpy as np
 
 # Add project root to path for imports
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -140,9 +141,20 @@ class VoiceReceiver:
             self.user_objects[user_id] = user  # Store user object for later
             print(f"🎤 {user.display_name} started speaking")
         
-        # Append PCM audio data
+        # Append PCM audio data (apply input gain configured in config.yaml)
         if isinstance(data.pcm, bytes):
-            self.user_audio_buffers[user_id].extend(data.pcm)
+            try:
+                # Read configured gain (default 2.0 if not configured)
+                voice_cfg = config.get("voice", {})
+                gain = float(voice_cfg.get("input_gain", 2.0))
+                # Convert bytes to int16 array, scale by configured gain, clip to int16 range and append
+                arr = np.frombuffer(data.pcm, dtype=np.int16).astype(np.int32) * gain
+                arr = np.clip(arr, -32768, 32767).astype(np.int16)
+                self.user_audio_buffers[user_id].extend(arr.tobytes())
+            except Exception as e:
+                # Fallback, append original PCM if scaling fails
+                print(f"Warning: Failed to scale audio for user {user_id}: {e}")
+                self.user_audio_buffers[user_id].extend(data.pcm)
         
     async def _check_for_silence(self):
         """Periodically check for silence and process buffered audio."""
@@ -255,7 +267,11 @@ class VoiceReceiver:
                 "messages": context,
                 "temperature": chat_cfg.get("temperature", 0.7),
                 "top_p": chat_cfg.get("top_p", 0.95),
-                "max_tokens": chat_cfg.get("max_tokens", 512)
+                "max_tokens": chat_cfg.get("max_tokens", 512),
+                # Voice mode: use single RAG query for faster response
+                "rag_query_count": 1,
+                "rag_system_prompt": "@rag.query_generation_voice_system",
+                "rag_user_prompt": "@rag.query_generation_voice_user"
             }
             
             ai_response = ""

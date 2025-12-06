@@ -530,13 +530,24 @@ def index_all_folders(clear_existing: bool = False) -> Dict[str, int]:
     return results
 
 
-def generate_rag_query(messages: List[Dict[str, str]], last_user_message: str) -> str:
+def generate_rag_query(
+    messages: List[Dict[str, str]], 
+    last_user_message: str,
+    system_prompt_override: Optional[str] = None,
+    user_prompt_override: Optional[str] = None
+) -> str:
     """
     Generate a contextual RAG query based on conversation history.
     
     Uses the last k messages (configured in rag.query_context_messages) to create
     a better search query. If the last message is unrelated to previous context,
     returns just the last message.
+    
+    Args:
+        messages: List of recent message dicts with 'role' and 'content'
+        last_user_message: The most recent user message (fallback)
+        system_prompt_override: Optional system prompt to use instead of config
+        user_prompt_override: Optional user prompt template to use instead of config
     
     Args:
         messages: List of recent message dicts with 'role' and 'content'
@@ -581,9 +592,16 @@ def generate_rag_query(messages: List[Dict[str, str]], last_user_message: str) -
     ])
     
     try:
-        # Get prompts from config
-        system_prompt = resolve_prompt(rag_cfg.get("query_generation_system_prompt", ""))
-        user_prompt_template = resolve_prompt(rag_cfg.get("query_generation_user_prompt", ""))
+        # Get prompts from config (use overrides if provided)
+        if system_prompt_override:
+            system_prompt = resolve_prompt(system_prompt_override)
+        else:
+            system_prompt = resolve_prompt(rag_cfg.get("query_generation_system_prompt", ""))
+        
+        if user_prompt_override:
+            user_prompt_template = resolve_prompt(user_prompt_override)
+        else:
+            user_prompt_template = resolve_prompt(rag_cfg.get("query_generation_user_prompt", ""))
         
         # Format user prompt with conversation context
         user_prompt = user_prompt_template.format(
@@ -623,20 +641,35 @@ def generate_rag_query(messages: List[Dict[str, str]], last_user_message: str) -
         return last_user_message
 
 
-def generate_rag_queries(messages: List[Dict[str, str]], last_user_message: str) -> List[str]:
+def generate_rag_queries(
+    messages: List[Dict[str, str]], 
+    last_user_message: str,
+    num_queries: Optional[int] = None,
+    system_prompt_override: Optional[str] = None,
+    user_prompt_override: Optional[str] = None
+) -> List[str]:
     """Generate multiple contextual RAG queries (list of strings).
 
     This function reads `rag.query_generation_count` from config and attempts
     to generate that many concise queries in a single LLM call. It returns a
     list of queries (falling back to the original last_user_message if needed).
+    
+    Args:
+        messages: List of recent message dicts with 'role' and 'content'
+        last_user_message: The most recent user message (fallback)
+        num_queries: Optional override for number of queries to generate
+        system_prompt_override: Optional system prompt to use instead of config
+        user_prompt_override: Optional user prompt template to use instead of config
     """
     config = get_config()
     rag_cfg = config.get("rag", {})
-    req_count = int(rag_cfg.get("query_generation_count", 1))
+    
+    # Use override if provided, otherwise use config
+    req_count = num_queries if num_queries is not None else int(rag_cfg.get("query_generation_count", 1))
 
     # If only one query requested, reuse existing generator
     if req_count <= 1:
-        return [generate_rag_query(messages, last_user_message)]
+        return [generate_rag_query(messages, last_user_message, system_prompt_override, user_prompt_override)]
 
     # Build conversation context
     query_context_messages = rag_cfg.get("query_context_messages", 0)
@@ -660,8 +693,16 @@ def generate_rag_queries(messages: List[Dict[str, str]], last_user_message: str)
         conversation_context = "(No previous conversation)"
 
     try:
-        system_prompt = resolve_prompt(rag_cfg.get("query_generation_system_prompt", ""))
-        user_prompt_template = resolve_prompt(rag_cfg.get("query_generation_user_prompt", ""))
+        # Get prompts (use overrides if provided)
+        if system_prompt_override:
+            system_prompt = resolve_prompt(system_prompt_override)
+        else:
+            system_prompt = resolve_prompt(rag_cfg.get("query_generation_system_prompt", ""))
+        
+        if user_prompt_override:
+            user_prompt_template = resolve_prompt(user_prompt_override)
+        else:
+            user_prompt_template = resolve_prompt(rag_cfg.get("query_generation_user_prompt", ""))
 
         # Encourage the model to emit exactly N queries, one per line
         user_prompt = user_prompt_template.format(

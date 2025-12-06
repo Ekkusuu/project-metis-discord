@@ -146,8 +146,8 @@ class VoiceService:
             peak = np.abs(audio_np).max()
             print(f"📊 Audio levels - RMS: {rms:.4f}, Peak: {peak:.4f}")
             
-            # Reject if audio is too quiet (likely just noise)
-            min_rms = 0.01  # Minimum RMS level for speech
+            # Reject if audio is too quiet (likely just noise). Make threshold configurable.
+            min_rms = float(self.config.get('min_rms', 0.01))  # Minimum RMS level for speech
             if rms < min_rms:
                 print(f"⚠️  Audio too quiet (RMS {rms:.4f} < {min_rms}), likely just noise - skipping transcription")
                 return None
@@ -448,6 +448,106 @@ class VoiceService:
         
         if phrases:
             self._vocabulary['phrases'].update(phrases)
+    
+    async def synthesize_speech_streaming(self, text: str) -> AsyncGenerator[bytes, None]:
+        """
+        Synthesize speech from text using Kokoro, yielding audio chunks as they're generated.
+        This allows for streaming playback while TTS is still generating.
+        
+        Args:
+            text: Text to convert to speech
+            
+        Yields:
+            Audio bytes (PCM 16-bit, 24kHz) for each generated chunk
+        """
+        if not self.tts_pipeline:
+            print("TTS pipeline not available")
+            return
+            
+        try:
+            voice = self.config.get("tts_voice", "af_heart")
+            
+            # Generate speech chunks - Kokoro's pipeline yields chunks
+            loop = asyncio.get_event_loop()
+            
+            # Run TTS in executor and yield chunks as they come
+            def generate_chunks():
+                return list(self.tts_pipeline(text, voice=voice))
+            
+            audio_chunks = await loop.run_in_executor(None, generate_chunks)
+            
+            for _, _, audio in audio_chunks:
+                if audio is not None and len(audio) > 0:
+                    # Convert to numpy if it's a torch tensor
+                    if hasattr(audio, 'cpu'):
+                        audio = audio.cpu().numpy()
+                    # Convert float32 to int16 PCM
+                    audio_int16 = (audio * 32767).astype(np.int16)
+                    yield audio_int16.tobytes()
+                    
+        except Exception as e:
+            print(f"TTS streaming error: {e}")
+    
+    async def synthesize_sentence_streaming(self, text_queue: asyncio.Queue, audio_queue: asyncio.Queue):
+        """
+        Process sentences from text_queue and put audio chunks into audio_queue.
+        Designed to work with streaming LLM output.
+        
+        Args:
+            text_queue: Queue of text sentences to synthesize (None signals end)
+            audio_queue: Queue to put audio bytes into (None signals end)
+        """
+        if not self.tts_pipeline:
+            print("TTS pipeline not available")
+            await audio_queue.put(None)
+            return
+            
+        try:
+            voice = self.config.get("tts_voice", "af_heart")
+            loop = asyncio.get_event_loop()
+            
+            while True:
+                # Get next sentence from queue
+                sentence = await text_queue.get()
+                
+                if sentence is None:
+                    # End of stream
+                    break
+                
+                if not sentence.strip():
+                    continue
+                
+                print(f"🔊 TTS generating audio for: {sentence[:50]}...")
+                
+                # Generate TTS for this sentence (capture sentence value properly)
+                def generate_for_sentence(text_to_speak):
+                    return list(self.tts_pipeline(text_to_speak, voice=voice))
+                
+                try:
+                    # Capture sentence in a variable to avoid closure issues
+                    text_to_synthesize = sentence
+                    audio_chunks = await loop.run_in_executor(
+                        None, 
+                        lambda t=text_to_synthesize: generate_for_sentence(t)
+                    )
+                    
+                    for _, _, audio in audio_chunks:
+                        if audio is not None and len(audio) > 0:
+                            # Convert to numpy if it's a torch tensor
+                            if hasattr(audio, 'cpu'):
+                                audio = audio.cpu().numpy()
+                            audio_int16 = (audio * 32767).astype(np.int16)
+                            await audio_queue.put(audio_int16.tobytes())
+                            print(f"🔊 TTS audio chunk queued ({len(audio_int16)} samples)")
+                except Exception as e:
+                    print(f"TTS error for sentence '{sentence[:50]}...': {e}")
+                    import traceback
+                    traceback.print_exc()
+                    
+        except Exception as e:
+            print(f"TTS sentence streaming error: {e}")
+        finally:
+            await audio_queue.put(None)
     
     async def synthesize_speech(self, text: str) -> Optional[bytes]:
         """

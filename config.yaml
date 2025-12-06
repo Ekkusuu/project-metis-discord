@@ -10,7 +10,7 @@ personality: "mean"
 # LLM Model Settings
 # ============================================================================
 model:
-  path: "model/openhermes-2.5-mistral-7b.Q8_0-discord.gguf"
+  path: "model/psychologistv2-8.0B-Q4_0.gguf"
   tokenizer_path: "rag-models/embeddinggemma-300m"
   n_ctx: 8192  # Context window size (in tokens)
   n_gpu_layers: -1  # -1 = auto-offload all layers to GPU if available
@@ -53,9 +53,14 @@ voice:
   tts_voice: "af_heart"  # Options: af_heart, af_sarah, etc.
   tts_lang_code: "a"  # 'a' = American English
   sample_rate: 24000
-  listen_timeout: 1.5  # Seconds of silence before stopping recording
+  listen_timeout: 1  # Seconds of silence before stopping recording
   chunk_duration: 0.5  # Audio chunk duration in seconds
   name_correction_threshold: 0.70  # Minimum similarity (0.0-1.0) for fuzzy name matching
+  # Input gain for captured audio (1.0 = 100%, 2.0 = 200%). This scales only the bot's input capture.
+  input_gain: 2.0
+  # Minimum RMS threshold for speech to be considered valid for transcription.
+  # Values are linear (0.0 - 1.0). 0.01 is a good default; increase if noise triggers false positives.
+  min_rms: 0.01
   
   # Voice Chat Judgment Settings
   judgment:

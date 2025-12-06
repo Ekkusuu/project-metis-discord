@@ -40,6 +40,16 @@ class ChatRequest(BaseModel):
     temperature: Optional[float] = None
     top_p: Optional[float] = None
     max_tokens: Optional[int] = None
+    # RAG query generation overrides (for voice mode optimization)
+    rag_query_count: Optional[int] = Field(
+        default=None, description="Override number of RAG queries to generate (1 for voice mode)"
+    )
+    rag_system_prompt: Optional[str] = Field(
+        default=None, description="Override RAG query generation system prompt"
+    )
+    rag_user_prompt: Optional[str] = Field(
+        default=None, description="Override RAG query generation user prompt template"
+    )
 
 
 class ChatResponse(BaseModel):
@@ -123,8 +133,15 @@ def chat_stream(req: ChatRequest):
             last_user_query = user_messages[-1].content
             
             # Generate contextual RAG queries using conversation history
+            # Pass through any RAG overrides from the request (e.g., voice mode uses fewer queries)
             messages_for_query = [{"role": m.role, "content": m.content} for m in messages]
-            rag_queries = generate_rag_queries(messages_for_query, last_user_query)
+            rag_queries = generate_rag_queries(
+                messages_for_query, 
+                last_user_query,
+                num_queries=req.rag_query_count,
+                system_prompt_override=req.rag_system_prompt,
+                user_prompt_override=req.rag_user_prompt
+            )
 
             # Record generated queries so the UI can display them immediately,
             # even if later no chunks are found for these queries.
