@@ -315,6 +315,31 @@ class VoiceReceiver:
                     "content": ai_response
                 })
                 
+                # Create message data for user input
+                user_msg_data = {
+                    "id": f"voice-user-{user_id}-{datetime.now().timestamp()}",
+                    "text": f"[{username}] {text}",
+                    "sender": "user",
+                    "timestamp": datetime.now().isoformat(),
+                    "channel_name": f"🎤 Voice ({self.text_channel.name if self.text_channel else 'Unknown'})",
+                    "discord_user": username,
+                    "mode": "voice"
+                }
+                
+                # Create message data for AI response
+                ai_msg_data = {
+                    "id": f"voice-ai-{datetime.now().timestamp()}",
+                    "text": ai_response,
+                    "sender": "ai",
+                    "timestamp": datetime.now().isoformat(),
+                    "channel_name": f"🎤 Voice ({self.text_channel.name if self.text_channel else 'Unknown'})",
+                    "mode": "voice"
+                }
+                
+                # Broadcast to UI
+                await add_to_message_queue(user_msg_data)
+                await add_to_message_queue(ai_msg_data)
+                
                 # Save to chat history
                 save_to_chat_history({
                     "timestamp": datetime.now().isoformat(),

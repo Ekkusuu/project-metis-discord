@@ -615,8 +615,8 @@ def generate_rag_query(
             {"role": "user", "content": user_prompt}
         ]
 
-        # Generate query with low temperature for consistency
-        generated_query = chat_completion(llm_messages, temperature=0.2, max_tokens=1500)
+        # Generate query with moderate temperature - too low causes repetitive patterns
+        generated_query = chat_completion(llm_messages, temperature=0.5, top_p=0.9, max_tokens=150)
         
         # Strip thinking tags from reasoning models
         generated_query = strip_thinking_tags(generated_query)
@@ -715,8 +715,8 @@ def generate_rag_queries(
             {"role": "user", "content": user_prompt}
         ]
 
-        # Use deterministic sampling and a small token budget; queries should be short
-        generated = chat_completion(llm_messages, temperature=0.0, top_p=0.5, max_tokens=128)
+        # Use moderate temperature to avoid repetitive patterns while maintaining relevance
+        generated = chat_completion(llm_messages, temperature=0.5, top_p=0.9, max_tokens=300)
         if not generated:
             return [last_user_message] * req_count
 

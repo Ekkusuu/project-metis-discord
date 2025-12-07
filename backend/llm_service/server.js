@@ -147,11 +147,20 @@ app.post("/judgment", async (req, res) => {
     const systemMsg = system_prompt || config.judgment?.system_prompt || "You are a judgment AI.";
     
     // Split messages into context (all but last) and last message
-    const contextMessages = messages.slice(0, -1).map(m => `${m.role === 'user' ? 'User' : 'AI'}: ${m.content}`).join('\\n');
-    const lastMessage = messages.length > 0 ? `${messages[messages.length - 1].role === 'user' ? 'User' : 'AI'}: ${messages[messages.length - 1].content}` : '';
+    // User messages already have [username] prefix in content, AI messages get [Metis] prefix
+    const contextMessages = messages.slice(0, -1).map(m => 
+      m.role === 'user' ? m.content : `[Metis]: ${m.content}`
+    ).join('\n');
+    const lastMessage = messages.length > 0 ? (
+      messages[messages.length - 1].role === 'user' 
+        ? messages[messages.length - 1].content 
+        : `[Metis]: ${messages[messages.length - 1].content}`
+    ) : '';
     
-    let userMsg = config.judgment?.user_prompt || '{context}\\n\\n{last_message}\\n\\nShould AI respond?';
-    userMsg = userMsg.replace('{context}', contextMessages).replace('{last_message}', lastMessage).replace('{conversation}', messages.map(m => `${m.role === 'user' ? 'User' : 'AI'}: ${m.content}`).join('\\n'));
+    let userMsg = config.judgment?.user_prompt || '{context}\n\n{last_message}\n\nShould AI respond?';
+    userMsg = userMsg.replace('{context}', contextMessages).replace('{last_message}', lastMessage).replace('{conversation}', messages.map(m => 
+      m.role === 'user' ? m.content : `[Metis]: ${m.content}`
+    ).join('\n'));
     
     const chatHistory = [
       {

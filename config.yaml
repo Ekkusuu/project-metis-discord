@@ -4,7 +4,7 @@
 # Options: therapist, casual, mean
 # This automatically selects the matching prompts from system_prompts.yaml
 # To add more: just add new personality sections in system_prompts.yaml
-personality: "mean"
+personality: "therapist"
 
 # ============================================================================
 # LLM Model Settings
@@ -74,7 +74,7 @@ voice:
       Latest voice input:
       {last_message}
       
-      Should Metis respond?
+      Should Metis respond? Reply with "positive" or "negative".
 
 
 memory:
