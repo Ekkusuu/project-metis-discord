@@ -285,7 +285,7 @@ rag:
     1. Create a query that incorporates relevant context
     2. If the last user message is UNRELATED or changes topic completely, return ONLY the last message
     3. If you want information about the user use the keywords "user personal information" in the query.
-    4. You are talking to multiple users on Discord. Use their usernames in the query if relevant.
+    4. You are talking to multiple users on Discord. Use their usernames in the query if relevant. Their usernames are in square brackets [username].
     5. Keep queries concise (max 1-2 sentences)
     6. Focus on key concepts and search terms and keywords
     7. The query should be short and focused on keywords.
@@ -313,7 +313,7 @@ rag:
     1. Create a query that incorporates relevant context
     2. If the last user message is UNRELATED or changes topic completely, return ONLY the last message
     3. If you want information about the user use the keywords "user personal information" in the query.
-    4. You are talking to multiple users on Discord. Use their usernames in the query if relevant.
+    4. You are talking to multiple users on Discord. Use their usernames in the query if relevant. Their usernames are in square brackets [username].
     5. Keep queries concise (max 1-2 sentences)
     6. Focus on key concepts and search terms and keywords
     7. The query should be short and focused on keywords.

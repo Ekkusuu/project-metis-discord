@@ -4,6 +4,7 @@ Uses Parakeet TDT for STT and Kokoro for TTS.
 """
 import io
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional, AsyncGenerator
 import numpy as np
@@ -42,6 +43,11 @@ class VoiceService:
         self.stt_model: Optional[any] = None
         self.tts_pipeline: Optional[any] = None
         self._initialized = False
+        # Dedicated thread pool for TTS to avoid blocking other operations
+        # max_workers=1 ensures TTS calls are serialized (one at a time)
+        self._tts_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="TTS")
+        # Semaphore to ensure only one TTS operation at a time
+        self._tts_lock = asyncio.Lock()
         
     async def initialize(self):
         """Initialize STT and TTS models asynchronously."""
@@ -562,40 +568,49 @@ class VoiceService:
         if not self.tts_pipeline:
             print("TTS pipeline not available")
             return None
-            
-        try:
-            voice = self.config.get("tts_voice", "af_heart")
-            sample_rate = self.config.get("sample_rate", 24000)
-            
-            # Generate speech in executor
-            loop = asyncio.get_event_loop()
-            audio_chunks = await loop.run_in_executor(
-                None,
-                lambda: list(self.tts_pipeline(text, voice=voice))
-            )
-            
-            if not audio_chunks:
-                return None
+        
+        # Use lock to serialize TTS calls - prevents GPU contention
+        async with self._tts_lock:
+            try:
+                voice = self.config.get("tts_voice", "af_heart")
                 
-            # Combine all audio chunks
-            audio_parts = []
-            for _, _, audio in audio_chunks:
-                audio_parts.append(audio)
-            
-            if not audio_parts:
-                return None
+                # Define the TTS function to run in executor
+                def run_tts():
+                    try:
+                        return list(self.tts_pipeline(text, voice=voice))
+                    except Exception as e:
+                        print(f"TTS pipeline error: {e}")
+                        return None
                 
-            # Concatenate all audio
-            full_audio = np.concatenate(audio_parts)
-            
-            # Convert float32 to int16 PCM
-            audio_int16 = (full_audio * 32767).astype(np.int16)
-            
-            return audio_int16.tobytes()
-            
-        except Exception as e:
-            print(f"TTS error: {e}")
-            return None
+                # Generate speech in dedicated TTS executor (not the default shared one)
+                loop = asyncio.get_event_loop()
+                audio_chunks = await loop.run_in_executor(self._tts_executor, run_tts)
+                
+                if not audio_chunks:
+                    return None
+                    
+                # Combine all audio chunks
+                audio_parts = []
+                for _, _, audio in audio_chunks:
+                    if audio is not None:
+                        audio_parts.append(audio)
+                
+                if not audio_parts:
+                    return None
+                    
+                # Concatenate all audio
+                full_audio = np.concatenate(audio_parts)
+                
+                # Convert float32 to int16 PCM
+                audio_int16 = (full_audio * 32767).astype(np.int16)
+                
+                return audio_int16.tobytes()
+                
+            except Exception as e:
+                print(f"TTS error: {e}")
+                import traceback
+                traceback.print_exc()
+                return None
     
     async def audio_stream_to_pcm(self, audio_bytes: bytes) -> bytes:
         """

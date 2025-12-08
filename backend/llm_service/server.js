@@ -287,19 +287,43 @@ app.post("/chat/completion", async (req, res) => {
       return res.status(400).json({ error: "Last message must be from user" });
     }
 
-    // Generate response
+    // Generate response with stop strings to prevent repetitive generation
     const response = await chat.generateResponse(chatHistory, {
       temperature: temperature ?? config.chat.temperature ?? 0.7,
       topP: top_p ?? config.chat.top_p ?? 0.95,
       maxTokens: max_tokens ?? config.chat.max_tokens ?? 512,
+      stopStrings: ['<|im_end|>', '<|im_start|>', '\n\n\n', '"""', "'''", 'RULES:', 'You are a'],
+      repeatPenalty: {
+        penalty: 1.3,
+        frequencyPenalty: 0.2,
+        presencePenalty: 0.2,
+        penalizeNewLine: true,
+      },
     });
+    
+    // Clean up response - remove any leaked system prompt content
+    let cleanResponse = response;
+    if (typeof cleanResponse === 'string') {
+      // Remove any system prompt leakage patterns
+      if (cleanResponse.includes('RULES:') || cleanResponse.includes('You are a query')) {
+        // Find the first line that looks like an actual query
+        const lines = cleanResponse.split('\n');
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (trimmed.length > 0 && !trimmed.includes('RULES') && !trimmed.startsWith('You are')) {
+            cleanResponse = trimmed;
+            break;
+          }
+        }
+      }
+    }
 
     res.json({
       choices: [
         {
           message: {
             role: "assistant",
-            content: response,
+            content: cleanResponse,
           },
         },
       ],
@@ -406,6 +430,12 @@ app.post("/chat/stream", async (req, res) => {
         temperature: temperature ?? config.chat.temperature ?? 0.7,
         topP: top_p ?? config.chat.top_p ?? 0.95,
         maxTokens: max_tokens ?? config.chat.max_tokens ?? 512,
+        stopStrings: ['<|im_end|>', '<|im_start|>'],
+        repeatPenalty: {
+          penalty: 1.2,
+          frequencyPenalty: 0.1,
+          presencePenalty: 0.1,
+        },
         onTextChunk: (chunk) => {
           tokenCount++;
           res.write(

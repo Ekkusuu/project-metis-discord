@@ -615,7 +615,7 @@ def generate_rag_query(
             {"role": "user", "content": user_prompt}
         ]
 
-        # Generate query with moderate temperature - too low causes repetitive patterns
+        # Generate query with moderate temperature
         generated_query = chat_completion(llm_messages, temperature=0.5, top_p=0.9, max_tokens=150)
         
         # Strip thinking tags from reasoning models
@@ -623,6 +623,26 @@ def generate_rag_query(
         
         # Clean up the query
         generated_query = generated_query.strip().strip('"').strip("'")
+        
+        # Remove system prompt leak - if the output contains system prompt patterns, extract just the query
+        import re
+        # Check for common system prompt leakage patterns
+        if 'RULES:' in generated_query or 'You are a' in generated_query:
+            # Try to find the actual query after common markers
+            markers = ['Output ONLY', 'Generate', 'query:', 'Query:']
+            for marker in markers:
+                if marker.lower() in generated_query.lower():
+                    idx = generated_query.lower().rfind(marker.lower())
+                    generated_query = generated_query[idx + len(marker):].strip()
+                    break
+            # If still contains system prompt patterns, fallback to user message
+            if 'RULES:' in generated_query or len(generated_query) > 200:
+                print(f"System prompt leak detected, using original: {last_user_message}")
+                return last_user_message
+        
+        # Take only first line if multiple lines (prevents runaway output)
+        if '\n' in generated_query:
+            generated_query = generated_query.split('\n')[0].strip()
         
         # Sanity check: if generated query is empty or too short, use original
         if len(generated_query) < 3:
@@ -704,7 +724,7 @@ def generate_rag_queries(
         else:
             user_prompt_template = resolve_prompt(rag_cfg.get("query_generation_user_prompt", ""))
 
-        # Encourage the model to emit exactly N queries, one per line
+        # Format prompt - request specific number of queries
         user_prompt = user_prompt_template.format(
             conversation_context=conversation_context,
             last_user_message=last_user_message
