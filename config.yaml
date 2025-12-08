@@ -61,6 +61,9 @@ voice:
   # Minimum RMS threshold for speech to be considered valid for transcription.
   # Values are linear (0.0 - 1.0). 0.01 is a good default; increase if noise triggers false positives.
   min_rms: 0.01
+  # If true, discard user speech that occurs while the AI is talking (prevents responding to old messages)
+  # If false, queue user speech and process after AI finishes speaking
+  discard_while_speaking: true
   
   # Voice Chat Judgment Settings
   judgment:

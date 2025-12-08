@@ -16,6 +16,8 @@ import discord.ext.voice_recv as voice_recv
 from dotenv import load_dotenv
 import aiohttp
 import io
+import re
+import time
 import numpy as np
 
 # Add project root to path for imports
@@ -129,6 +131,13 @@ class VoiceReceiver:
         if user.bot:
             return
         
+        # Check if AI is speaking and discard_while_speaking is enabled
+        voice_cfg = config.get("voice", {})
+        discard_while_speaking = voice_cfg.get("discard_while_speaking", True)
+        if discard_while_speaking and self.voice_client and self.voice_client.is_playing():
+            # Don't buffer audio while AI is speaking - discard it
+            return
+        
         user_id = user.id
         current_time = asyncio.get_event_loop().time()
         
@@ -145,7 +154,6 @@ class VoiceReceiver:
         if isinstance(data.pcm, bytes):
             try:
                 # Read configured gain (default 2.0 if not configured)
-                voice_cfg = config.get("voice", {})
                 gain = float(voice_cfg.get("input_gain", 2.0))
                 # Convert bytes to int16 array, scale by configured gain, clip to int16 range and append
                 arr = np.frombuffer(data.pcm, dtype=np.int16).astype(np.int32) * gain
@@ -181,6 +189,13 @@ class VoiceReceiver:
                         buffer_size > 0 and
                         not self.processing_audio.get(user_id, False)):
                         
+                        # Check if AI is currently speaking and discard_while_speaking is enabled
+                        discard_while_speaking = voice_cfg.get("discard_while_speaking", True)
+                        if discard_while_speaking and self.voice_client and self.voice_client.is_playing():
+                            print(f"🔇 Discarding audio from user {user_id} - AI is speaking")
+                            self.user_audio_buffers[user_id] = bytearray()  # Clear buffer
+                            continue
+                        
                         print(f"🔊 Processing audio for user {user_id} after {silence_duration:.1f}s silence")
                         # Process this user's audio
                         await self._process_user_audio(user_id)
@@ -196,31 +211,38 @@ class VoiceReceiver:
         try:
             self.processing_audio[user_id] = True
             
+            # Start total timing
+            total_start = time.perf_counter()
+            timings = {}
+            
             # Get audio buffer
             audio_data = bytes(self.user_audio_buffers[user_id])
             self.user_audio_buffers[user_id] = bytearray()  # Clear buffer
             
-            print(f"Processing audio from user {user_id}, size: {len(audio_data)} bytes")
+            print(f"\n{'='*60}")
+            print(f"🎙️ Processing audio from user {user_id}, size: {len(audio_data)} bytes")
             
-            # Get voice service
+            # Get voice service (not counted in transcription time)
             voice_service = await get_voice_service()
             
-            # Transcribe audio (Discord voice is 48kHz stereo opus, voice_recv gives us 48kHz PCM)
+            # === TRANSCRIPTION ===
+            t_start = time.perf_counter()
             transcription = await voice_service.transcribe_audio(audio_data, sample_rate=48000)
+            timings['transcription'] = time.perf_counter() - t_start
             
             if not transcription or len(transcription.strip()) == 0:
                 print("No transcription result")
                 self.processing_audio[user_id] = False
                 return
             
-            print(f"Transcribed: {transcription}")
+            print(f"📝 Transcribed: {transcription}")
             
             # Get username from stored user object
             user = self.user_objects.get(user_id)
             username = user.display_name if user else f"User{user_id}"
             
             # Process voice command (no text messages to Discord)
-            await self._process_voice_command(transcription, user_id, username)
+            await self._process_voice_command(transcription, user_id, username, total_start, timings)
             
         except Exception as e:
             print(f"Error processing user audio: {e}")
@@ -229,8 +251,13 @@ class VoiceReceiver:
         finally:
             self.processing_audio[user_id] = False
     
-    async def _process_voice_command(self, text: str, user_id: int, username: str):
+    async def _process_voice_command(self, text: str, user_id: int, username: str, total_start: float = None, timings: dict = None):
         """Process voice input and generate response."""
+        if total_start is None:
+            total_start = time.perf_counter()
+        if timings is None:
+            timings = {}
+        
         try:
             # Use globals instead of importing (avoid circular import)
             global channel_contexts, API_URL, config
@@ -245,8 +272,12 @@ class VoiceReceiver:
                 "content": user_content
             })
             
-            # Check judgment (voice mode)
-            if not await should_respond_to_message(context, voice_mode=True):
+            # === JUDGMENT ===
+            t_start = time.perf_counter()
+            should_respond = await should_respond_to_message(context, voice_mode=True)
+            timings['judgment'] = time.perf_counter() - t_start
+            
+            if not should_respond:
                 print(f"Judgment: Not responding to voice input")
                 return
             
@@ -274,7 +305,44 @@ class VoiceReceiver:
                 "rag_user_prompt": "@rag.query_generation_voice_user"
             }
             
-            ai_response = ""
+            ai_response_full = ""
+            rag_timings = {}
+            llm_generation_time = 0
+            
+            # Streaming TTS Setup
+            # Match sentence boundaries more flexibly (handles streaming where space comes later)
+            sentence_end_chars = set('.!?')
+            current_sentence = ""
+            pending_sentences = []  # Queue of sentences ready for TTS
+            audio_queue = asyncio.Queue()
+            synthesis_queue = asyncio.Queue()  # Queue of sentences to synthesize
+            
+            # Start audio playback worker
+            playback_task = asyncio.create_task(
+                self._process_audio_queue(audio_queue, timings, total_start)
+            )
+            
+            # Start TTS synthesis worker (runs in parallel with LLM streaming)
+            async def synthesis_worker():
+                voice_service = await get_voice_service()
+                while True:
+                    sentence = await synthesis_queue.get()
+                    if sentence is None:
+                        break
+                    try:
+                        t_synth_start = time.perf_counter()
+                        audio_bytes = await voice_service.synthesize_speech(sentence)
+                        timings['tts_synthesis'] = timings.get('tts_synthesis', 0) + (time.perf_counter() - t_synth_start)
+                        if audio_bytes:
+                            await audio_queue.put(audio_bytes)
+                    except Exception as e:
+                        print(f"TTS synthesis error: {e}")
+                    synthesis_queue.task_done()
+            
+            synthesis_task = asyncio.create_task(synthesis_worker())
+            
+            # === LLM RESPONSE & STREAMING TTS ===
+            t_start = time.perf_counter()
             
             async with aiohttp.ClientSession() as session:
                 async with session.post(
@@ -285,6 +353,8 @@ class VoiceReceiver:
                     if not response.ok:
                         error_text = await response.text()
                         await self.text_channel.send(f"❌ Error: {error_text[:500]}")
+                        playback_task.cancel()
+                        synthesis_task.cancel()
                         return
                     
                     async for line in response.content:
@@ -295,24 +365,74 @@ class VoiceReceiver:
                             chunk = json.loads(line.decode('utf-8'))
                             
                             if "delta" in chunk and chunk["delta"]:
-                                ai_response += chunk["delta"]
+                                delta = chunk["delta"]
+                                ai_response_full += delta
+                                current_sentence += delta
+                                
+                                # Check for sentence boundaries
+                                # Split on sentence-ending punctuation followed by space or end
+                                while True:
+                                    # Find the first sentence-ending punctuation
+                                    end_pos = -1
+                                    for i, char in enumerate(current_sentence):
+                                        if char in sentence_end_chars:
+                                            # Check if followed by space, newline, or end of string
+                                            if i + 1 >= len(current_sentence) or current_sentence[i + 1] in ' \n\t':
+                                                end_pos = i
+                                                break
+                                    
+                                    if end_pos == -1:
+                                        break
+                                    
+                                    # Extract the sentence (including the punctuation)
+                                    sentence = current_sentence[:end_pos + 1].strip()
+                                    current_sentence = current_sentence[end_pos + 1:].lstrip()
+                                    
+                                    # Clean the sentence
+                                    clean_sentence = re.sub(r'^\[?Metis\]?\s*:\s*', '', sentence, flags=re.IGNORECASE).strip()
+                                    
+                                    if clean_sentence and len(clean_sentence) > 2:  # Skip very short fragments
+                                        # Queue for synthesis (non-blocking)
+                                        await synthesis_queue.put(clean_sentence)
                             
                             if chunk.get("done"):
+                                rag_timings = chunk.get("rag_timings", {})
+                                llm_generation_time = chunk.get("llm_generation_time", 0)
                                 break
                                 
                         except json.JSONDecodeError:
                             continue
             
-            if ai_response:
+            # Process remaining text (queue to synthesis worker)
+            if current_sentence.strip():
+                clean_sentence = re.sub(r'^\[?Metis\]?\s*:\s*', '', current_sentence, flags=re.IGNORECASE).strip()
+                if clean_sentence:
+                    await synthesis_queue.put(clean_sentence)
+
+            # Signal end of synthesis queue and wait for it to finish
+            await synthesis_queue.put(None)
+            await synthesis_task
+            
+            # Signal end of audio queue
+            await audio_queue.put(None)
+            
+            timings['llm_total'] = time.perf_counter() - t_start
+            timings['rag_query_generation'] = rag_timings.get('query_generation', 0)
+            timings['rag_retrieval'] = rag_timings.get('retrieval', 0)
+            timings['llm_generation'] = llm_generation_time
+            
+            # Wait for playback to finish
+            await playback_task
+            
+            if ai_response_full:
                 # Clean response
-                import re
-                ai_response = re.sub(r'^\[?Metis\]?\s*:\s*', '', ai_response, flags=re.IGNORECASE)
-                ai_response = ai_response.replace('\n\n', '\n')
+                ai_response_clean = re.sub(r'^\[?Metis\]?\s*:\s*', '', ai_response_full, flags=re.IGNORECASE)
+                ai_response_clean = ai_response_clean.replace('\n\n', '\n')
                 
                 # Add to context (no text message to Discord in voice mode)
                 context.append({
                     "role": "assistant",
-                    "content": ai_response
+                    "content": ai_response_clean
                 })
                 
                 # Create message data for user input
@@ -329,18 +449,22 @@ class VoiceReceiver:
                 # Create message data for AI response
                 ai_msg_data = {
                     "id": f"voice-ai-{datetime.now().timestamp()}",
-                    "text": ai_response,
+                    "text": ai_response_clean,
                     "sender": "ai",
                     "timestamp": datetime.now().isoformat(),
                     "channel_name": f"🎤 Voice ({self.text_channel.name if self.text_channel else 'Unknown'})",
                     "mode": "voice"
                 }
                 
-                # Broadcast to UI
-                await add_to_message_queue(user_msg_data)
-                await add_to_message_queue(ai_msg_data)
+                # === UI BROADCAST (Fire-and-forget after playback) ===
+                # Send user message first, then AI message (in order)
+                async def broadcast_messages():
+                    await add_to_message_queue(user_msg_data)
+                    await add_to_message_queue(ai_msg_data)
+                asyncio.create_task(broadcast_messages())
                 
-                # Save to chat history
+                # === SAVE TO HISTORY ===
+                t_start = time.perf_counter()
                 save_to_chat_history({
                     "timestamp": datetime.now().isoformat(),
                     "channel_id": str(channel_id),
@@ -356,13 +480,33 @@ class VoiceReceiver:
                     "channel_id": str(channel_id),
                     "user_id": str(bot.user.id),
                     "username": bot.user.display_name,
-                    "content": ai_response,
+                    "content": ai_response_clean,
                     "role": "assistant",
                     "mode": "voice"
                 })
+                timings['save_history'] = time.perf_counter() - t_start
                 
-                # Play TTS response
-                await self.play_tts_response(ai_response)
+                # === PRINT TIMING SUMMARY ===
+                total_time = time.perf_counter() - total_start
+                time_to_first_audio = timings.get('time_to_first_audio', total_time) # Fallback if no audio
+                
+                print(f"\n{'='*60}")
+                print(f"⏱️  VOICE PIPELINE TIMING SUMMARY")
+                print(f"{'='*60}")
+                print(f"  1.  Transcription (STT):        {timings.get('transcription', 0):>7.3f}s")
+                print(f"  2.  Judgment AI:                {timings.get('judgment', 0):>7.3f}s")
+                print(f"  3.  RAG Query Generation:       {timings.get('rag_query_generation', 0):>7.3f}s")
+                print(f"  4.  RAG Retrieval + Rerank:     {timings.get('rag_retrieval', 0):>7.3f}s")
+                print(f"  5.  LLM Generation:             {timings.get('llm_generation', 0):>7.3f}s")
+                print(f"      (LLM total w/ overhead):    {timings.get('llm_total', 0):>7.3f}s")
+                print(f"  6.  TTS Synthesis (Total):      {timings.get('tts_synthesis', 0):>7.3f}s")
+                print(f"  7.  Audio Playback (Total):     {timings.get('tts_playback', 0):>7.3f}s")
+                print(f"  8.  Save to History:            {timings.get('save_history', 0):>7.3f}s")
+                print(f"      UI Broadcast:               (async, after playback)")
+                print(f"{'─'*60}")
+                print(f"  ⚡ Time to first audio:         {time_to_first_audio:>7.3f}s")
+                print(f"  🔊 Total pipeline time:         {total_time:>7.3f}s")
+                print(f"{'='*60}\n")
         
         except Exception as e:
             print(f"Error processing voice command: {e}")
@@ -376,28 +520,52 @@ class VoiceReceiver:
             self.check_task.cancel()
         print(f"🔇 Voice receiver stopped for channel {self.channel_id}")
     
-    async def play_tts_response(self, text: str):
-        """Generate TTS and play in voice channel."""
+    async def play_tts_response(self, text: str, timings: dict = None):
+        """Generate TTS and play in voice channel. Returns timing data."""
         if not self.active or not self.voice_client or not self.voice_client.is_connected():
             return
         
         try:
-            # Get voice service
-            voice_service = await get_voice_service()
+            if timings is None:
+                timings = {}
             
-            # Convert text to speech
+            # === TTS SYNTHESIS ===
+            t_start = time.perf_counter()
+            voice_service = await get_voice_service()
             audio_bytes = await voice_service.synthesize_speech(text)
+            timings['tts_synthesis'] = time.perf_counter() - t_start
             
             if not audio_bytes:
                 print("TTS generation failed")
                 return
             
-            # Play audio in voice channel
+            # === AUDIO PLAYBACK ===
+            t_start = time.perf_counter()
             await self._play_audio(audio_bytes)
+            timings['tts_playback'] = time.perf_counter() - t_start
             
         except Exception as e:
             print(f"Error in TTS response: {e}")
     
+    async def _process_audio_queue(self, audio_queue: asyncio.Queue, timings: dict, t_start_pipeline: float):
+        """Process audio chunks from the queue and play them sequentially."""
+        first_chunk = True
+        while True:
+            audio_bytes = await audio_queue.get()
+            if audio_bytes is None:
+                break
+            
+            # Record time to first audio
+            if first_chunk:
+                timings['time_to_first_audio'] = time.perf_counter() - t_start_pipeline
+                first_chunk = False
+            
+            t_playback_start = time.perf_counter()
+            await self._play_audio(audio_bytes)
+            timings['tts_playback'] = timings.get('tts_playback', 0) + (time.perf_counter() - t_playback_start)
+            
+            audio_queue.task_done()
+
     async def _play_audio(self, audio_bytes: bytes):
         """Play audio bytes in the voice channel."""
         if not self.voice_client or not self.voice_client.is_connected():
@@ -405,10 +573,20 @@ class VoiceReceiver:
         
         try:
             import wave
-            import numpy as np
+            import uuid
+            
+            # Clear all user audio buffers when AI starts speaking (if discard_while_speaking is enabled)
+            voice_cfg = config.get("voice", {})
+            if voice_cfg.get("discard_while_speaking", True):
+                for user_id in list(self.user_audio_buffers.keys()):
+                    if len(self.user_audio_buffers[user_id]) > 0:
+                        # Only log once per interaction to avoid spam
+                        # print(f"🔇 Clearing buffered audio for user {user_id}")
+                        self.user_audio_buffers[user_id] = bytearray()
             
             # Convert PCM bytes to WAV format for FFmpeg
-            temp_wav = PROJECT_ROOT / "temp_tts.wav"
+            # Use unique filename to avoid conflicts
+            temp_wav = PROJECT_ROOT / f"temp_tts_{uuid.uuid4()}.wav"
             with wave.open(str(temp_wav), 'wb') as wav_file:
                 wav_file.setnchannels(1)  # Mono
                 wav_file.setsampwidth(2)  # 16-bit
@@ -425,7 +603,6 @@ class VoiceReceiver:
             
             # Clean up temp file
             temp_wav.unlink(missing_ok=True)
-            print("✓ TTS playback complete")
             
         except Exception as e:
             print(f"Error playing audio: {e}")
@@ -678,7 +855,6 @@ async def on_message(message: discord.Message):
             discord_msg = None
             if ai_response:
                 # Remove AI name prefix if present (e.g., "[Metis]:", "Metis:", etc.)
-                import re
                 ai_response = re.sub(r'^\[?Metis\]?\s*:\s*', '', ai_response, flags=re.IGNORECASE)
                 
                 # Remove excessive spacing - replace double newlines with single

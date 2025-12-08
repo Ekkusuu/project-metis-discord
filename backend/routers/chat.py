@@ -126,12 +126,17 @@ def chat_stream(req: ChatRequest):
 
     # RAG: Retrieve context if enabled
     global _last_rag_results
+    import time as time_module
+    rag_timings = {}  # Store timing data for RAG operations
+    
     if rag_cfg.get("enabled", False):
         # Get the last user message as the query
         user_messages = [m for m in messages if m.role == "user"]
         if user_messages:
             last_user_query = user_messages[-1].content
             
+            # === RAG QUERY GENERATION ===
+            t_start = time_module.perf_counter()
             # Generate contextual RAG queries using conversation history
             # Pass through any RAG overrides from the request (e.g., voice mode uses fewer queries)
             messages_for_query = [{"role": m.role, "content": m.content} for m in messages]
@@ -142,7 +147,8 @@ def chat_stream(req: ChatRequest):
                 system_prompt_override=req.rag_system_prompt,
                 user_prompt_override=req.rag_user_prompt
             )
-
+            rag_timings['query_generation'] = time_module.perf_counter() - t_start
+            
             # Record generated queries so the UI can display them immediately,
             # even if later no chunks are found for these queries.
             _last_rag_results = {
@@ -151,6 +157,8 @@ def chat_stream(req: ChatRequest):
                 "results": []
             }
 
+            # === RAG RETRIEVAL (embedding + vector search + reranking) ===
+            t_start = time_module.perf_counter()
             # Run separate retrievals for each generated query and combine results
             combined_contexts: List[Dict[str, Any]] = []
             seen = set()
@@ -170,6 +178,7 @@ def chat_stream(req: ChatRequest):
                     "accepted": results.get("accepted", []),
                     "rejected": rejected_distance + rejected_score,
                 })
+            rag_timings['retrieval'] = time_module.perf_counter() - t_start
 
             # Now combine accepted chunks across queries, but dedupe only at this final stage
             combined_accepted: List[Dict[str, Any]] = []
@@ -335,6 +344,7 @@ def chat_stream(req: ChatRequest):
         # Calculate tokens per second
         elapsed = time.time() - start_time
         tokens_per_second = token_count / elapsed if elapsed > 0 else 0
+        llm_generation_time = elapsed
         
         # Update context with assistant response
         _current_context.append({
@@ -347,6 +357,8 @@ def chat_stream(req: ChatRequest):
         final_chunk = {
             "done": True,
             "tokens_per_second": round(tokens_per_second, 2),
+            "rag_timings": rag_timings,
+            "llm_generation_time": round(llm_generation_time, 3),
             "trimmed_messages": [
                 {"role": msg["role"], "content": msg["content"]}
                 for msg in messages_dict
