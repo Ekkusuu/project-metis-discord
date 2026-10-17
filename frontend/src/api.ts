@@ -1,0 +1,108 @@
+export const API_URL: string = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+
+/** Window event dispatched whenever an AI message arrives on the Discord stream. */
+export const AI_MESSAGE_EVENT = 'metis:ai-message';
+
+export interface DiscordMessage {
+  id: string;
+  seq: number;
+  text: string;
+  sender: 'user' | 'ai';
+  timestamp: string;
+  discord_user?: string;
+  channel_name?: string;
+  mode?: 'text' | 'voice';
+  tokensPerSecond?: number;
+}
+
+export interface BackendStatus {
+  llm_ready: boolean;
+  discord_connected: boolean;
+  bot_user: string | null;
+  personality: string;
+  rag_enabled: boolean;
+  tools_enabled: boolean;
+  voice_channels: string[];
+}
+
+export interface RagStats {
+  total_chunks: number;
+  total_files: number;
+  collection_name: string;
+  enabled: boolean;
+}
+
+export interface RagResult {
+  source_file: string;
+  distance: number;
+  rerank_score?: number | null;
+  text_preview: string;
+  chunk_index: number;
+  used: boolean;
+  rejection_reason?: string;
+}
+
+export interface RagRetrieval {
+  queries?: string[];
+  original_query?: string;
+  message?: string;
+  results: RagResult[];
+}
+
+export interface ToolCall {
+  tool: string;
+  arguments: Record<string, unknown>;
+}
+
+export interface ToolResult {
+  tool: string;
+  success: boolean;
+  execution_time: number;
+  error?: string | null;
+}
+
+export interface ToolExecution {
+  tool_calls: ToolCall[];
+  results: ToolResult[];
+  message?: string;
+  timings?: Record<string, number>;
+}
+
+export interface RagStreamPayload {
+  results: RagRetrieval | Record<string, never>;
+  tools: ToolExecution | Record<string, never>;
+}
+
+export interface ContextMessage {
+  role: 'system' | 'user' | 'assistant';
+  content: string;
+  timestamp?: string;
+}
+
+async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(`${API_URL}${path}`, init);
+  if (!response.ok) {
+    let detail = `HTTP ${response.status}`;
+    try {
+      const body = (await response.json()) as { detail?: unknown };
+      if (typeof body.detail === 'string') detail = body.detail;
+    } catch {
+      // body was not JSON; keep the status text
+    }
+    throw new Error(detail);
+  }
+  return (await response.json()) as T;
+}
+
+export const getMessages = () => request<{ messages: DiscordMessage[] }>('/discord/messages');
+export const clearMessages = () => request<unknown>('/discord/clear', { method: 'POST' });
+export const getStatus = () => request<BackendStatus>('/status');
+export const getRagStats = () => request<RagStats>('/rag/stats');
+export const reindexRag = (clearExisting: boolean) =>
+  request<{ status: string; total_chunks: number; folders: unknown }>(
+    `/rag/reindex?clear_existing=${clearExisting}`,
+    { method: 'POST' },
+  );
+export const clearRag = () =>
+  request<{ status: string; deleted_count: number }>('/rag/clear', { method: 'POST' });
+export const getChatContext = () => request<{ messages: ContextMessage[] }>('/chat/context');

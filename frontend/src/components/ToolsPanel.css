@@ -1,0 +1,107 @@
+.tool-card {
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-left-width: 3px;
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
+}
+
+.tool-card.success {
+  border-left-color: var(--success);
+}
+
+.tool-card.failure {
+  border-left-color: var(--danger);
+}
+
+.tool-card.pending {
+  border-left-color: var(--warning);
+}
+
+.tool-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.tool-name {
+  font-family: var(--font-mono);
+  font-size: 0.875rem;
+  font-weight: 700;
+}
+
+.tool-pending {
+  color: var(--warning);
+  font-size: 0.75rem;
+}
+
+.tool-args {
+  margin: var(--space-2) 0 0;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+}
+
+.tool-arg {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.tool-arg dt {
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+
+.tool-arg dd {
+  margin: 0;
+  color: var(--accent);
+  overflow-wrap: anywhere;
+}
+
+.tool-time {
+  margin-top: var(--space-2);
+  color: var(--text-muted);
+  font-size: 0.75rem;
+}
+
+.tool-error {
+  margin-top: var(--space-2);
+  padding: var(--space-2);
+  border-radius: var(--radius-sm);
+  background: rgba(248, 81, 73, 0.12);
+  color: var(--danger);
+  font-size: 0.75rem;
+  overflow-wrap: anywhere;
+}
+
+.tool-message {
+  color: var(--text-muted);
+  font-size: 0.8125rem;
+  font-style: italic;
+}
+
+.tool-timings {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  font-size: 0.8125rem;
+}
+
+.tool-timing {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-1) var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+
+.tool-timing dt {
+  color: var(--text-muted);
+}
+
+.tool-timing dd {
+  margin: 0;
+  font-family: var(--font-mono);
+}

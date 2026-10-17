@@ -1,0 +1,59 @@
+.status-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-4);
+  font-size: 0.8125rem;
+  color: var(--text-muted);
+}
+
+.status-bar.muted {
+  font-style: italic;
+}
+
+.status-bot {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.status-item {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.status-item.offline {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-muted);
+}
+
+.status-dot.ok {
+  background: var(--success);
+  box-shadow: 0 0 6px var(--success);
+}
+
+.status-dot.bad {
+  background: var(--danger);
+}
+
+.status-pill {
+  padding: 1px var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: 0.75rem;
+}
+
+.status-pill.voice {
+  border-color: var(--accent-strong);
+  background: rgba(31, 111, 235, 0.15);
+  color: var(--accent);
+}

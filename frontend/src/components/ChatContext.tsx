@@ -1,98 +1,86 @@
-import { useState, useEffect } from 'react';
+import { useCallback, useEffect, useState } from 'react';
+import { AI_MESSAGE_EVENT, getChatContext } from '../api';
+import type { ContextMessage } from '../api';
 import './ChatContext.css';
 
-interface ContextMessage {
-  role: 'system' | 'user' | 'assistant';
-  content: string;
-  timestamp?: string;
-}
+const ROLE_LABELS: Record<ContextMessage['role'], string> = {
+  system: '⚙️ System',
+  user: '👤 User',
+  assistant: '🤖 Metis',
+};
 
-interface ChatContextProps {
-  messages?: ContextMessage[];
-}
-
-function ChatContext({ messages: externalMessages }: ChatContextProps) {
+function ChatContext() {
   const [messages, setMessages] = useState<ContextMessage[]>([]);
-  const API_URL = (import.meta as any).env?.VITE_API_URL || 'http://localhost:8000';
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [expanded, setExpanded] = useState<Record<number, boolean>>({});
 
-  const fetchContext = async () => {
+  const fetchContext = useCallback(async () => {
+    setLoading(true);
     try {
-      const resp = await fetch(`${API_URL}/chat/context`);
-      const data = await resp.json();
-      setMessages(data.messages || []);
-    } catch (error) {
-      console.error('Failed to fetch chat context:', error);
+      const data = await getChatContext();
+      setMessages(data.messages ?? []);
+      setError(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLoading(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
-    if (externalMessages) {
-      setMessages(externalMessages);
-    } else {
-      // Initial fetch
-      fetchContext();
-
-      // Listen for message completion events
-      const handleMessageComplete = () => {
-        fetchContext();
-      };
-
-      window.addEventListener('messageComplete', handleMessageComplete);
-      return () => window.removeEventListener('messageComplete', handleMessageComplete);
-    }
-  }, [externalMessages]);
-
-  const getRoleLabel = (role: string) => {
-    switch (role) {
-      case 'system':
-        return '⚙️ System';
-      case 'user':
-        return '👤 You';
-      case 'assistant':
-        return '🤖 Metis';
-      default:
-        return role;
-    }
-  };
-
-  const getRoleClass = (role: string) => {
-    switch (role) {
-      case 'system':
-        return 'system';
-      case 'user':
-        return 'user';
-      case 'assistant':
-        return 'assistant';
-      default:
-        return '';
-    }
-  };
+    fetchContext();
+    window.addEventListener(AI_MESSAGE_EVENT, fetchContext);
+    return () => window.removeEventListener(AI_MESSAGE_EVENT, fetchContext);
+  }, [fetchContext]);
 
   return (
-    <div className="chat-context">
-      <div className="context-header">
-        <h2>Chat Context</h2>
-        <span className="message-count">{messages.length} messages</span>
+    <div className="panel">
+      <div className="panel-header">
+        <h2>Prompt context</h2>
+        <button
+          type="button"
+          className="ctx-refresh"
+          onClick={fetchContext}
+          disabled={loading}
+          title="Refresh"
+        >
+          {loading ? '…' : '🔄'} Refresh
+        </button>
       </div>
+      <div className="ctx-count">{messages.length} messages sent to the LLM</div>
 
-      <div className="context-list">
-        {messages.length === 0 ? (
-          <div className="empty-state">
-            <p>No context yet</p>
-            <p className="empty-hint">Start a conversation to see the context</p>
-          </div>
-        ) : (
-          messages.map((msg, idx) => (
-            <div key={idx} className={`context-message ${getRoleClass(msg.role)}`}>
-              <div className="message-role">{getRoleLabel(msg.role)}</div>
-              <div className="message-content">{msg.content}</div>
-              {msg.timestamp && (
-                <div className="message-timestamp">{new Date(msg.timestamp).toLocaleTimeString()}</div>
-              )}
+      {error && <div className="ctx-error">Failed to load context: {error}</div>}
+
+      {messages.length === 0 && !error ? (
+        <div className="panel-empty">No context yet</div>
+      ) : (
+        messages.map((msg, i) => {
+          const isSystem = msg.role === 'system';
+          const open = !isSystem || !!expanded[i];
+          return (
+            <div key={i} className={`ctx-message ${msg.role}`}>
+              <div className="ctx-head">
+                <span className="ctx-role">{ROLE_LABELS[msg.role] ?? msg.role}</span>
+                {msg.timestamp && (
+                  <span className="ctx-time">{new Date(msg.timestamp).toLocaleTimeString()}</span>
+                )}
+                {isSystem && (
+                  <button
+                    type="button"
+                    className="ctx-toggle"
+                    onClick={() => setExpanded((s) => ({ ...s, [i]: !s[i] }))}
+                    aria-expanded={open}
+                  >
+                    {open ? 'hide' : `show (${msg.content.length} chars)`}
+                  </button>
+                )}
+              </div>
+              <div className={`ctx-content ${open ? '' : 'collapsed'}`}>{msg.content}</div>
             </div>
-          ))
-        )}
-      </div>
+          );
+        })
+      )}
     </div>
   );
 }

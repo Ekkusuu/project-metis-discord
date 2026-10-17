@@ -1,313 +1,162 @@
-import { useState, useEffect } from 'react';
+import { useCallback, useEffect, useState } from 'react';
+import { clearRag, getRagStats, reindexRag } from '../api';
+import type { RagRetrieval, RagStats } from '../api';
 import './RagPanel.css';
 
-interface RagStats {
-  total_chunks: number;
-  total_files: number;
-  collection_name: string;
-  enabled: boolean;
+interface Notice {
+  text: string;
+  type: 'success' | 'error';
 }
 
-interface RagResult {
-  source_file: string;
-  distance: number;
-  rerank_score?: number;  // Optional rerank score
-  text_preview: string;
-  chunk_index: number;
-  used: boolean;
-  rejection_reason?: string;
-}
+const fileName = (path: string) => path.split(/[\\/]/).pop() || path;
 
-interface RagRetrievalData {
-  query?: string;
-  queries?: string[];
-  original_query?: string;
-  results: RagResult[];
-}
-
-function RagPanel() {
+function RagPanel({ retrieval }: { retrieval: RagRetrieval | null }) {
   const [stats, setStats] = useState<RagStats | null>(null);
-  const [ragData, setRagData] = useState<RagRetrievalData>({ results: [] });
-  const [isLoading, setIsLoading] = useState(false);
-  const [message, setMessage] = useState<{ text: string; type: 'success' | 'error' | 'info' } | null>(null);
-  const API_URL = (import.meta as any).env?.VITE_API_URL || 'http://localhost:8000';
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState<Notice | null>(null);
 
-  const fetchStats = async () => {
+  const fetchStats = useCallback(async () => {
     try {
-      const resp = await fetch(`${API_URL}/rag/stats`);
-      const data = await resp.json();
-      setStats(data);
-    } catch (error) {
-      console.error('Failed to fetch RAG stats:', error);
+      setStats(await getRagStats());
+    } catch (err) {
+      console.error('Failed to fetch RAG stats:', err);
     }
-  };
-
-  const fetchRagResults = async () => {
-    try {
-      const resp = await fetch(`${API_URL}/rag/last-retrieval`);
-      const data = await resp.json();
-      // Handle both old array format and new object format
-      if (Array.isArray(data.results)) {
-        setRagData({
-          query: data.results.query,
-          original_query: data.results.original_query,
-          results: data.results.results || []
-        });
-      } else if (data.results) {
-        setRagData(data.results);
-      } else {
-        setRagData({ results: [] });
-      }
-    } catch (error) {
-      console.error('Failed to fetch RAG results:', error);
-    }
-  };
-
-  const connectToRagStream = () => {
-    try {
-      const eventSource = new EventSource(`${API_URL}/rag/stream`);
-
-      eventSource.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          if (data.results) {
-            if (Array.isArray(data.results)) {
-              setRagData({
-                query: data.results.query,
-                original_query: data.results.original_query,
-                results: data.results.results || []
-              });
-            } else {
-              setRagData(data.results);
-            }
-          }
-        } catch (err) {
-          console.error('Failed to parse RAG update:', err);
-        }
-      };
-
-      eventSource.onerror = (err) => {
-        console.error('RAG stream error:', err);
-        eventSource.close();
-        // Reconnect after 5 seconds
-        setTimeout(() => {
-          connectToRagStream();
-        }, 5000);
-      };
-
-      return eventSource;
-    } catch (error) {
-      console.error('Failed to connect to RAG stream:', error);
-      return null;
-    }
-  };
-
-  useEffect(() => {
-    // Initial fetch
-    fetchStats();
-    fetchRagResults();
-
-    // Connect to real-time RAG stream
-    const ragStream = connectToRagStream();
-
-    // Listen for message completion events (updates stats)
-    const handleMessageComplete = () => {
-      fetchStats();
-    };
-
-    window.addEventListener('messageComplete', handleMessageComplete);
-    
-    return () => {
-      window.removeEventListener('messageComplete', handleMessageComplete);
-      if (ragStream) {
-        ragStream.close();
-      }
-    };
   }, []);
 
-  const handleReindex = async () => {
-    setIsLoading(true);
-    setMessage(null);
+  useEffect(() => {
+    fetchStats();
+  }, [fetchStats]);
+
+  useEffect(() => {
+    if (!notice) return;
+    const timer = window.setTimeout(() => setNotice(null), 5000);
+    return () => window.clearTimeout(timer);
+  }, [notice]);
+
+  const run = async (
+    action: () => Promise<string>,
+    failLabel: string,
+    confirmText?: string,
+  ) => {
+    if (confirmText && !confirm(confirmText)) return;
+    setBusy(true);
+    setNotice(null);
     try {
-      const resp = await fetch(`${API_URL}/rag/reindex?clear_existing=false`, {
-        method: 'POST',
-      });
-      const data = await resp.json();
-      setMessage({
-        text: `✓ Reindexed ${data.total_chunks} chunks`,
-        type: 'success',
-      });
+      setNotice({ text: `✓ ${await action()}`, type: 'success' });
       await fetchStats();
-    } catch (error) {
-      setMessage({
-        text: `✗ Reindex failed: ${error}`,
+    } catch (err) {
+      setNotice({
+        text: `✗ ${failLabel}: ${err instanceof Error ? err.message : String(err)}`,
         type: 'error',
       });
     } finally {
-      setIsLoading(false);
-      setTimeout(() => setMessage(null), 5000);
+      setBusy(false);
     }
   };
 
-  const handleClearAll = async () => {
-    if (!confirm('Are you sure you want to delete all embeddings? This will require a full reindex.')) {
-      return;
-    }
+  const handleReindex = () =>
+    run(async () => `Reindexed ${(await reindexRag(false)).total_chunks} chunks`, 'Reindex failed');
 
-    setIsLoading(true);
-    setMessage(null);
-    try {
-      const resp = await fetch(`${API_URL}/rag/clear`, {
-        method: 'POST',
-      });
-      const data = await resp.json();
-      setMessage({
-        text: `✓ Cleared ${data.deleted_count} chunks`,
-        type: 'success',
-      });
-      await fetchStats();
-    } catch (error) {
-      setMessage({
-        text: `✗ Clear failed: ${error}`,
-        type: 'error',
-      });
-    } finally {
-      setIsLoading(false);
-      setTimeout(() => setMessage(null), 5000);
-    }
-  };
+  const handleFullReindex = () =>
+    run(
+      async () => `Full reindex complete: ${(await reindexRag(true)).total_chunks} chunks`,
+      'Full reindex failed',
+      'Clear and rebuild all embeddings?',
+    );
 
-  const handleFullReindex = async () => {
-    if (!confirm('Are you sure you want to clear and rebuild all embeddings?')) {
-      return;
-    }
+  const handleClearAll = () =>
+    run(
+      async () => `Cleared ${(await clearRag()).deleted_count} chunks`,
+      'Clear failed',
+      'Delete all embeddings? This will require a full reindex.',
+    );
 
-    setIsLoading(true);
-    setMessage(null);
-    try {
-      const resp = await fetch(`${API_URL}/rag/reindex?clear_existing=true`, {
-        method: 'POST',
-      });
-      const data = await resp.json();
-      setMessage({
-        text: `✓ Full reindex complete: ${data.total_chunks} chunks`,
-        type: 'success',
-      });
-      await fetchStats();
-    } catch (error) {
-      setMessage({
-        text: `✗ Full reindex failed: ${error}`,
-        type: 'error',
-      });
-    } finally {
-      setIsLoading(false);
-      setTimeout(() => setMessage(null), 5000);
-    }
-  };
+  const queries = retrieval?.queries ?? [];
 
   return (
-    <div className="rag-panel">
-      <div className="rag-header">
-        <h2>RAG System</h2>
-        {stats?.enabled ? (
-          <span className="status-badge enabled">Enabled</span>
-        ) : (
-          <span className="status-badge disabled">Disabled</span>
+    <div className="panel">
+      <div className="panel-header">
+        <h2>Knowledge base</h2>
+        {stats && (
+          <span className={`badge ${stats.enabled ? 'ok' : 'bad'}`}>
+            {stats.enabled ? 'Enabled' : 'Disabled'}
+          </span>
         )}
       </div>
 
       <div className="rag-stats">
-        <div className="stat-item">
-          <span className="stat-label">Chunks</span>
-          <span className="stat-value">{stats?.total_chunks ?? '–'}</span>
+        <div className="rag-stat">
+          <span className="rag-stat-label">Chunks</span>
+          <span className="rag-stat-value">{stats?.total_chunks ?? '–'}</span>
         </div>
-        <div className="stat-item">
-          <span className="stat-label">Files</span>
-          <span className="stat-value">{stats?.total_files ?? '–'}</span>
+        <div className="rag-stat">
+          <span className="rag-stat-label">Files</span>
+          <span className="rag-stat-value">{stats?.total_files ?? '–'}</span>
         </div>
-        <div className="stat-item">
-          <span className="stat-label">Collection</span>
-          <span className="stat-value-small">{stats?.collection_name ?? '–'}</span>
+        <div className="rag-stat wide">
+          <span className="rag-stat-label">Collection</span>
+          <span className="rag-stat-small">{stats?.collection_name ?? '–'}</span>
         </div>
       </div>
 
       <div className="rag-actions">
-        <button
-          className="rag-button primary"
-          onClick={handleReindex}
-          disabled={isLoading}
-        >
-          <span>🔄</span>
-          <span>{isLoading ? 'Processing...' : 'Check for Changes'}</span>
+        <button type="button" className="rag-button primary" onClick={handleReindex} disabled={busy}>
+          {busy ? 'Working…' : '🔄 Check for changes'}
         </button>
-
-        <button
-          className="rag-button secondary"
-          onClick={handleFullReindex}
-          disabled={isLoading}
-        >
-          <span>🔃</span>
-          <span>Full Reindex</span>
+        <button type="button" className="rag-button" onClick={handleFullReindex} disabled={busy}>
+          🔃 Full reindex
         </button>
-
-        <button
-          className="rag-button danger"
-          onClick={handleClearAll}
-          disabled={isLoading}
-        >
-          <span>🗑️</span>
-          <span>Clear All</span>
+        <button type="button" className="rag-button danger" onClick={handleClearAll} disabled={busy}>
+          🗑️ Clear all
         </button>
       </div>
 
-      {message && (
-        <div className={`rag-message ${message.type}`}>
-          {message.text}
-        </div>
-      )}
+      {notice && <div className={`rag-notice ${notice.type}`}>{notice.text}</div>}
 
-      {( (ragData.queries && ragData.queries.length > 0) || ragData.results.length > 0 ) && (
-        <div className="rag-results">
-          <h3>Last Retrieval</h3>
-          
-          {/* Display the generated queries if available */}
-          {ragData.queries && ragData.queries.length > 0 ? (
-            <div className="query-display">
-              <div className="query-label">Generated Queries:</div>
-              <div className="query-text">
-                {ragData.queries.map((q, i) => (
-                  <div key={i} className="query-line">{i + 1}. {q}</div>
+      <h3 className="panel-section-title">Last retrieval</h3>
+      {!retrieval || (queries.length === 0 && retrieval.results.length === 0 && !retrieval.message) ? (
+        <div className="panel-empty">No retrieval yet</div>
+      ) : (
+        <div className="rag-retrieval">
+          {retrieval.original_query && (
+            <div className="rag-query-box">
+              <div className="rag-query-label">Question</div>
+              <div>{retrieval.original_query}</div>
+            </div>
+          )}
+          {queries.length > 0 && (
+            <div className="rag-query-box">
+              <div className="rag-query-label">Generated queries</div>
+              <ol className="rag-query-list">
+                {queries.map((q, i) => (
+                  <li key={i}>{q}</li>
                 ))}
-              </div>
+              </ol>
             </div>
-          ) : ragData.query ? (
-            <div className="query-display">
-              <div className="query-label">Generated Query:</div>
-              <div className="query-text">{ragData.query}</div>
-            </div>
-          ) : null}
-          
-          <div className="results-list">
-            {ragData.results.map((result, idx) => (
-              <div key={idx} className={`result-item ${result.used ? 'used' : 'rejected'}`}>
-                <div className="result-header">
-                  <span className="result-status">{result.used ? '✓' : '✗'}</span>
-                  <span className="result-file">{result.source_file.split('\\').pop()}</span>
-                </div>
-                <div className="result-meta">
-                  <span>Distance: {result.distance.toFixed(4)}</span>
-                  {result.rerank_score !== undefined && result.rerank_score !== null && (
-                    <span className="rerank-score">Rerank: {result.rerank_score.toFixed(4)}</span>
-                  )}
-                  <span>Chunk #{result.chunk_index}</span>
-                  {!result.used && result.rejection_reason && (
-                    <span className="rejection-reason">Rejected: {result.rejection_reason}</span>
-                  )}
-                </div>
-                <div className="result-preview">{result.text_preview}...</div>
+          )}
+          {retrieval.message && <div className="rag-message">{retrieval.message}</div>}
+
+          {retrieval.results.map((result, i) => (
+            <div key={i} className={`rag-result ${result.used ? 'used' : 'rejected'}`}>
+              <div className="rag-result-head">
+                <span className="rag-result-status">{result.used ? '✓' : '✗'}</span>
+                <span className="rag-result-file" title={result.source_file}>
+                  {fileName(result.source_file)}
+                </span>
               </div>
-            ))}
-          </div>
+              <div className="rag-result-meta">
+                <span>dist {result.distance.toFixed(4)}</span>
+                {result.rerank_score != null && (
+                  <span className="rag-rerank">rerank {result.rerank_score.toFixed(4)}</span>
+                )}
+                <span>chunk #{result.chunk_index}</span>
+              </div>
+              {!result.used && result.rejection_reason && (
+                <div className="rag-rejection">Rejected: {result.rejection_reason}</div>
+              )}
+              <div className="rag-result-preview">{result.text_preview}…</div>
+            </div>
+          ))}
         </div>
       )}
     </div>
