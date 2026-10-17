@@ -1,74 +1,61 @@
 """
-Simple context management to keep messages within n_ctx limit.
-Removes older messages when context is too long.
+Keep conversations within the model's context window.
+
+Trimming is a pure operation: it returns the kept messages and the removed ones.
+Whoever owns the conversation (the Discord bot) decides what to do with the
+removed messages — previously the HTTP endpoint archived them on *every*
+request, so the same old messages were written to memory again and again.
 """
-from typing import List, Dict, Any
-from backend.llama_engine import get_config
-from backend.token_utils import estimate_token_count, count_message_tokens
-from backend.memory_manager import append_to_temp_memory
+from __future__ import annotations
+
+from typing import Dict, List, Optional, Tuple
+
+from backend.config import get_config
+from backend.token_utils import count_single_message_tokens
+
+Message = Dict[str, str]
 
 
-def trim_messages_to_context(messages: List[Dict[str, str]], max_tokens: int = None) -> List[Dict[str, str]]:
+def context_budget() -> int:
+    """Tokens available for the prompt: n_ctx minus room reserved for the reply."""
+    config = get_config()
+    n_ctx = int(config.get("model", {}).get("n_ctx", 8192))
+    reply_reserve = int(config.get("chat", {}).get("max_tokens", 512))
+    return max(512, n_ctx - reply_reserve)
+
+
+def split_to_fit(messages: List[Message], max_tokens: Optional[int] = None) -> Tuple[List[Message], List[Message]]:
     """
-    Trim messages to fit within context limit.
-    Always keeps the system message (first) and removes oldest user/assistant pairs.
-    
-    Args:
-        messages: List of message dicts with role and content
-        max_tokens: Maximum tokens allowed (defaults to n_ctx from config - 512 for response)
-    
-    Returns:
-        Trimmed list of messages that fits within context
+    Drop the oldest non-system messages until the conversation fits.
+
+    Returns (kept, removed). Leading system messages and the final message are
+    always kept. Removal never leaves an assistant message first in the history.
     """
-    if max_tokens is None:
-        config = get_config()
-        n_ctx = config.get("model", {}).get("n_ctx", 8192)
-        # Reserve space for response
-        response_reserve = config.get("chat", {}).get("max_tokens", 512)
-        max_tokens = n_ctx - response_reserve
-    
     if not messages:
-        return messages
-    
-    # Calculate current token count
-    current_tokens = count_message_tokens(messages)
-    
-    # If we're under the limit, return as-is
-    if current_tokens <= max_tokens:
-        return messages
-    
-    # Always keep system message (first message)
-    system_msg = None
-    other_messages = messages
-    
-    if messages[0].get("role") == "system":
-        system_msg = messages[0]
-        other_messages = messages[1:]
-    
-    # Remove messages from the beginning (oldest) until we fit
-    trimmed_messages = other_messages[:]
-    removed_messages = []
-    
-    while trimmed_messages and count_message_tokens([system_msg] + trimmed_messages if system_msg else trimmed_messages) > max_tokens:
-        # Remove the oldest non-system message and save it
-        removed_msg = trimmed_messages.pop(0)
-        removed_messages.append(removed_msg)
-    
-    # Save removed messages (both user and assistant) to temp_memory for context
-    if removed_messages:
-        append_to_temp_memory(removed_messages)
-    
-    # Reconstruct with system message first
-    if system_msg:
-        result = [system_msg] + trimmed_messages
-    else:
-        result = trimmed_messages
-    
-    # Log the trimming action
-    removed_count = len(messages) - len(result)
-    if removed_count > 0:
-        print(f"Context trimmed: removed {removed_count} oldest message(s) to stay within {max_tokens} token limit")
-        print(f"  Before: {current_tokens} tokens ({len(messages)} messages)")
-        print(f"  After: {count_message_tokens(result)} tokens ({len(result)} messages)")
-    
-    return result
+        return [], []
+    budget = max_tokens if max_tokens is not None else context_budget()
+
+    n_system = 0
+    while n_system < len(messages) and messages[n_system].get("role") == "system":
+        n_system += 1
+    head, body = messages[:n_system], messages[n_system:]
+
+    sizes = [count_single_message_tokens(m) for m in body]
+    total = sum(count_single_message_tokens(m) for m in head) + sum(sizes)
+    cut = 0
+    while total > budget and cut < len(body) - 1:
+        total -= sizes[cut]
+        cut += 1
+    # Don't start the history with an orphaned assistant reply.
+    while cut < len(body) - 1 and body[cut].get("role") == "assistant":
+        cut += 1
+
+    return head + body[cut:], body[:cut]
+
+
+def trim_messages_to_context(messages: List[Message], max_tokens: Optional[int] = None) -> List[Message]:
+    """Return a copy of `messages` that fits the context window (removed messages are discarded)."""
+    kept, removed = split_to_fit(messages, max_tokens)
+    if removed:
+        print(f"Context trimmed: dropped {len(removed)} oldest message(s) for this request")
+    return kept

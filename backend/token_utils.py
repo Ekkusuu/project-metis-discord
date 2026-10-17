@@ -5,7 +5,7 @@ Simple token estimation for context management.
 
 from typing import List, Optional, Any
 from transformers import AutoTokenizer
-from backend.llama_engine import get_config
+from backend.config import get_config, resolve_path
 
 # Global tokenizer instance
 _tokenizer: Optional[Any] = None
@@ -27,6 +27,8 @@ def get_tokenizer() -> Any:
     config = get_config()
     model_cfg = config.get("model", {})
     tokenizer_path = model_cfg.get("tokenizer_path", "gpt2")
+    if resolve_path(tokenizer_path).exists():
+        tokenizer_path = str(resolve_path(tokenizer_path))
     cache_dir = model_cfg.get("cache_dir") if isinstance(model_cfg, dict) else None
 
     try:
@@ -98,12 +100,11 @@ def estimate_token_count(text: str) -> int:
     return len(text) // 4
 
 
+def count_single_message_tokens(msg: dict) -> int:
+    """Tokens for one message, including ~3 tokens of role/template overhead."""
+    return 3 + count_tokens(msg.get("content", ""))
+
+
 def count_message_tokens(messages: list) -> int:
     """Count approximate total tokens in all messages."""
-    total = 0
-    for msg in messages:
-        # Add role overhead (~3 tokens per message for role markers)
-        total += 3
-        # Add content tokens
-        total += count_tokens(msg.get("content", ""))
-    return total
+    return sum(count_single_message_tokens(m) for m in messages if m)

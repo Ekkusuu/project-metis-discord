@@ -13,10 +13,11 @@ import yaml
 from pathlib import Path
 from typing import Dict, Any, Optional
 
+from backend.config import PROJECT_ROOT, get_config
+
 # Cache for loaded prompts
-_prompts_cache: Dict[str, Any] = None
-_prompts_file = Path(__file__).parent.parent / "system_prompts.yaml"
-_config_cache: Dict[str, Any] = None
+_prompts_cache: Optional[Dict[str, Any]] = None
+_prompts_file = PROJECT_ROOT / "system_prompts.yaml"
 
 
 def load_prompts() -> Dict[str, Any]:
@@ -39,27 +40,6 @@ def load_prompts() -> Dict[str, Any]:
         _prompts_cache = {}
     
     return _prompts_cache
-
-
-def get_config() -> Dict[str, Any]:
-    """Load config.yaml (cached)."""
-    global _config_cache
-    
-    if _config_cache is not None:
-        return _config_cache
-    
-    try:
-        config_file = Path(__file__).parent.parent / "config.yaml"
-        if config_file.exists():
-            with open(config_file, 'r', encoding='utf-8') as f:
-                _config_cache = yaml.safe_load(f) or {}
-        else:
-            _config_cache = {}
-    except Exception as e:
-        print(f"❌ Failed to load config.yaml: {e}")
-        _config_cache = {}
-    
-    return _config_cache
 
 
 def resolve_prompt(prompt_value: Any, context: Optional[str] = None) -> str:
@@ -101,7 +81,6 @@ def resolve_prompt(prompt_value: Any, context: Optional[str] = None) -> str:
         # If only category is specified (e.g., "@text_chat"), append personality
         if len(ref_path) == 1:
             ref_path.append(personality)
-            print(f"🎭 Auto-selecting personality '{personality}': {prompt_value} -> @{'.'.join(ref_path)}")
         
         # Navigate through the nested structure
         result = prompts
