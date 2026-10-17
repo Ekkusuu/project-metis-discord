@@ -1,14 +1,12 @@
 """
 Web Search Tool - Search the web using DuckDuckGo.
 
-Uses the duckduckgo-search Python package - no server or Docker required.
-Install: pip install duckduckgo-search
+Uses the `ddgs` package - no server, API key or Docker required.
 """
 from __future__ import annotations
 
 import asyncio
 from typing import Any, Dict, List
-from concurrent.futures import ThreadPoolExecutor
 
 from backend.tool_manager import BaseTool, ToolDefinition, ToolParameter
 
@@ -116,19 +114,16 @@ class WebSearchTool(BaseTool):
             Dict with success status and search results
         """
         try:
-            # Clamp num_results
-            num_results = min(max(1, num_results), 10)
+            num_results = min(max(1, int(num_results or 5)), 10)
+            if search_type not in ("text", "news"):
+                search_type = "text"
             
-            # Run sync search in thread pool to avoid blocking
-            loop = asyncio.get_event_loop()
-            with ThreadPoolExecutor() as executor:
-                results = await loop.run_in_executor(
-                    executor,
-                    self._search_sync,
-                    query,
-                    num_results,
-                    search_type
-                )
+            # ddgs is synchronous; run it off the event loop and don't let a slow
+            # search hold up the reply forever.
+            results = await asyncio.wait_for(
+                asyncio.to_thread(self._search_sync, query, num_results, search_type),
+                timeout=15,
+            )
             
             if not results:
                 return {
@@ -177,6 +172,8 @@ class WebSearchTool(BaseTool):
                 }
             }
             
+        except asyncio.TimeoutError:
+            return {"success": False, "result": None, "error": "Search timed out"}
         except ImportError as e:
             return {
                 "success": False,

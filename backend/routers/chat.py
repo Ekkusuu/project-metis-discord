@@ -1,686 +1,364 @@
+"""
+Chat pipeline: (tools | legacy RAG) -> prompt assembly -> streamed LLM reply.
+
+Also exposes the "what did the bot just do" state the dashboard shows:
+the last retrieval, the last tool execution and the exact prompt sent to the LLM.
+"""
 from __future__ import annotations
 
-from typing import List, Optional, Literal, Dict, Any
 import asyncio
+import datetime
+import json
+import time
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from backend.llama_engine import chat_completion, chat_completion_stream, get_config
-from backend.rag_engine import (
-    retrieve_context,
-    format_context_for_prompt,
-    index_all_folders,
-    generate_rag_query,
-    generate_rag_queries,
-)
+from backend.config import get_config
 from backend.context_manager import trim_messages_to_context
+from backend.llama_engine import astream_chat
+from backend.prompt_loader import resolve_prompt
 
 router = APIRouter(prefix="", tags=["chat"])
 
-# Store last RAG retrieval results
-_last_rag_results: List[Dict[str, Any]] = []
 
-# Store last tool execution results
-_last_tool_results: Dict[str, Any] = {}
+# ---------------------------------------------------------------------------
+# Dashboard state
+# ---------------------------------------------------------------------------
+class _DashboardState:
+    def __init__(self) -> None:
+        self.rag: Dict[str, Any] = {}
+        self.tools: Dict[str, Any] = {}
+        self.context: List[Dict[str, Any]] = []
+        self.version = 0
 
-# Store current chat context (replaces on each request)
-_current_context: List[Dict[str, Any]] = []
+    def update(self, *, rag: Optional[Dict[str, Any]] = None, tools: Optional[Dict[str, Any]] = None) -> None:
+        if rag is not None:
+            self.rag = rag
+        if tools is not None:
+            self.tools = tools
+        self.version += 1
 
 
+state = _DashboardState()
+
+
+# ---------------------------------------------------------------------------
+# Request models
+# ---------------------------------------------------------------------------
 class Message(BaseModel):
     role: Literal["system", "user", "assistant"]
     content: str
 
 
 class ChatRequest(BaseModel):
-    messages: Optional[List[Message]] = Field(
-        default=None, description="OpenAI-style chat messages array"
-    )
-    prompt: Optional[str] = Field(
-        default=None, description="Simple prompt; used if messages not provided"
-    )
+    messages: Optional[List[Message]] = Field(default=None, description="OpenAI-style chat messages")
+    prompt: Optional[str] = Field(default=None, description="Simple prompt; used if messages not provided")
     temperature: Optional[float] = None
     top_p: Optional[float] = None
     max_tokens: Optional[int] = None
-    # Tool system options (uses MCP JSON schemas)
-    use_tools: Optional[bool] = Field(
-        default=None, description="Override tool system usage (None = use config)"
-    )
-    max_tools: Optional[int] = Field(
-        default=None, description="Maximum tools to select (default: 3)"
-    )
-    voice_mode: Optional[bool] = Field(
-        default=False, description="Voice mode uses single query for faster response"
-    )
-    # Legacy RAG options (for backward compatibility when tools disabled)
-    rag_query_count: Optional[int] = Field(
-        default=None, description="Override number of RAG queries to generate (legacy mode)"
-    )
-    rag_system_prompt: Optional[str] = Field(
-        default=None, description="Override RAG query generation system prompt (legacy mode)"
-    )
-    rag_user_prompt: Optional[str] = Field(
-        default=None, description="Override RAG query generation user prompt (legacy mode)"
-    )
+    use_tools: Optional[bool] = Field(default=None, description="Override tools.enabled from config")
+    max_tools: Optional[int] = Field(default=None, description="Maximum tools to select")
+    voice_mode: bool = Field(default=False, description="Favour latency over recall (voice chat)")
+    # Legacy RAG options (used when the tool system is disabled)
+    rag_query_count: Optional[int] = None
+    rag_system_prompt: Optional[str] = None
+    rag_user_prompt: Optional[str] = None
 
 
 class ChatResponse(BaseModel):
     reply: str
 
 
-@router.post("/chat", response_model=ChatResponse)
-def chat(req: ChatRequest):
-    if (not req.messages or len(req.messages) == 0) and (not req.prompt):
+# ---------------------------------------------------------------------------
+# Pipeline
+# ---------------------------------------------------------------------------
+def _base_messages(req: ChatRequest) -> List[Dict[str, str]]:
+    if not req.messages and not req.prompt:
         raise HTTPException(status_code=400, detail="Provide `messages` or `prompt`.")
-
-    config = get_config()
-    chat_cfg = config["chat"]
-    system_prompt = chat_cfg.get("system_prompt", "You are Metis, a helpful AI assistant.")
-
-    messages: List[Message]
-    if req.messages and len(req.messages) > 0:
-        # Prepend system prompt if not already present
-        if not any(m.role == "system" for m in req.messages):
-            messages = [Message(role="system", content=system_prompt)] + req.messages
-        else:
-            messages = req.messages
+    if req.messages:
+        messages = [m.model_dump() for m in req.messages]
     else:
-        # Build minimal chat with system prompt from config
-        messages = [
-            Message(role="system", content=system_prompt),
-            Message(role="user", content=req.prompt or ""),
-        ]
+        messages = [{"role": "user", "content": req.prompt or ""}]
+    if not any(m["role"] == "system" for m in messages):
+        prompt_ref = get_config().get("chat", {}).get("system_prompt", "@text_chat")
+        messages.insert(0, {"role": "system", "content": resolve_prompt(prompt_ref)})
+    if messages[-1]["role"] != "user":
+        raise HTTPException(status_code=400, detail="The last message must be from the user.")
+    return messages
 
-    # Use request params or fall back to config defaults
-    temperature = req.temperature if req.temperature is not None else chat_cfg.get("temperature", 0.7)
-    top_p = req.top_p if req.top_p is not None else chat_cfg.get("top_p", 0.95)
-    max_tokens = req.max_tokens if req.max_tokens is not None else chat_cfg.get("max_tokens", 512)
 
-    # Trim messages to fit within context limit
-    messages_dict = [m.model_dump() for m in messages]
-    messages_dict = trim_messages_to_context(messages_dict)
+def _conversation_text(messages: List[Dict[str, str]], count: int) -> str:
+    """Last `count` messages before the latest one, as plain text (for query generation)."""
+    if count <= 0:
+        return ""
+    history = [m for m in messages[:-1] if m["role"] in ("user", "assistant")][-count:]
+    return "\n".join(f"{'User' if m['role'] == 'user' else 'Assistant'}: {m['content']}" for m in history)
 
-    reply = chat_completion(
-        messages_dict,
-        temperature=temperature,
-        top_p=top_p,
-        max_tokens=max_tokens,
+
+async def _run_tools(messages: List[Dict[str, str]], req: ChatRequest, timings: Dict[str, float]) -> str:
+    from backend.tool_manager import execute_tools, format_tool_results_for_context, select_tools
+
+    tools_cfg = get_config().get("tools", {})
+    last_user = messages[-1]["content"]
+
+    t0 = time.perf_counter()
+    calls = await select_tools(messages, last_user, max_tools=req.max_tools or int(tools_cfg.get("max_tools", 3)))
+    timings["tool_selection"] = round(time.perf_counter() - t0, 3)
+
+    if not calls:
+        state.update(
+            tools={"tool_calls": [], "results": [], "message": "No tools needed", "timings": dict(timings)},
+            rag={"queries": [], "original_query": last_user, "results": [], "message": "No tools needed"},
+        )
+        return ""
+
+    t0 = time.perf_counter()
+    results = await execute_tools(calls, {
+        "conversation_context": _conversation_text(messages, int(tools_cfg.get("context_messages", 3))),
+        "voice_mode": req.voice_mode,
+    })
+    timings["tool_execution"] = round(time.perf_counter() - t0, 3)
+
+    rag_view: Optional[Dict[str, Any]] = None
+    for r in results:
+        if r.tool_name == "knowledge_search" and r.success and r.raw_response:
+            from backend.rag_engine import results_for_ui
+            rag_view = results_for_ui(r.raw_response["search"], last_user, tool_mode=True)
+    state.update(
+        tools={
+            "tool_calls": [{"tool": c.tool_name, "arguments": c.arguments} for c in calls],
+            "results": [
+                {"tool": r.tool_name, "success": r.success, "execution_time": round(r.execution_time, 3), "error": r.error}
+                for r in results
+            ],
+            "timings": dict(timings),
+        },
+        rag=rag_view,
     )
-    return ChatResponse(reply=reply)
+    return format_tool_results_for_context(results)
+
+
+def _run_legacy_rag(messages: List[Dict[str, str]], req: ChatRequest, timings: Dict[str, float]) -> str:
+    from backend.rag_engine import format_context_for_prompt, generate_rag_queries, results_for_ui, search
+
+    last_user = messages[-1]["content"]
+    t0 = time.perf_counter()
+    queries = generate_rag_queries(
+        messages, last_user,
+        num_queries=req.rag_query_count,
+        system_prompt_override=req.rag_system_prompt,
+        user_prompt_override=req.rag_user_prompt,
+    )
+    timings["query_generation"] = round(time.perf_counter() - t0, 3)
+
+    t0 = time.perf_counter()
+    found = search(queries)
+    timings["retrieval"] = round(time.perf_counter() - t0, 3)
+
+    state.update(rag=results_for_ui(found, last_user))
+    return format_context_for_prompt(found["accepted"])
+
+
+async def gather_context(messages: List[Dict[str, str]], req: ChatRequest) -> Tuple[str, Dict[str, float], Dict[str, float]]:
+    """Run tools (or legacy RAG). Returns (context_text, tool_timings, rag_timings)."""
+    config = get_config()
+    tool_timings: Dict[str, float] = {}
+    rag_timings: Dict[str, float] = {}
+    use_tools = req.use_tools if req.use_tools is not None else config.get("tools", {}).get("enabled", False)
+
+    if use_tools:
+        try:
+            return await _run_tools(messages, req, tool_timings), tool_timings, rag_timings
+        except Exception as e:
+            import traceback
+            print(f"Tool system error, falling back to plain RAG: {e}")
+            traceback.print_exc()
+
+    if config.get("rag", {}).get("enabled", False):
+        try:
+            text = await asyncio.to_thread(_run_legacy_rag, messages, req, rag_timings)
+            return text, tool_timings, rag_timings
+        except Exception as e:
+            print(f"RAG error: {e}")
+    return "", tool_timings, rag_timings
+
+
+def build_prompt(messages: List[Dict[str, str]], context_text: str) -> List[Dict[str, str]]:
+    """
+    Insert gathered information as a system message right before the latest user
+    message. Keeping the system prompt and earlier history byte-identical between
+    turns lets the LLM service reuse its KV cache instead of re-reading everything.
+    """
+    if not context_text:
+        return list(messages)
+    now = datetime.datetime.now().strftime("%A, %d %B %Y, %H:%M")
+    block = (
+        f"Current date and time: {now}\n\n"
+        "Information retrieved for the next reply (from notes, memories, or the web). "
+        "Use it when it is relevant; do not mention that you looked it up.\n\n"
+        f"{context_text}"
+    )
+    return messages[:-1] + [{"role": "system", "content": block}, messages[-1]]
+
+
+def _sampling(req: ChatRequest) -> Dict[str, Any]:
+    chat_cfg = get_config().get("chat", {})
+    return {
+        "temperature": req.temperature if req.temperature is not None else chat_cfg.get("temperature", 0.7),
+        "top_p": req.top_p if req.top_p is not None else chat_cfg.get("top_p", 0.95),
+        "max_tokens": req.max_tokens if req.max_tokens is not None else chat_cfg.get("max_tokens", 512),
+    }
+
+
+async def _prepare(req: ChatRequest) -> Tuple[List[Dict[str, str]], Dict[str, Any]]:
+    messages = _base_messages(req)
+    context_text, tool_timings, rag_timings = await gather_context(messages, req)
+    final = trim_messages_to_context(build_prompt(messages, context_text))
+    stamp = datetime.datetime.now().isoformat()
+    state.context = [{**m, "timestamp": stamp} for m in final]
+    return final, {"tool_timings": tool_timings, "rag_timings": rag_timings}
 
 
 @router.post("/chat/stream")
-def chat_stream(req: ChatRequest):
+async def chat_stream(req: ChatRequest, request: Request):
     """
-    Streaming version of /chat endpoint. Returns newline-delimited JSON chunks.
-    Each line is a JSON object: {"delta": "token text"} or {"done": true}
-    
-    Supports both the new tool system and legacy RAG mode.
+    Stream a reply as NDJSON: {"delta": "..."} lines, then a final
+    {"done": true, "tokens_per_second", "llm_generation_time", "ttft", "tool_timings", "rag_timings"}.
     """
-    if (not req.messages or len(req.messages) == 0) and (not req.prompt):
-        raise HTTPException(status_code=400, detail="Provide `messages` or `prompt`.")
+    final, meta = await _prepare(req)
+    sampling = _sampling(req)
 
-    config = get_config()
-    chat_cfg = config["chat"]
-    rag_cfg = config.get("rag", {})
-    tools_cfg = config.get("tools", {})
-    system_prompt = chat_cfg.get("system_prompt", "You are Metis, a helpful AI assistant.")
-
-    messages: List[Message]
-    if req.messages and len(req.messages) > 0:
-        # Prepend system prompt if not already present
-        if not any(m.role == "system" for m in req.messages):
-            messages = [Message(role="system", content=system_prompt)] + req.messages
-        else:
-            messages = req.messages
-    else:
-        messages = [
-            Message(role="system", content=system_prompt),
-            Message(role="user", content=req.prompt or ""),
-        ]
-
-    # Determine whether to use tool system or legacy RAG
-    global _last_rag_results, _last_tool_results
-    import time as time_module
-    tool_timings = {}  # Store timing data for tool operations
-    
-    # Use tool system if enabled in config (can be overridden by request)
-    use_tools = req.use_tools if req.use_tools is not None else tools_cfg.get("enabled", False)
-    rag_enabled = rag_cfg.get("enabled", False)
-    
-    # Get the last user message
-    user_messages = [m for m in messages if m.role == "user"]
-    last_user_query = user_messages[-1].content if user_messages else ""
-    
-    tool_results_for_context = ""
-    
-    if use_tools and last_user_query:
-        # === NEW TOOL SYSTEM ===
+    async def generate():
+        stats: Dict[str, Any] = {}
+        start = time.perf_counter()
+        first_token: Optional[float] = None
+        reply = ""
         try:
-            from backend.tool_manager import select_tools, execute_tools, format_tool_results_for_context, get_tool_registry
-            
-            # Initialize registry if needed
-            get_tool_registry()
-            
-            # === TOOL SELECTION (uses MCP JSON schemas) ===
-            t_start = time_module.perf_counter()
-            messages_for_tools = [{"role": m.role, "content": m.content} for m in messages]
-            
-            # Build conversation context string for RAG query generation
-            context_messages = tools_cfg.get("context_messages", 3)
-            conversation_context = ""
-            if context_messages > 0 and len(messages_for_tools) > 1:
-                recent = messages_for_tools[-context_messages-1:-1] if len(messages_for_tools) > context_messages else messages_for_tools[:-1]
-                conversation_context = "\n".join([
-                    f"{'User' if m['role'] == 'user' else 'Assistant'}: {m['content']}"
-                    for m in recent
-                ])
-            
-            # Run tool selection synchronously (wrap async)
-            import asyncio
-            try:
-                loop = asyncio.get_event_loop()
-            except RuntimeError:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-            
-            tool_calls = loop.run_until_complete(
-                select_tools(
-                    messages_for_tools,
-                    last_user_query,
-                    max_tools=req.max_tools or tools_cfg.get("max_tools", 3)
-                )
-            )
-            tool_timings['tool_selection'] = time_module.perf_counter() - t_start
-            
-            # === TOOL EXECUTION ===
-            if tool_calls:
-                t_start = time_module.perf_counter()
-                
-                # Pass conversation context to tools (especially for RAG query generation)
-                extra_context = {
-                    "conversation_context": conversation_context,
-                    "voice_mode": req.voice_mode or False  # Voice mode uses single query
-                }
-                
-                tool_results = loop.run_until_complete(execute_tools(tool_calls, extra_context))
-                tool_timings['tool_execution'] = time_module.perf_counter() - t_start
-                
-                # Format results for context injection
-                tool_results_for_context = format_tool_results_for_context(tool_results)
-                
-                # Store results for UI
-                _last_tool_results = {
-                    "tool_calls": [
-                        {"tool": tc.tool_name, "arguments": tc.arguments}
-                        for tc in tool_calls
-                    ],
-                    "results": [
-                        {
-                            "tool": tr.tool_name,
-                            "success": tr.success,
-                            "execution_time": tr.execution_time,
-                            "error": tr.error
-                        }
-                        for tr in tool_results
-                    ]
-                }
-                
-                # Also update RAG results for backward compatibility with UI
-                for tr in tool_results:
-                    if tr.tool_name == "knowledge_search" and tr.success:
-                        # Extract RAG-specific data for the panel from raw_response
-                        raw_response = tr.raw_response or {}
-                        raw_contexts = raw_response.get("raw_contexts", {})
-                        metadata = raw_response.get("metadata", {})
-                        
-                        # Get the optimized queries (generated by RAG tool)
-                        optimized_queries = metadata.get("optimized_queries", [])
-                        original_query = metadata.get("original_query", "")
-                        
-                        # Fallback to tool call query if no optimized queries
-                        if not optimized_queries:
-                            for tc in tool_calls:
-                                if tc.tool_name == "knowledge_search":
-                                    optimized_queries = [tc.arguments.get("query", "")]
-                                    break
-                        
-                        accepted = raw_contexts.get("accepted", []) if raw_contexts else []
-                        rejected_distance = raw_contexts.get("rejected_by_distance", []) if raw_contexts else []
-                        rejected_score = raw_contexts.get("rejected_by_score", []) if raw_contexts else []
-                        
-                        results_list = []
-                        for ctx in accepted:
-                            md = ctx.get("metadata", {})
-                            results_list.append({
-                                "source_file": md.get("source_file", "unknown"),
-                                "distance": ctx.get("distance", 0),
-                                "rerank_score": ctx.get("rerank_score"),
-                                "text_preview": ctx.get("text", "")[:200],
-                                "chunk_index": md.get("chunk_index", 0),
-                                "used": True,
-                            })
-                        for ctx in rejected_distance + rejected_score:
-                            md = ctx.get("metadata", {})
-                            results_list.append({
-                                "source_file": md.get("source_file", "unknown"),
-                                "distance": ctx.get("distance", 0),
-                                "rerank_score": ctx.get("rerank_score"),
-                                "text_preview": ctx.get("text", "")[:200],
-                                "chunk_index": md.get("chunk_index", 0),
-                                "used": False,
-                                "rejection_reason": ctx.get("rejection_reason", "unknown")
-                            })
-                        
-                        _last_rag_results = {
-                            "queries": optimized_queries,
-                            "original_query": original_query or last_user_query,
-                            "results": results_list,
-                            "tool_mode": True
-                        }
-            else:
-                _last_tool_results = {
-                    "tool_calls": [],
-                    "results": [],
-                    "message": "No tools selected"
-                }
-                _last_rag_results = {
-                    "queries": [],
-                    "original_query": last_user_query,
-                    "results": [],
-                    "tool_mode": True,
-                    "message": "No tools needed"
-                }
-                
+            async for delta in astream_chat(final, stats=stats, **sampling):
+                if first_token is None:
+                    first_token = time.perf_counter() - start
+                reply += delta
+                yield json.dumps({"delta": delta}) + "\n"
         except Exception as e:
-            import traceback
-            print(f"Tool system error: {e}")
-            traceback.print_exc()
-            # Fall back to legacy RAG if tool system fails
-            use_tools = False
-    
-    # Legacy RAG mode (if tools disabled or failed)
-    rag_timings = {}
-    if not use_tools and rag_enabled and last_user_query:
-        # === RAG QUERY GENERATION ===
-        t_start = time_module.perf_counter()
-        messages_for_query = [{"role": m.role, "content": m.content} for m in messages]
-        rag_queries = generate_rag_queries(
-            messages_for_query, 
-            last_user_query,
-            num_queries=req.rag_query_count,
-            system_prompt_override=req.rag_system_prompt,
-            user_prompt_override=req.rag_user_prompt
-        )
-        rag_timings['query_generation'] = time_module.perf_counter() - t_start
-        
-        # Record generated queries
-        _last_rag_results = {
-            "queries": rag_queries,
-            "original_query": last_user_query,
-            "results": []
-        }
-        
-        # === RAG RETRIEVAL ===
-        t_start = time_module.perf_counter()
-        combined_contexts: List[Dict[str, Any]] = []
-        seen = set()
-        per_query_results: List[Dict[str, Any]] = []
-        
-        for q in rag_queries:
-            try:
-                results = retrieve_context(q)
-            except Exception:
-                results = {"accepted": [], "rejected_by_distance": []}
-
-            rejected_distance = results.get("rejected_by_distance", []) or []
-            rejected_score = results.get("rejected_by_score", []) or []
-            per_query_results.append({
-                "query": q,
-                "accepted": results.get("accepted", []),
-                "rejected": rejected_distance + rejected_score,
-            })
-        rag_timings['retrieval'] = time_module.perf_counter() - t_start
-
-        # Combine accepted chunks
-        combined_accepted: List[Dict[str, Any]] = []
-        seen = set()
-        for bucket in per_query_results:
-            for ctx in bucket["accepted"]:
-                md = ctx.get("metadata", {})
-                src = md.get("source_file")
-                idx = md.get("chunk_index")
-                if src is None or idx is None:
-                    key = (None, ctx.get("text", "")[:160])
-                else:
-                    key = (src, idx)
-
-                if key in seen:
-                    continue
-                seen.add(key)
-                combined_accepted.append(ctx)
-
-        # Collect rejected chunks
-        combined_rejected: List[Dict[str, Any]] = []
-        for bucket in per_query_results:
-            for ctx in bucket["rejected"]:
-                md = ctx.get("metadata", {})
-                src = md.get("source_file")
-                idx = md.get("chunk_index")
-                if src is None or idx is None:
-                    key = (None, ctx.get("text", "")[:160])
-                else:
-                    key = (src, idx)
-
-                if key in seen:
-                    continue
-                seen.add(key)
-                if "rejection_reason" not in ctx:
-                    ctx["rejection_reason"] = "distance"
-                combined_rejected.append(ctx)
-
-        combined_contexts = combined_accepted + combined_rejected
-        contexts = combined_contexts
-        relevant_contexts = [c for c in contexts if "rejection_reason" not in c]
-        
-        # Build results list for UI
-        accepted_list = [c for c in combined_contexts if "rejection_reason" not in c]
-        rejected_list = [c for c in combined_contexts if "rejection_reason" in c]
-
-        for bucket in per_query_results:
-            acc = bucket.get("accepted", [])
-            rej = bucket.get("rejected", [])
-            if any(x.get("rerank_score") is not None for x in acc):
-                acc.sort(key=lambda x: float(x.get("rerank_score") or -1e9), reverse=True)
-            else:
-                acc.sort(key=lambda x: float(x.get("distance", 0)))
-            rej.sort(key=lambda x: float(x.get("distance", 0)))
-            bucket["accepted"] = acc
-            bucket["rejected"] = rej
-
-        if any(x.get("rerank_score") is not None for x in accepted_list):
-            accepted_list.sort(key=lambda x: float(x.get("rerank_score") or -1e9), reverse=True)
-        else:
-            accepted_list.sort(key=lambda x: float(x.get("distance", 0)))
-
-        rejected_list.sort(key=lambda x: float(x.get("distance", 0)))
-
-        results_list = []
-        for ctx in accepted_list + rejected_list:
-            md = ctx.get("metadata", {})
-            is_used = "rejection_reason" not in ctx
-            item = {
-                "source_file": md.get("source_file", "unknown"),
-                "distance": ctx.get("distance", 0),
-                "rerank_score": ctx.get("rerank_score"),
-                "text_preview": ctx.get("text", "")[:200],
-                "chunk_index": md.get("chunk_index", 0),
-                "used": is_used,
-            }
-            if not is_used:
-                item["rejection_reason"] = ctx.get("rejection_reason")
-            results_list.append(item)
-
-        _last_rag_results = {
-            "queries": rag_queries,
-            "original_query": last_user_query,
-            "per_query_results": per_query_results,
-            "results": results_list,
-        }
-        
-        if relevant_contexts:
-            context_text = format_context_for_prompt(relevant_contexts)
-            tool_results_for_context = context_text
-    
-    # Inject tool/RAG results into system prompt
-    if tool_results_for_context:
-        for i, msg in enumerate(messages):
-            if msg.role == "system":
-                enhanced_system = f"{msg.content}\n\n---\nRelevant information from your knowledge base:\n\n{tool_results_for_context}\n\nUse this information to answer the user's question."
-                messages[i] = Message(role="system", content=enhanced_system)
-                break
-
-    # Use request params or fall back to config defaults
-    temperature = req.temperature if req.temperature is not None else chat_cfg.get("temperature", 0.7)
-    top_p = req.top_p if req.top_p is not None else chat_cfg.get("top_p", 0.95)
-    max_tokens = req.max_tokens if req.max_tokens is not None else chat_cfg.get("max_tokens", 512)
-
-    # Trim messages to fit within context limit
-    messages_dict = [m.model_dump() for m in messages]
-    messages_dict = trim_messages_to_context(messages_dict)
-
-    # Store current context (replace, not append)
-    global _current_context
-    import datetime
-    timestamp = datetime.datetime.now().isoformat()
-    
-    # Replace context with current messages (using trimmed messages)
-    _current_context = [
-        {
-            "role": msg["role"],
-            "content": msg["content"],
-            "timestamp": timestamp
-        }
-        for msg in messages_dict
-    ]
-
-    def generate():
-        import json
-        import time
-        
-        global _current_context
-        
-        start_time = time.time()
-        token_count = 0
-        assistant_response = ""
-        
-        for token in chat_completion_stream(
-            messages_dict,
-            temperature=temperature,
-            top_p=top_p,
-            max_tokens=max_tokens,
-        ):
-            token_count += 1
-            assistant_response += token
-            # Send each token as NDJSON (newline-delimited JSON)
-            yield json.dumps({"delta": token}) + "\n"
-        
-        # Calculate tokens per second
-        elapsed = time.time() - start_time
-        tokens_per_second = token_count / elapsed if elapsed > 0 else 0
-        llm_generation_time = elapsed
-        
-        # Update context with assistant response
-        _current_context.append({
-            "role": "assistant",
-            "content": assistant_response,
-            "timestamp": datetime.datetime.now().isoformat()
-        })
-        
-        # Final chunk with performance stats and trimmed message count
-        final_chunk = {
+            yield json.dumps({"error": str(e), "done": True}) + "\n"
+            return
+        state.context.append({"role": "assistant", "content": reply, "timestamp": datetime.datetime.now().isoformat()})
+        state.update()
+        yield json.dumps({
             "done": True,
-            "tokens_per_second": round(tokens_per_second, 2),
-            "rag_timings": rag_timings,
-            "tool_timings": tool_timings,
-            "llm_generation_time": round(llm_generation_time, 3),
-            "trimmed_messages": [
-                {"role": msg["role"], "content": msg["content"]}
-                for msg in messages_dict
-            ]
-        }
-        yield json.dumps(final_chunk) + "\n"
+            "tokens_per_second": stats.get("tokens_per_second", 0),
+            "llm_generation_time": round(time.perf_counter() - start, 3),
+            "ttft": round(first_token or 0, 3),
+            **meta,
+        }) + "\n"
 
     return StreamingResponse(generate(), media_type="application/x-ndjson")
 
 
+@router.post("/chat", response_model=ChatResponse)
+async def chat(req: ChatRequest):
+    """Non-streaming variant of /chat/stream."""
+    final, _ = await _prepare(req)
+    parts = [delta async for delta in astream_chat(final, **_sampling(req))]
+    return ChatResponse(reply="".join(parts).strip())
+
+
+# ---------------------------------------------------------------------------
+# Knowledge base management
+# ---------------------------------------------------------------------------
 @router.post("/rag/reindex")
-def reindex_knowledge_base(clear_existing: bool = True):
-    """
-    Trigger re-indexing of all folders specified in config.yaml.
-    
-    - clear_existing: if True, removes old chunks before re-indexing
-    """
+async def reindex_knowledge_base(clear_existing: bool = False):
+    """Re-index the configured folders. clear_existing=true rebuilds everything from scratch."""
+    from backend.rag_engine import index_all_folders
+
     try:
-        results = index_all_folders(clear_existing=clear_existing)
-        total = sum(results.values())
-        return {
-            "status": "success",
-            "total_chunks": total,
-            "folders": results
-        }
+        results = await asyncio.to_thread(index_all_folders, clear_existing)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Indexing failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Indexing failed: {e}")
+    return {"status": "success", "total_chunks": sum(results.values()), "folders": results}
 
 
 @router.get("/rag/stats")
-def get_rag_stats():
-    """Get RAG system statistics."""
+async def get_rag_stats():
+    from backend.rag_engine import get_collection, load_file_metadata
+
+    rag_cfg = get_config().get("rag", {})
     try:
-        from backend.rag_engine import get_collection, get_file_metadata_path
-        import json
-        
-        config = get_config()
-        rag_cfg = config.get("rag", {})
-        
-        collection = get_collection()
+        collection = await asyncio.to_thread(get_collection)
         total_chunks = collection.count()
-        
-        # Count unique files from metadata
-        metadata_path = get_file_metadata_path()
-        total_files = 0
-        if metadata_path.exists():
-            with open(metadata_path, "r", encoding="utf-8") as f:
-                file_metadata = json.load(f)
-                total_files = len(file_metadata)
-        
-        return {
-            "total_chunks": total_chunks,
-            "total_files": total_files,
-            "collection_name": rag_cfg.get("collection_name", "metis_knowledge"),
-            "enabled": rag_cfg.get("enabled", False)
-        }
+        total_files = len(load_file_metadata())
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get stats: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to get stats: {e}")
+    return {
+        "total_chunks": total_chunks,
+        "total_files": total_files,
+        "collection_name": rag_cfg.get("collection_name", "metis_knowledge"),
+        "enabled": rag_cfg.get("enabled", False),
+    }
 
 
 @router.post("/rag/clear")
-def clear_rag_database():
-    """Clear all embeddings from the RAG database."""
+async def clear_rag_database():
+    from backend.rag_engine import clear_collection
+
     try:
-        from backend.rag_engine import get_collection, get_file_metadata_path, save_file_metadata
-        
-        collection = get_collection()
-        count_before = collection.count()
-        
-        # Delete all items in the collection
-        if count_before > 0:
-            all_items = collection.get()
-            if all_items and all_items.get("ids"):
-                collection.delete(ids=all_items["ids"])
-        
-        # Clear file metadata
-        save_file_metadata({})
-        
-        return {
-            "status": "success",
-            "deleted_count": count_before
-        }
+        deleted = await asyncio.to_thread(clear_collection)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Clear failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Clear failed: {e}")
+    return {"status": "success", "deleted_count": deleted}
 
 
+# ---------------------------------------------------------------------------
+# Dashboard endpoints
+# ---------------------------------------------------------------------------
 @router.get("/rag/last-retrieval")
-def get_last_rag_retrieval():
-    """Get the last RAG retrieval results."""
-    global _last_rag_results
-    return {
-        "results": _last_rag_results
-    }
+async def get_last_rag_retrieval():
+    return {"results": state.rag}
 
 
 @router.get("/tools/last-execution")
-def get_last_tool_execution():
-    """Get the last tool execution results."""
-    global _last_tool_results
-    return {
-        "results": _last_tool_results
-    }
+async def get_last_tool_execution():
+    return {"results": state.tools}
 
 
 @router.get("/tools/available")
-def get_available_tools():
-    """Get list of available tools and their schemas."""
-    try:
-        from backend.tool_manager import get_tool_registry
-        
-        registry = get_tool_registry()
-        tools = registry.get_all_enabled()
-        
-        return {
-            "tools": [
-                {
-                    "name": tool.definition.name,
-                    "description": tool.definition.description,
-                    "schema": tool.definition.to_json_schema()
-                }
-                for tool in tools.values()
-            ]
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get tools: {str(e)}")
+async def get_available_tools():
+    from backend.tool_manager import get_tool_registry
+
+    tools = get_tool_registry().get_all_enabled()
+    return {
+        "tools": [
+            {"name": t.definition.name, "description": t.definition.description, "schema": t.definition.to_json_schema()}
+            for t in tools.values()
+        ]
+    }
 
 
 @router.get("/rag/stream")
-async def stream_rag_updates():
-    """Stream RAG updates in real-time via SSE."""
-    import asyncio
-    import json
-    
-    async def event_generator():
-        global _last_rag_results
-        last_sent = None
-        
-        while True:
-            # Check if RAG results changed
-            current = json.dumps(_last_rag_results, sort_keys=True)
-            
-            if current != last_sent:
-                # Send new RAG data
-                data = json.dumps({"results": _last_rag_results})
-                yield f"data: {data}\n\n"
-                last_sent = current
-            
-            # Heartbeat
-            yield f": heartbeat\n\n"
-            await asyncio.sleep(1)
-    
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no"
-        }
-    )
+async def stream_rag_updates(request: Request):
+    """SSE feed of {"results": <last retrieval>, "tools": <last tool execution>} whenever either changes."""
+    async def events():
+        sent_version = -1
+        idle = 0.0
+        while not await request.is_disconnected():
+            if state.version != sent_version:
+                sent_version = state.version
+                idle = 0.0
+                yield f"data: {json.dumps({'results': state.rag, 'tools': state.tools})}\n\n"
+            elif idle >= 15:
+                idle = 0.0
+                yield ": heartbeat\n\n"
+            await asyncio.sleep(0.5)
+            idle += 0.5
 
-
-@router.get("/chat/history")
-def get_chat_history():
-    """Get the current chat context (legacy endpoint - use /chat/context instead)."""
-    global _current_context
-    return {
-        "messages": _current_context
-    }
+    return StreamingResponse(events(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 @router.get("/chat/context")
-def get_chat_context():
-    """Get the current chat context."""
-    global _current_context
-    return {
-        "messages": _current_context
-    }
+async def get_chat_context():
+    """The exact prompt most recently sent to the LLM (plus the reply)."""
+    return {"messages": state.context}
