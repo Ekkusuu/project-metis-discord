@@ -1,1168 +1,799 @@
 """
-Discord bot service for Project Metis.
-Connects Discord messages to the existing chat API.
+Discord front-end for Metis.
+
+Text channels: every message goes through a "should Metis reply?" judgment
+(skipped when Metis is mentioned, replied to, or DM'd), then the reply is
+streamed from the backend's /chat/stream endpoint.
+
+Voice channels: per-user audio is buffered until the speaker pauses, transcribed,
+judged, answered by the LLM, and spoken sentence-by-sentence while the rest of
+the reply is still being generated.
+
+The bot runs on its own event loop in a background thread of the backend
+process (see start_in_background) and talks to the backend over HTTP so the
+dashboard sees exactly the same traffic.
 """
+from __future__ import annotations
+
 import asyncio
-import os
-import sys
-from pathlib import Path
-from typing import Dict, List, Optional
-from datetime import datetime
-import json
-
-import discord
-from discord.ext import commands
-import discord.ext.voice_recv as voice_recv
-from dotenv import load_dotenv
-import aiohttp
 import io
+import json
+import os
 import re
+import threading
 import time
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
+
+import aiohttp
+import discord
+import discord.ext.voice_recv as voice_recv
 import numpy as np
+from discord.ext import commands
+from dotenv import load_dotenv
 
-# Add project root to path for imports
-PROJECT_ROOT = Path(__file__).parent.parent
-sys.path.insert(0, str(PROJECT_ROOT))
-
+from backend import chat_log
+from backend.config import PROJECT_ROOT, backend_url, get_config, llm_service_url
 from backend.prompt_loader import resolve_prompt
+from backend.text_utils import (
+    ThinkFilter,
+    clean_for_speech,
+    pop_sentences,
+    split_message,
+    strip_name_prefix,
+    strip_thinking,
+)
+from backend.voice_service import TTS_SAMPLE_RATE, get_voice_service
 
-from backend.llama_engine import get_config
-from backend.voice_service import get_voice_service
-
-# Load environment variables
-load_dotenv()
-
-# Common abbreviations that end with a period but are NOT sentence endings
-ABBREVIATIONS = {
-    # Titles
-    'mr', 'mrs', 'ms', 'dr', 'prof', 'sr', 'jr', 'rev', 'hon', 'gov', 'pres',
-    # Academic/Professional
-    'phd', 'md', 'esq', 'inc', 'ltd', 'corp', 'llc', 'co',
-    # Common abbreviations
-    'vs', 'etc', 'eg', 'ie', 'al', 'cf', 'approx', 'avg', 'dept', 'est',
-    'fig', 'min', 'max', 'misc', 'no', 'nos', 'vol', 'vols', 'ed', 'eds',
-    'ft', 'in', 'oz', 'lb', 'lbs', 'pt', 'qt', 'gal', 'cm', 'mm', 'km', 'kg',
-    # Time/Date
-    'jan', 'feb', 'mar', 'apr', 'jun', 'jul', 'aug', 'sep', 'sept', 'oct', 'nov', 'dec',
-    'mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun',
-    'am', 'pm', 'hr', 'hrs', 'sec', 'secs',
-    # Places
-    'st', 'ave', 'blvd', 'rd', 'mt', 'ft',
-    # Other
-    'i.e', 'e.g', 'p.s', 'n.b', 'a.k.a', 'c.e.o'
-}
-
-
-def is_sentence_boundary(text: str, pos: int) -> bool:
-    """
-    Check if the period/punctuation at position `pos` is a real sentence boundary.
-    Returns True if it's a sentence end, False if it's an abbreviation/decimal/etc.
-    """
-    if pos < 0 or pos >= len(text):
-        return False
-    
-    char = text[pos]
-    
-    # ! and ? are almost always sentence endings
-    if char in '!?':
-        return True
-    
-    # For periods, we need to check context
-    if char != '.':
-        return False
-    
-    # Check if followed by end of string - if so, we can't determine yet (might be decimal)
-    # Wait for more text to arrive before deciding
-    if pos + 1 >= len(text):
-        return False  # At end of current text, wait for more
-    
-    # Check if followed by a digit (decimal number like 50.3)
-    if text[pos + 1].isdigit():
-        return False  # Definitely a decimal, not a sentence end
-    
-    # Check if NOT followed by space or newline - not a sentence boundary
-    if text[pos + 1] not in ' \n\t':
-        return False
-    
-    # Get the word before the period
-    start = pos - 1
-    while start >= 0 and text[start].isalnum():
-        start -= 1
-    word_before = text[start + 1:pos].lower()
-    
-    # If word before is entirely digits, this might be a number with trailing period
-    # e.g., "50." at end of sentence - but we need to be careful
-    # Only treat as sentence end if followed by space AND next word starts with capital
-    if word_before.isdigit():
-        # Look ahead: if next non-space char is lowercase or digit, not a sentence end
-        next_pos = pos + 1
-        while next_pos < len(text) and text[next_pos] in ' \n\t':
-            next_pos += 1
-        if next_pos < len(text):
-            next_char = text[next_pos]
-            # If next char is lowercase letter or digit, probably not sentence end
-            if next_char.islower() or next_char.isdigit():
-                return False
-    
-    # Check if it's an abbreviation
-    if word_before in ABBREVIATIONS:
-        return False
-    
-    # Check for single letter abbreviations like "U.S." or "A.I."
-    if len(word_before) == 1 and word_before.isalpha():
-        # Look further back to see if there's a pattern like "U.S."
-        if start >= 2 and text[start - 1] == '.' and text[start - 2].isalpha():
-            return False
-    
-    # Check for ellipsis "..."
-    if pos >= 2 and text[pos - 2:pos + 1] == '...':
-        return True  # Ellipsis IS a sentence boundary
-    
-    return True
-
-
-def find_sentence_boundary(text: str) -> int:
-    """
-    Find the position of the first real sentence boundary in text.
-    Returns -1 if no boundary found.
-    """
-    for i, char in enumerate(text):
-        if char in '.!?':
-            if is_sentence_boundary(text, i):
-                return i
-    return -1
-
-# Configuration
-DISCORD_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
-if not DISCORD_TOKEN:
-    print("ERROR: DISCORD_BOT_TOKEN not found in .env file!")
-    sys.exit(1)
+load_dotenv(PROJECT_ROOT / ".env")
 
 config = get_config()
-API_URL = "http://localhost:8000"
+DISCORD_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 
-# Store conversation context per Discord channel
-# Structure: {channel_id: [{"role": "user/assistant", "content": "..."}]}
-channel_contexts: Dict[int, List[Dict[str, str]]] = {}
-
-# Track latest message timestamp per channel for interruption handling
-latest_message_time: Dict[int, datetime] = {}
-
-# Voice channel audio buffers (per user)
-voice_audio_buffers: Dict[int, bytearray] = {}  # {user_id: audio_buffer}
-voice_is_speaking: Dict[int, bool] = {}  # {user_id: is_speaking}
-
-# Discord bot setup
 intents = discord.Intents.default()
 intents.message_content = True
-intents.messages = True
-intents.guilds = True
-intents.voice_states = True  # Required for voice channel operations
-bot = commands.Bot(command_prefix=[">", "!"], intents=intents)
+intents.members = False
+intents.voice_states = True
+bot = commands.Bot(command_prefix=[">", "!"], intents=intents, help_command=commands.DefaultHelpCommand())
+
+_http: Optional[aiohttp.ClientSession] = None
+_loop: Optional[asyncio.AbstractEventLoop] = None
+_thread: Optional[threading.Thread] = None
 
 
-class VoiceAudioSink(voice_recv.AudioSink):
-    """Audio sink that captures voice packets for transcription."""
-    
-    def __init__(self, receiver, loop):
-        super().__init__()
-        self.receiver = receiver
-        self.loop = loop
-    
-    def wants_opus(self) -> bool:
-        return False  # We want decoded PCM audio
-    
-    def write(self, user, data):
-        """Called when audio data is received from a user."""
-        if not user or user.bot:
-            return
-        
-        # Schedule the coroutine on the event loop
-        asyncio.run_coroutine_threadsafe(
-            self.receiver.on_audio_packet(user, data),
-            self.loop
-        )
-    
-    def cleanup(self):
-        """Called when the sink is being cleaned up."""
-        pass
+def http() -> aiohttp.ClientSession:
+    """One shared HTTP session for the bot (created on the bot's event loop)."""
+    global _http
+    if _http is None or _http.closed:
+        _http = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None, sock_connect=10, sock_read=300))
+    return _http
 
 
-class VoiceReceiver:
-    """
-    Voice receiver wrapper for capturing audio from Discord voice channels.
-    Buffers audio per user and triggers transcription when user stops speaking.
-    """
-    
-    def __init__(self, voice_client, channel_id, text_channel):
-        self.voice_client = voice_client
-        self.channel_id = channel_id
-        self.text_channel = text_channel
-        self.user_audio_buffers: Dict[int, bytearray] = {}  # user_id -> audio buffer
-        self.user_objects: Dict[int, any] = {}  # user_id -> discord.Member object
-        
-        # Get silence threshold from config
-        voice_cfg = config.get("voice", {})
-        self.silence_threshold = voice_cfg.get("listen_timeout", 5)  # Use listen_timeout as silence threshold
-        
-        self.last_audio_time: Dict[int, float] = {}
-        self.check_task = None
-        self.active = True
-        self.processing_audio: Dict[int, bool] = {}  # Track if user's audio is being processed
-        
-        # Create and register audio sink (pass the event loop)
-        self.sink = VoiceAudioSink(self, asyncio.get_event_loop())
-        self.voice_client.listen(self.sink)
-    
-    async def start_listening(self):
-        """Start listening for voice activity."""
-        print(f"🎤 Voice receiver started for channel {self.channel_id}")
-        
-        await self.text_channel.send(
-            "🎤 Voice mode active! Speak into your microphone and I'll respond.\n"
-            "💬 Text chat is now disabled. Use `>leave` to exit voice mode."
-        )
-        
-        # Start monitoring for silence
-        self.check_task = asyncio.create_task(self._check_for_silence())
-    
-    async def on_audio_packet(self, user, data):
-        """Called when audio packet is received from a user."""
-        if user.bot:
-            return
-        
-        # Check if AI is speaking and discard_while_speaking is enabled
-        voice_cfg = config.get("voice", {})
-        discard_while_speaking = voice_cfg.get("discard_while_speaking", True)
-        if discard_while_speaking and self.voice_client and self.voice_client.is_playing():
-            # Don't buffer audio while AI is speaking - discard it
-            return
-        
-        user_id = user.id
-        current_time = asyncio.get_event_loop().time()
-        
-        # Update last audio time
-        self.last_audio_time[user_id] = current_time
-        
-        # Buffer audio data
-        if user_id not in self.user_audio_buffers:
-            self.user_audio_buffers[user_id] = bytearray()
-            self.user_objects[user_id] = user  # Store user object for later
-            print(f"🎤 {user.display_name} started speaking")
-        
-        # Append PCM audio data (apply input gain configured in config.yaml)
-        if isinstance(data.pcm, bytes):
-            try:
-                # Read configured gain (default 2.0 if not configured)
-                gain = float(voice_cfg.get("input_gain", 2.0))
-                # Convert bytes to int16 array, scale by configured gain, clip to int16 range and append
-                arr = np.frombuffer(data.pcm, dtype=np.int16).astype(np.int32) * gain
-                arr = np.clip(arr, -32768, 32767).astype(np.int16)
-                self.user_audio_buffers[user_id].extend(arr.tobytes())
-            except Exception as e:
-                # Fallback, append original PCM if scaling fails
-                print(f"Warning: Failed to scale audio for user {user_id}: {e}")
-                self.user_audio_buffers[user_id].extend(data.pcm)
-        
-    async def _check_for_silence(self):
-        """Periodically check for silence and process buffered audio."""
-        # Get check interval from config
-        voice_cfg = config.get("voice", {})
-        check_interval = voice_cfg.get("chunk_duration", 0.5)
-        
-        while self.active:
-            try:
-                await asyncio.sleep(check_interval)  # Check at configured interval
-                current_time = asyncio.get_event_loop().time()
-                
-                for user_id, last_time in list(self.last_audio_time.items()):
-                    silence_duration = current_time - last_time
-                    buffer_size = len(self.user_audio_buffers.get(user_id, []))
-                    
-                    # Debug logging
-                    if buffer_size > 0 and silence_duration > 0.5:
-                        print(f"User {user_id}: {silence_duration:.1f}s silence, {buffer_size} bytes buffered, threshold: {self.silence_threshold}s")
-                    
-                    # If user hasn't spoken in threshold time and has audio buffered
-                    if (silence_duration > self.silence_threshold and 
-                        user_id in self.user_audio_buffers and 
-                        buffer_size > 0 and
-                        not self.processing_audio.get(user_id, False)):
-                        
-                        # Check if AI is currently speaking and discard_while_speaking is enabled
-                        discard_while_speaking = voice_cfg.get("discard_while_speaking", True)
-                        if discard_while_speaking and self.voice_client and self.voice_client.is_playing():
-                            print(f"🔇 Discarding audio from user {user_id} - AI is speaking")
-                            self.user_audio_buffers[user_id] = bytearray()  # Clear buffer
-                            continue
-                        
-                        print(f"🔊 Processing audio for user {user_id} after {silence_duration:.1f}s silence")
-                        # Process this user's audio
-                        await self._process_user_audio(user_id)
-            
-            except Exception as e:
-                print(f"Error in silence check: {e}")
-    
-    async def _process_user_audio(self, user_id: int):
-        """Process buffered audio for a user (transcribe and respond)."""
-        if not self.user_audio_buffers.get(user_id):
-            return
-        
-        try:
-            self.processing_audio[user_id] = True
-            
-            # Start total timing
-            total_start = time.perf_counter()
-            timings = {}
-            
-            # Get audio buffer
-            audio_data = bytes(self.user_audio_buffers[user_id])
-            self.user_audio_buffers[user_id] = bytearray()  # Clear buffer
-            
-            print(f"\n{'='*60}")
-            print(f"🎙️ Processing audio from user {user_id}, size: {len(audio_data)} bytes")
-            
-            # Get voice service (not counted in transcription time)
-            voice_service = await get_voice_service()
-            
-            # === TRANSCRIPTION ===
-            t_start = time.perf_counter()
-            transcription = await voice_service.transcribe_audio(audio_data, sample_rate=48000)
-            timings['transcription'] = time.perf_counter() - t_start
-            
-            if not transcription or len(transcription.strip()) == 0:
-                print("No transcription result")
-                self.processing_audio[user_id] = False
+# ---------------------------------------------------------------------------
+# Conversations
+# ---------------------------------------------------------------------------
+@dataclass
+class Conversation:
+    """History for one text channel or one voice session."""
+
+    mode: str  # "text" | "voice"
+    messages: List[Dict[str, str]] = field(default_factory=list)
+    latest_id: int = 0  # id of the newest user message; older in-flight replies abort
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+    @property
+    def system_prompt(self) -> str:
+        cfg = config.get("voice" if self.mode == "voice" else "chat", {})
+        default = "@voice_chat" if self.mode == "voice" else "@text_chat"
+        return resolve_prompt(cfg.get("system_prompt", default))
+
+    def prompt(self) -> List[Dict[str, str]]:
+        return [{"role": "system", "content": self.system_prompt}, *self.messages]
+
+    async def compact(self) -> None:
+        """
+        When the history outgrows the context window, cut it back to ~70% of the
+        budget in one go and archive what was removed to memory (exactly once).
+        Cutting with headroom keeps the prompt prefix stable for many turns, which
+        is what lets the LLM service reuse its KV cache.
+        """
+        from backend.context_manager import context_budget, split_to_fit
+        from backend.memory_manager import archive_messages
+        from backend.token_utils import count_message_tokens
+
+        async with self.lock:
+            snapshot = self.prompt()
+            budget = context_budget() - 1024  # leave room for tool/RAG context
+            if await asyncio.to_thread(count_message_tokens, snapshot) <= budget:
                 return
-            
-            print(f"📝 Transcribed: {transcription}")
-            
-            # Get username from stored user object
-            user = self.user_objects.get(user_id)
-            username = user.display_name if user else f"User{user_id}"
-            
-            # Process voice command (no text messages to Discord)
-            await self._process_voice_command(transcription, user_id, username, total_start, timings)
-            
-        except Exception as e:
-            print(f"Error processing user audio: {e}")
-            import traceback
-            traceback.print_exc()
-        finally:
-            self.processing_audio[user_id] = False
-    
-    async def _process_voice_command(self, text: str, user_id: int, username: str, total_start: float = None, timings: dict = None):
-        """Process voice input and generate response."""
-        if total_start is None:
-            total_start = time.perf_counter()
-        if timings is None:
-            timings = {}
-        
-        try:
-            # Use globals instead of importing (avoid circular import)
-            global channel_contexts, API_URL, config
-            
-            channel_id = self.channel_id
-            context = get_channel_context(channel_id)
-            
-            # Add user message with username prefix
-            user_content = f"[{username}] {text}"
-            context.append({
-                "role": "user",
-                "content": user_content
-            })
-            
-            # === JUDGMENT ===
-            t_start = time.perf_counter()
-            should_respond = await should_respond_to_message(context, voice_mode=True)
-            timings['judgment'] = time.perf_counter() - t_start
-            
-            if not should_respond:
-                print(f"Judgment: Not responding to voice input")
-                return
-            
-            # Call LLM with voice-specific system prompt
-            chat_cfg = config.get("chat", {})
-            voice_cfg = config.get("voice", {})
-            tools_cfg = config.get("tools", {})
-            
-            # Use voice system prompt (auto-selects based on personality setting)
-            voice_system_prompt = resolve_prompt(voice_cfg.get("system_prompt", "@voice_chat"))
-            if voice_system_prompt and context and context[0].get("role") == "system":
-                # Replace the system prompt with voice-specific one
-                context[0] = {
-                    "role": "system",
-                    "content": voice_system_prompt
-                }
-            
-            # Check if tool system is enabled
-            use_tools = tools_cfg.get("enabled", False)
-            
-            payload = {
-                "messages": context,
-                "temperature": chat_cfg.get("temperature", 0.7),
-                "top_p": chat_cfg.get("top_p", 0.95),
-                "max_tokens": chat_cfg.get("max_tokens", 512),
-            }
-            
-            if use_tools:
-                # Voice mode: use tool system with MCP schemas (single tool for faster response)
-                payload.update({
-                    "use_tools": True,
-                    "max_tools": 1,  # Limit to single tool for faster voice response
-                    "voice_mode": True,  # Use single query for faster RAG
-                })
-            else:
-                # Legacy RAG mode: use single query for faster response
-                payload.update({
-                    "use_tools": False,
-                    "rag_query_count": 1,
-                    "rag_system_prompt": "@rag.query_generation_voice_system",
-                    "rag_user_prompt": "@rag.query_generation_voice_user"
-                })
-            
-            ai_response_full = ""
-            rag_timings = {}
-            tool_timings_from_response = {}
-            llm_generation_time = 0
-            
-            # Streaming TTS Setup
-            current_sentence = ""
-            audio_queue = asyncio.Queue()
-            synthesis_queue = asyncio.Queue()  # Queue of sentences to synthesize
-            
-            # Start audio playback worker
-            playback_task = asyncio.create_task(
-                self._process_audio_queue(audio_queue, timings, total_start)
-            )
-            
-            # Start TTS synthesis worker (runs in parallel with LLM streaming)
-            async def synthesis_worker():
-                voice_service = await get_voice_service()
-                while True:
-                    try:
-                        # 10s timeout - if no sentence arrives, check if we should exit
-                        sentence = await asyncio.wait_for(synthesis_queue.get(), timeout=10.0)
-                    except asyncio.TimeoutError:
-                        # Check if voice client is still connected
-                        if not self.voice_client or not self.voice_client.is_connected():
-                            print("⚠️ Voice client disconnected, stopping synthesis")
-                            break
-                        continue
-                    
-                    if sentence is None:
-                        break
-                    try:
-                        t_synth_start = time.perf_counter()
-                        audio_bytes = await asyncio.wait_for(
-                            voice_service.synthesize_speech(sentence),
-                            timeout=10.0  # 10s timeout for TTS synthesis
-                        )
-                        timings['tts_synthesis'] = timings.get('tts_synthesis', 0) + (time.perf_counter() - t_synth_start)
-                        if audio_bytes:
-                            await audio_queue.put(audio_bytes)
-                    except asyncio.TimeoutError:
-                        print(f"⚠️ TTS synthesis timeout for: {sentence[:50]}...")
-                    except Exception as e:
-                        print(f"TTS synthesis error: {e}")
-                    synthesis_queue.task_done()
-            
-            synthesis_task = asyncio.create_task(synthesis_worker())
-            
-            # === LLM RESPONSE & STREAMING TTS ===
-            t_start = time.perf_counter()
-            
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    f"{API_URL}/chat/stream",
-                    json=payload,
-                    timeout=aiohttp.ClientTimeout(total=300)
-                ) as response:
-                    if not response.ok:
-                        error_text = await response.text()
-                        await self.text_channel.send(f"❌ Error: {error_text[:500]}")
-                        playback_task.cancel()
-                        synthesis_task.cancel()
-                        return
-                    
-                    async for line in response.content:
-                        if not line:
-                            continue
-                        
-                        try:
-                            chunk = json.loads(line.decode('utf-8'))
-                            
-                            if "delta" in chunk and chunk["delta"]:
-                                delta = chunk["delta"]
-                                ai_response_full += delta
-                                current_sentence += delta
-                                
-                                # Check for sentence boundaries using smart detection
-                                # Handles abbreviations (Dr., Mr.), decimals (12.44), etc.
-                                while True:
-                                    end_pos = find_sentence_boundary(current_sentence)
-                                    
-                                    if end_pos == -1:
-                                        break
-                                    
-                                    # Extract the sentence (including the punctuation)
-                                    sentence = current_sentence[:end_pos + 1].strip()
-                                    current_sentence = current_sentence[end_pos + 1:].lstrip()
-                                    
-                                    # Clean the sentence
-                                    clean_sentence = re.sub(r'^\[?Metis\]?\s*:\s*', '', sentence, flags=re.IGNORECASE).strip()
-                                    
-                                    if clean_sentence and len(clean_sentence) > 2:  # Skip very short fragments
-                                        # Queue for synthesis (non-blocking)
-                                        await synthesis_queue.put(clean_sentence)
-                            
-                            if chunk.get("done"):
-                                rag_timings = chunk.get("rag_timings", {})
-                                tool_timings_from_response = chunk.get("tool_timings", {})
-                                llm_generation_time = chunk.get("llm_generation_time", 0)
-                                break
-                                
-                        except json.JSONDecodeError:
-                            continue
-            
-            # Process remaining text (queue to synthesis worker)
-            if current_sentence.strip():
-                clean_sentence = re.sub(r'^\[?Metis\]?\s*:\s*', '', current_sentence, flags=re.IGNORECASE).strip()
-                if clean_sentence:
-                    await synthesis_queue.put(clean_sentence)
+            _, removed = await asyncio.to_thread(split_to_fit, snapshot, int(budget * 0.7))
+            if removed:
+                del self.messages[: len(removed)]
+                archive_messages(removed)
+                print(f"🗜️  Compacted {self.mode} conversation: archived {len(removed)} message(s) to memory")
 
-            # Signal end of synthesis queue and wait for it to finish
-            await synthesis_queue.put(None)
-            await synthesis_task
-            
-            # Signal end of audio queue
-            await audio_queue.put(None)
-            
-            timings['llm_total'] = time.perf_counter() - t_start
-            # Handle both tool and legacy RAG timings
-            timings['tool_selection'] = tool_timings_from_response.get('tool_selection', 0)
-            timings['tool_execution'] = tool_timings_from_response.get('tool_execution', 0)
-            timings['rag_query_generation'] = rag_timings.get('query_generation', 0)
-            timings['rag_retrieval'] = rag_timings.get('retrieval', 0)
-            timings['llm_generation'] = llm_generation_time
-            
-            # Wait for playback to finish
-            await playback_task
-            
-            if ai_response_full:
-                # Clean response
-                ai_response_clean = re.sub(r'^\[?Metis\]?\s*:\s*', '', ai_response_full, flags=re.IGNORECASE)
-                ai_response_clean = ai_response_clean.replace('\n\n', '\n')
-                
-                # Add to context (no text message to Discord in voice mode)
-                context.append({
-                    "role": "assistant",
-                    "content": ai_response_clean
-                })
-                
-                # Create message data for user input
-                user_msg_data = {
-                    "id": f"voice-user-{user_id}-{datetime.now().timestamp()}",
-                    "text": f"[{username}] {text}",
-                    "sender": "user",
-                    "timestamp": datetime.now().isoformat(),
-                    "channel_name": f"🎤 Voice ({self.text_channel.name if self.text_channel else 'Unknown'})",
-                    "discord_user": username,
-                    "mode": "voice"
-                }
-                
-                # Create message data for AI response
-                ai_msg_data = {
-                    "id": f"voice-ai-{datetime.now().timestamp()}",
-                    "text": ai_response_clean,
-                    "sender": "ai",
-                    "timestamp": datetime.now().isoformat(),
-                    "channel_name": f"🎤 Voice ({self.text_channel.name if self.text_channel else 'Unknown'})",
-                    "mode": "voice"
-                }
-                
-                # === UI BROADCAST (Fire-and-forget after playback) ===
-                # Send user message first, then AI message (in order)
-                async def broadcast_messages():
-                    await add_to_message_queue(user_msg_data)
-                    await add_to_message_queue(ai_msg_data)
-                asyncio.create_task(broadcast_messages())
-                
-                # === SAVE TO HISTORY ===
-                t_start = time.perf_counter()
-                save_to_chat_history({
-                    "timestamp": datetime.now().isoformat(),
-                    "channel_id": str(channel_id),
-                    "user_id": str(user_id),
-                    "username": username,
-                    "content": text,
-                    "role": "user",
-                    "mode": "voice"
-                })
-                
-                save_to_chat_history({
-                    "timestamp": datetime.now().isoformat(),
-                    "channel_id": str(channel_id),
-                    "user_id": str(bot.user.id),
-                    "username": bot.user.display_name,
-                    "content": ai_response_clean,
-                    "role": "assistant",
-                    "mode": "voice"
-                })
-                timings['save_history'] = time.perf_counter() - t_start
-                
-                # === PRINT TIMING SUMMARY ===
-                total_time = time.perf_counter() - total_start
-                time_to_first_audio = timings.get('time_to_first_audio', total_time) # Fallback if no audio
-                
-                print(f"\n{'='*60}")
-                print(f"⏱️  VOICE PIPELINE TIMING SUMMARY")
-                print(f"{'='*60}")
-                print(f"  1.  Transcription (STT):        {timings.get('transcription', 0):>7.3f}s")
-                print(f"  2.  Judgment AI:                {timings.get('judgment', 0):>7.3f}s")
-                # Show tool or RAG timings depending on what was used
-                if timings.get('tool_selection', 0) > 0:
-                    print(f"  3.  Tool Selection:             {timings.get('tool_selection', 0):>7.3f}s")
-                    print(f"  4.  Tool Execution:             {timings.get('tool_execution', 0):>7.3f}s")
-                else:
-                    print(f"  3.  RAG Query Generation:       {timings.get('rag_query_generation', 0):>7.3f}s")
-                    print(f"  4.  RAG Retrieval + Rerank:     {timings.get('rag_retrieval', 0):>7.3f}s")
-                print(f"  5.  LLM Generation:             {timings.get('llm_generation', 0):>7.3f}s")
-                print(f"      (LLM total w/ overhead):    {timings.get('llm_total', 0):>7.3f}s")
-                print(f"  6.  TTS Synthesis (Total):      {timings.get('tts_synthesis', 0):>7.3f}s")
-                print(f"  7.  Audio Playback (Total):     {timings.get('tts_playback', 0):>7.3f}s")
-                print(f"  8.  Save to History:            {timings.get('save_history', 0):>7.3f}s")
-                print(f"      UI Broadcast:               (async, after playback)")
-                print(f"{'─'*60}")
-                print(f"  ⚡ Time to first audio:         {time_to_first_audio:>7.3f}s")
-                print(f"  🔊 Total pipeline time:         {total_time:>7.3f}s")
-                print(f"{'='*60}\n")
-        
-        except Exception as e:
-            print(f"Error processing voice command: {e}")
-            import traceback
-            traceback.print_exc()
-    
-    def stop_listening(self):
-        """Stop listening for voice activity."""
-        self.active = False
-        if self.check_task and not self.check_task.done():
-            self.check_task.cancel()
-        print(f"🔇 Voice receiver stopped for channel {self.channel_id}")
-    
-    async def play_tts_response(self, text: str, timings: dict = None):
-        """Generate TTS and play in voice channel. Returns timing data."""
-        if not self.active or not self.voice_client or not self.voice_client.is_connected():
-            return
-        
-        try:
-            if timings is None:
-                timings = {}
-            
-            # === TTS SYNTHESIS ===
-            t_start = time.perf_counter()
-            voice_service = await get_voice_service()
-            audio_bytes = await voice_service.synthesize_speech(text)
-            timings['tts_synthesis'] = time.perf_counter() - t_start
-            
-            if not audio_bytes:
-                print("TTS generation failed")
-                return
-            
-            # === AUDIO PLAYBACK ===
-            t_start = time.perf_counter()
-            await self._play_audio(audio_bytes)
-            timings['tts_playback'] = time.perf_counter() - t_start
-            
-        except Exception as e:
-            print(f"Error in TTS response: {e}")
-    
-    async def _process_audio_queue(self, audio_queue: asyncio.Queue, timings: dict, t_start_pipeline: float):
-        """Process audio chunks from the queue and play them sequentially."""
-        first_chunk = True
-        while True:
-            try:
-                # Timeout to prevent hanging if no audio comes
-                audio_bytes = await asyncio.wait_for(audio_queue.get(), timeout=10.0)
-            except asyncio.TimeoutError:
-                # Check if voice client is still connected
-                if not self.voice_client or not self.voice_client.is_connected():
-                    print("⚠️ Voice client disconnected, stopping audio queue")
-                    break
-                # Otherwise keep waiting - synthesis might be slow
-                continue
-            
-            if audio_bytes is None:
-                break
-            
-            # Record time to first audio
-            if first_chunk:
-                timings['time_to_first_audio'] = time.perf_counter() - t_start_pipeline
-                first_chunk = False
-            
-            t_playback_start = time.perf_counter()
-            await self._play_audio(audio_bytes)
-            timings['tts_playback'] = timings.get('tts_playback', 0) + (time.perf_counter() - t_playback_start)
-            
-            audio_queue.task_done()
+    def reset(self) -> int:
+        from backend.memory_manager import archive_messages
 
-    async def _play_audio(self, audio_bytes: bytes):
-        """Play audio bytes in the voice channel."""
-        if not self.voice_client or not self.voice_client.is_connected():
-            return
-        
-        try:
-            import wave
-            import uuid
-            
-            # Clear all user audio buffers when AI starts speaking (if discard_while_speaking is enabled)
-            voice_cfg = config.get("voice", {})
-            if voice_cfg.get("discard_while_speaking", True):
-                for user_id in list(self.user_audio_buffers.keys()):
-                    if len(self.user_audio_buffers[user_id]) > 0:
-                        self.user_audio_buffers[user_id] = bytearray()
-            
-            # Convert PCM bytes to WAV format for FFmpeg
-            # Use unique filename to avoid conflicts
-            temp_wav = PROJECT_ROOT / f"temp_tts_{uuid.uuid4()}.wav"
-            with wave.open(str(temp_wav), 'wb') as wav_file:
-                wav_file.setnchannels(1)  # Mono
-                wav_file.setsampwidth(2)  # 16-bit
-                wav_file.setframerate(24000)  # 24kHz (Kokoro output)
-                wav_file.writeframes(audio_bytes)
-            
-            # Play the audio using FFmpeg
-            audio_source = discord.FFmpegPCMAudio(str(temp_wav))
-            
-            # Use a callback to know when playback is done
-            playback_done = asyncio.Event()
-            loop = asyncio.get_running_loop()  # Get loop BEFORE the callback
-            
-            def after_playback(error):
-                if error:
-                    print(f"Playback error: {error}")
-                # Use call_soon_threadsafe since callback runs in FFmpeg thread
-                loop.call_soon_threadsafe(playback_done.set)
-            
-            self.voice_client.play(audio_source, after=after_playback)
-            
-            # Wait for playback to finish with timeout
-            # Calculate expected duration: bytes / (sample_rate * bytes_per_sample)
-            expected_duration = len(audio_bytes) / (24000 * 2)  # 24kHz, 16-bit
-            timeout = max(expected_duration * 2, 5.0)  # At least 5s, or 2x expected
-            
-            try:
-                await asyncio.wait_for(playback_done.wait(), timeout=timeout)
-            except asyncio.TimeoutError:
-                print(f"⚠️ Playback timeout after {timeout:.1f}s, stopping")
-                if self.voice_client and self.voice_client.is_playing():
-                    self.voice_client.stop()
-            
-            # Clean up temp file
-            temp_wav.unlink(missing_ok=True)
-            
-        except Exception as e:
-            print(f"Error playing audio: {e}")
-            import traceback
-            traceback.print_exc()
+        count = len(self.messages)
+        if self.messages:
+            archive_messages(self.messages)
+        self.messages = []
+        return count
 
 
-def get_channel_context(channel_id: int) -> List[Dict[str, str]]:
-    """Get or create context for a channel."""
-    if channel_id not in channel_contexts:
-        # Initialize with system prompt (auto-selects based on personality setting)
-        system_prompt = resolve_prompt(config.get("chat", {}).get("system_prompt", "@text_chat"))
-        channel_contexts[channel_id] = [
-            {"role": "system", "content": system_prompt}
-        ]
-    return channel_contexts[channel_id]
+conversations: Dict[Tuple[str, int], Conversation] = {}
 
 
-async def should_respond_to_message(context: List[Dict[str, str]], voice_mode: bool = False) -> bool:
-    """Use judgment model to determine if AI should respond."""
-    # Use voice-specific or text-specific judgment config
-    if voice_mode:
-        judgment_cfg = config.get("voice", {}).get("judgment", {})
-    else:
-        judgment_cfg = config.get("chat", {}).get("judgment", {})
-    
+def get_conversation(channel_id: int, mode: str = "text") -> Conversation:
+    key = (mode, channel_id)
+    if key not in conversations:
+        conversations[key] = Conversation(mode=mode)
+    return conversations[key]
+
+
+# ---------------------------------------------------------------------------
+# Backend calls
+# ---------------------------------------------------------------------------
+async def should_respond(conversation: Conversation, voice_mode: bool = False) -> bool:
+    """Ask the LLM whether Metis should join in. Errors default to responding."""
+    judgment_cfg = config.get("voice" if voice_mode else "chat", {}).get("judgment", {})
     if not judgment_cfg.get("enabled", True):
-        return True  # Always respond if judgment disabled
-    
-    # Get recent messages for judgment (exclude system message)
-    context_messages = judgment_cfg.get("context_messages", 5)
-    recent_messages = [
-        msg for msg in context[-context_messages:]
-        if msg.get("role") in ["user", "assistant"]
-    ]
-    
-    if not recent_messages:
-        return True  # Respond if no context
-    
+        return True
+    recent = conversation.messages[-int(judgment_cfg.get("context_messages", 5)):]
+    if not recent:
+        return True
+    payload = {
+        "messages": recent,
+        "system_prompt": resolve_prompt(judgment_cfg.get("system_prompt", "@judgment.voice" if voice_mode else "@judgment.text")),
+        "user_prompt": judgment_cfg.get("user_prompt"),
+    }
     try:
-        # Call judgment endpoint (auto-selects based on personality setting)
-        default_judgment = "@judgment.text" if not voice_mode else "@judgment.voice"
-        system_prompt = resolve_prompt(judgment_cfg.get("system_prompt", default_judgment))
-        
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                f"{API_URL.replace('8000', '3000')}/judgment",
-                json={
-                    "messages": recent_messages,
-                    "system_prompt": system_prompt
-                },
-                timeout=aiohttp.ClientTimeout(total=30)
-            ) as response:
-                if not response.ok:
-                    print(f"Judgment request failed: {response.status}")
-                    return True  # Default to responding on error
-                
-                data = await response.json()
-                judgment = data.get("judgment", "")
-        
-        # Calculate similarity with "positive" and "negative"
-        from difflib import SequenceMatcher
-        
-        positive_similarity = SequenceMatcher(None, judgment.lower(), "positive").ratio()
-        negative_similarity = SequenceMatcher(None, judgment.lower(), "negative").ratio()
-        
-        print(f"Judgment: '{judgment}' | Positive: {positive_similarity:.2f} | Negative: {negative_similarity:.2f}")
-        
-        # Respond if judgment is closer to "positive" than "negative"
-        should_respond = positive_similarity > negative_similarity
-        
-        if not should_respond:
-            print("❌ Judgment: AI will NOT respond to this message")
-        else:
-            print("✅ Judgment: AI will respond to this message")
-        
-        return should_respond
-        
+        async with http().post(f"{llm_service_url()}/judgment", json=payload,
+                               timeout=aiohttp.ClientTimeout(total=30)) as response:
+            if response.status != 200:
+                print(f"Judgment request failed ({response.status}); responding anyway")
+                return True
+            judgment = (await response.json()).get("judgment", "").strip().lower()
     except Exception as e:
-        print(f"Error in judgment: {e}")
-        return True  # Default to responding on error
+        print(f"Judgment error ({e}); responding anyway")
+        return True
+    decision = not judgment.startswith("neg")
+    print(f"{'✅' if decision else '❌'} Judgment: {judgment}")
+    return decision
 
 
-async def add_to_message_queue(message_data: Dict):
-    """Add a message to the queue for broadcasting to UI."""
+async def stream_reply(payload: Dict[str, Any], stats: Dict[str, Any]) -> AsyncIterator[str]:
+    """Yield reply text deltas from the backend. The final stats chunk is stored in `stats`."""
+    async with http().post(f"{backend_url()}/chat/stream", json=payload) as response:
+        if response.status != 200:
+            raise RuntimeError(f"backend returned {response.status}: {(await response.text())[:300]}")
+        async for raw in response.content:
+            line = raw.strip()
+            if not line:
+                continue
+            try:
+                chunk = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if chunk.get("error"):
+                raise RuntimeError(chunk["error"])
+            if chunk.get("delta"):
+                yield chunk["delta"]
+            if chunk.get("done"):
+                stats.update(chunk)
+                return
+
+
+def chat_payload(conversation: Conversation, voice_mode: bool) -> Dict[str, Any]:
+    chat_cfg = config.get("chat", {})
+    voice_cfg = config.get("voice", {})
+    payload: Dict[str, Any] = {
+        "messages": conversation.prompt(),
+        "temperature": chat_cfg.get("temperature", 0.7),
+        "top_p": chat_cfg.get("top_p", 0.95),
+        "max_tokens": (voice_cfg if voice_mode else chat_cfg).get("max_tokens", chat_cfg.get("max_tokens", 512)),
+        "voice_mode": voice_mode,
+    }
+    if voice_mode:
+        payload.update({
+            "max_tools": 1,
+            "rag_query_count": 1,
+            "rag_system_prompt": "@rag.query_generation_voice_system",
+            "rag_user_prompt": "@rag.query_generation_voice_user",
+        })
+    return payload
+
+
+async def publish(entry: Dict[str, Any]) -> None:
+    """Send a message to the dashboard feed and the session log."""
     try:
-        # Send message to FastAPI endpoint using aiohttp
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                f"{API_URL}/discord/add-message",
-                json=message_data,
-                timeout=aiohttp.ClientTimeout(total=5)
-            ) as response:
-                await response.text()
+        async with http().post(f"{backend_url()}/discord/add-message", json=entry,
+                               timeout=aiohttp.ClientTimeout(total=5)) as response:
+            await response.read()
     except Exception as e:
-        print(f"Failed to add message to queue: {e}")
+        print(f"Failed to publish message to dashboard: {e}")
+    await asyncio.to_thread(chat_log.append, entry)
 
 
-def save_to_chat_history(message_data: Dict):
-    """Save message to chat_history.json file."""
-    import json
-    from pathlib import Path
-    
-    MEMORY_DIR = PROJECT_ROOT / "memory"
-    CHAT_HISTORY_FILE = MEMORY_DIR / "chat_history.json"
-    
-    try:
-        # Load existing history
-        if CHAT_HISTORY_FILE.exists():
-            with open(CHAT_HISTORY_FILE, "r", encoding="utf-8") as f:
-                try:
-                    data = json.load(f)
-                except json.JSONDecodeError:
-                    data = {"messages": [], "lastUpdated": datetime.now().isoformat()}
-        else:
-            data = {"messages": [], "lastUpdated": datetime.now().isoformat()}
-        
-        # Add new message
-        data["messages"].append(message_data)
-        data["lastUpdated"] = datetime.now().isoformat()
-        
-        # Save back to file
-        with open(CHAT_HISTORY_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
-            
-    except Exception as e:
-        print(f"Failed to save to chat_history.json: {e}")
+def clean_reply(text: str) -> str:
+    text = strip_name_prefix(strip_thinking(text)).strip()
+    if "```" not in text:
+        text = re.sub(r"\n{2,}", "\n", text)  # keep Discord replies compact
+    return text
+
+
+# ---------------------------------------------------------------------------
+# Text chat
+# ---------------------------------------------------------------------------
+def author_label(user: discord.abc.User) -> str:
+    return user.name if getattr(user, "discriminator", "0") in ("0", None) else f"{user.name}#{user.discriminator}"
+
+
+def describe_message(message: discord.Message) -> str:
+    """Message text as the model should see it: mentions resolved, attachments noted."""
+    text = message.clean_content.strip()
+    extras = [f"[attachment: {a.filename}]" for a in message.attachments]
+    extras += ["[sticker]" for _ in message.stickers]
+    return " ".join([text, *extras]).strip()
+
+
+def is_addressed_to_bot(message: discord.Message) -> bool:
+    """DMs, @mentions, replies to Metis, or saying her name skip the judgment step."""
+    if message.guild is None or bot.user in message.mentions:
+        return True
+    ref = message.reference
+    if ref and isinstance(ref.resolved, discord.Message) and ref.resolved.author == bot.user:
+        return True
+    name = (bot.user.display_name if bot.user else "Metis").lower()
+    return re.search(rf"\b{re.escape(name)}\b", message.content.lower()) is not None
 
 
 @bot.event
 async def on_ready():
-    """Called when the bot is ready."""
-    print("\n" + "="*60)
-    print(f"Discord Bot Connected!")
-    print(f"Bot Username: {bot.user}")
-    print(f"Bot ID: {bot.user.id}")
-    print("="*60 + "\n")
-    print("Bot is ready to receive messages!")
-    print("Listening in all channels where the bot has access.")
-    print("="*60 + "\n")
+    print("\n" + "=" * 60)
+    print(f"Discord bot connected as {bot.user} (id {bot.user.id})")
+    print(f"Guilds: {', '.join(g.name for g in bot.guilds) or 'none'}")
+    print("=" * 60 + "\n")
 
 
 @bot.event
 async def on_message(message: discord.Message):
-    """Handle incoming Discord messages."""
-    # Ignore messages from the bot itself
-    if message.author == bot.user:
+    if message.author.bot:
         return
-    
-    # Ignore bot commands (both ! and > prefixes)
-    if message.content.startswith("!") or message.content.startswith(">"):
-        await bot.process_commands(message)
+
+    ctx = await bot.get_context(message)
+    if ctx.valid:
+        await bot.invoke(ctx)
         return
-    
-    # Check if bot is in any voice channel - if yes, ignore text messages
-    if message.guild:  # Only check for guild messages (not DMs)
-        voice_client = message.guild.voice_client
-        if voice_client and voice_client.is_connected():
-            # Bot is in voice chat, don't respond to text messages
-            return
-    
-    # Get channel context
-    channel_id = message.channel.id
-    context = get_channel_context(channel_id)
-    
-    # Update latest message timestamp for this channel
-    message_timestamp = message.created_at
-    latest_message_time[channel_id] = message_timestamp
-    
-    # Format user message with username
-    user_display = f"{message.author.name}#{message.author.discriminator}" if message.author.discriminator != "0" else message.author.name
-    user_content = f"[{user_display}]: {message.content}"
-    
-    # Add user message to context
-    context.append({
-        "role": "user",
-        "content": user_content
-    })
-    
-    # Broadcast user message to UI
-    user_msg_data = {
+
+    content = describe_message(message)
+    if not content:
+        return
+
+    # While Metis is in a voice channel in this server, she only listens there.
+    if message.guild and message.guild.voice_client and message.guild.voice_client.is_connected():
+        return
+
+    conversation = get_conversation(message.channel.id, "text")
+    user = author_label(message.author)
+    user_content = f"[{user}]: {content}"
+    channel_name = getattr(message.channel, "name", None) or "DM"
+
+    async with conversation.lock:
+        conversation.messages.append({"role": "user", "content": user_content})
+        conversation.latest_id = message.id
+    asyncio.create_task(publish({
         "id": str(message.id),
         "text": user_content,
         "sender": "user",
         "timestamp": message.created_at.isoformat(),
-        "discord_user": user_display,
-        "channel_name": message.channel.name if hasattr(message.channel, 'name') else "DM"
-    }
-    await add_to_message_queue(user_msg_data)
-    save_to_chat_history(user_msg_data)
-    
-    # Check if AI should respond using judgment model
-    if not await should_respond_to_message(context):
-        print(f"Skipping response to message from {user_display} (judgment: negative)")
+        "discord_user": user,
+        "channel_name": channel_name,
+        "mode": "text",
+    }))
+
+    if not is_addressed_to_bot(message) and not await should_respond(conversation):
         return
-    
-    # Check if a newer message arrived during judgment
-    if latest_message_time.get(channel_id) != message_timestamp:
-        print(f"Message interrupted by newer message, skipping response")
+    if conversation.latest_id != message.id:
+        return  # a newer message arrived while judging; it will be answered instead
+
+    reply = ""
+    stats: Dict[str, Any] = {}
+    try:
+        async with message.channel.typing():
+            async for delta in stream_reply(chat_payload(conversation, voice_mode=False), stats):
+                if conversation.latest_id != message.id:
+                    print("Reply interrupted by a newer message")
+                    return  # closing the stream aborts generation upstream
+                reply += delta
+    except Exception as e:
+        print(f"Error generating reply: {e}")
+        await message.channel.send(f"⚠️ I couldn't reply: {str(e)[:300]}")
         return
-    
-    # Show typing indicator in Discord
-    async with message.channel.typing():
+
+    reply = clean_reply(reply)
+    if not reply:
+        return
+    sent: Optional[discord.Message] = None
+    for chunk in split_message(reply):
+        sent = await message.channel.send(chunk, allowed_mentions=discord.AllowedMentions(users=True, everyone=False, roles=False))
+
+    async with conversation.lock:
+        conversation.messages.append({"role": "assistant", "content": reply})
+    await publish({
+        "id": str(sent.id) if sent else f"ai-{message.id}",
+        "text": reply,
+        "sender": "ai",
+        "timestamp": datetime.now().astimezone().isoformat(),
+        "channel_name": channel_name,
+        "mode": "text",
+        "tokensPerSecond": stats.get("tokens_per_second"),
+    })
+    asyncio.create_task(conversation.compact())
+
+
+# ---------------------------------------------------------------------------
+# Voice chat
+# ---------------------------------------------------------------------------
+class VoiceAudioSink(voice_recv.AudioSink):
+    """Receives decoded PCM (48 kHz stereo) from discord-ext-voice-recv on its reader thread."""
+
+    def __init__(self, receiver: "VoiceReceiver"):
+        super().__init__()
+        self.receiver = receiver
+
+    def wants_opus(self) -> bool:
+        return False
+
+    def write(self, user, data):
+        if user is None or user.bot or not data.pcm:
+            return
+        self.receiver.buffer_audio(user, data.pcm)
+
+    def cleanup(self):
+        pass
+
+
+@dataclass
+class _Utterance:
+    user: Any
+    pcm: bytearray = field(default_factory=bytearray)
+    last_packet: float = 0.0
+
+
+class VoiceReceiver:
+    """Turns a voice channel into a conversation with Metis."""
+
+    def __init__(self, voice_client: voice_recv.VoiceRecvClient, text_channel: discord.abc.Messageable):
+        self.voice_client = voice_client
+        self.channel_id = voice_client.channel.id
+        self.text_channel = text_channel
+        self.cfg = config.get("voice", {})
+        self.silence_timeout = float(self.cfg.get("listen_timeout", 1.0))
+        self.gain = float(self.cfg.get("input_gain", 1.0))
+        self.discard_while_speaking = bool(self.cfg.get("discard_while_speaking", True))
+
+        self._utterances: Dict[int, _Utterance] = {}
+        self._buffer_lock = threading.Lock()
+        self._respond_lock = asyncio.Lock()  # one spoken reply at a time
+        self._speaking = False
+        self._active = True
+        self._monitor: Optional[asyncio.Task] = None
+        self.conversation = get_conversation(self.channel_id, "voice")
+
+    # -- capture (runs on the voice-recv thread) --------------------------
+    def buffer_audio(self, user, pcm: bytes) -> None:
+        if not self._active or (self.discard_while_speaking and self._speaking):
+            return
+        if self.gain != 1.0:
+            samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) * self.gain
+            pcm = np.clip(samples, -32768, 32767).astype(np.int16).tobytes()
+        with self._buffer_lock:
+            utt = self._utterances.get(user.id)
+            if utt is None:
+                utt = self._utterances[user.id] = _Utterance(user=user)
+            utt.pcm.extend(pcm)
+            utt.last_packet = time.monotonic()
+
+    def _discard_buffers(self) -> None:
+        with self._buffer_lock:
+            self._utterances.clear()
+
+    # -- lifecycle -------------------------------------------------------
+    def start(self) -> None:
+        self.voice_client.listen(VoiceAudioSink(self))
+        self._monitor = asyncio.create_task(self._watch_for_pauses())
+        print(f"🎤 Listening in voice channel {self.voice_client.channel.name}")
+
+    def stop(self) -> None:
+        self._active = False
+        if self._monitor:
+            self._monitor.cancel()
+        if self.voice_client.is_listening():
+            self.voice_client.stop_listening()
+
+    async def _watch_for_pauses(self) -> None:
+        interval = float(self.cfg.get("chunk_duration", 0.25))
+        while self._active:
+            await asyncio.sleep(interval)
+            now = time.monotonic()
+            ready: List[_Utterance] = []
+            with self._buffer_lock:
+                for user_id, utt in list(self._utterances.items()):
+                    if utt.pcm and now - utt.last_packet >= self.silence_timeout:
+                        ready.append(utt)
+                        del self._utterances[user_id]
+            for utt in ready:
+                asyncio.create_task(self._handle_utterance(utt))
+
+    # -- understanding & replying -----------------------------------------
+    async def _handle_utterance(self, utt: _Utterance) -> None:
+        timings: Dict[str, float] = {}
+        t0 = time.perf_counter()
         try:
-            # Call chat API with streaming
-            chat_cfg = config.get("chat", {})
-            payload = {
-                "messages": context,
-                "temperature": chat_cfg.get("temperature", 0.7),
-                "top_p": chat_cfg.get("top_p", 0.95),
-                "max_tokens": chat_cfg.get("max_tokens", 512)
-            }
-            
-            ai_response = ""
-            
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    f"{API_URL}/chat/stream",
-                    json=payload,
-                    timeout=aiohttp.ClientTimeout(total=300)
-                ) as response:
-                    if not response.ok:
-                        error_text = await response.text()
-                        await message.channel.send(f"❌ Error: {error_text[:500]}")
-                        return
-                    
-                    # Stream response - accumulate full response before sending
-                    async for line in response.content:
-                        if not line:
-                            continue
-                        
-                        # Check if a newer message arrived during streaming
-                        if latest_message_time.get(channel_id) != message_timestamp:
-                            print(f"Response interrupted by newer message, aborting")
-                            return
-                        
-                        try:
-                            chunk = json.loads(line.decode('utf-8'))
-                            
-                            if "delta" in chunk and chunk["delta"]:
-                                ai_response += chunk["delta"]
-                            
-                            if chunk.get("done"):
-                                break
-                                
-                        except json.JSONDecodeError:
-                            continue
-            
-            # Send complete message once (no editing, no "edited" tag)
-            discord_msg = None
-            if ai_response:
-                # Remove AI name prefix if present (e.g., "[Metis]:", "Metis:", etc.)
-                ai_response = re.sub(r'^\[?Metis\]?\s*:\s*', '', ai_response, flags=re.IGNORECASE)
-                
-                # Remove excessive spacing - replace double newlines with single
-                ai_response = ai_response.replace('\n\n', '\n')
-                
-                # Discord has 2000 char limit, send in chunks if needed
-                if len(ai_response) <= 2000:
-                    discord_msg = await message.channel.send(ai_response)
-                else:
-                    # Split long messages
-                    discord_msg = await message.channel.send(ai_response[:2000])
-                    remaining = ai_response[2000:]
-                    while remaining:
-                        await message.channel.send(remaining[:2000])
-                        remaining = remaining[2000:]
-            
-            # Add AI response to context
-            context.append({
-                "role": "assistant",
-                "content": ai_response
-            })
-            
-            # Broadcast AI message to UI (only if we have a response)
-            if ai_response and discord_msg:
-                ai_msg_data = {
-                    "id": str(discord_msg.id),
-                    "text": ai_response,
-                    "sender": "ai",
-                    "timestamp": datetime.now().isoformat(),
-                    "channel_name": message.channel.name if hasattr(message.channel, 'name') else "DM"
-                }
-                await add_to_message_queue(ai_msg_data)
-                save_to_chat_history(ai_msg_data)
-            
-            # If in voice channel, also play TTS response
-            if ai_response and message.guild and message.guild.voice_client:
-                if hasattr(bot, 'voice_receivers') and message.guild.id in bot.voice_receivers:
-                    receiver = bot.voice_receivers[message.guild.id]
-                    await receiver.play_tts_response(ai_response)
-            
+            service = await get_voice_service()
+            text = await service.transcribe_audio(bytes(utt.pcm), sample_rate=48000, channels=2)
+            timings["transcription"] = time.perf_counter() - t0
+            if not text:
+                return
+            username = utt.user.display_name
+            print(f"📝 [{username}] {text}")
+            await self._respond(username, utt.user.id, text, t0, timings)
         except Exception as e:
-            error_msg = f"❌ Error processing message: {str(e)}"
-            await message.channel.send(error_msg)
-            print(f"Error in on_message: {e}")
+            import traceback
+            print(f"Voice pipeline error: {e}")
+            traceback.print_exc()
+
+    async def _respond(self, username: str, user_id: int, text: str, t0: float, timings: Dict[str, float]) -> None:
+        conversation = self.conversation
+        user_content = f"[{username}] {text}"
+        async with conversation.lock:
+            conversation.messages.append({"role": "user", "content": user_content})
+        channel_label = f"🎤 {self.voice_client.channel.name}"
+        asyncio.create_task(publish({
+            "id": f"voice-{user_id}-{time.time_ns()}",
+            "text": user_content,
+            "sender": "user",
+            "timestamp": datetime.now().astimezone().isoformat(),
+            "discord_user": username,
+            "channel_name": channel_label,
+            "mode": "voice",
+        }))
+
+        async with self._respond_lock:
+            if not self._active:
+                return
+            # Skip the judgment if someone said Metis' name.
+            name = (bot.user.display_name if bot.user else "Metis").lower()
+            t = time.perf_counter()
+            addressed = re.search(rf"\b{re.escape(name)}\b", text.lower()) is not None
+            if not addressed and not await should_respond(conversation, voice_mode=True):
+                return
+            timings["judgment"] = time.perf_counter() - t
+
+            reply, stats = await self._speak_streamed_reply(conversation, t0, timings)
+            reply = clean_reply(reply)
+            if not reply:
+                return
+            async with conversation.lock:
+                conversation.messages.append({"role": "assistant", "content": reply})
+
+        await publish({
+            "id": f"voice-ai-{time.time_ns()}",
+            "text": reply,
+            "sender": "ai",
+            "timestamp": datetime.now().astimezone().isoformat(),
+            "channel_name": channel_label,
+            "mode": "voice",
+            "tokensPerSecond": stats.get("tokens_per_second"),
+        })
+        asyncio.create_task(conversation.compact())
+        self._print_timings(timings, stats, time.perf_counter() - t0)
+
+    async def _speak_streamed_reply(self, conversation: Conversation, t0: float,
+                                    timings: Dict[str, float]) -> Tuple[str, Dict[str, Any]]:
+        """Stream the reply, synthesising and playing each sentence as soon as it is complete."""
+        service = await get_voice_service()
+        sentences: asyncio.Queue[Optional[str]] = asyncio.Queue()
+        audio: asyncio.Queue[Optional[bytes]] = asyncio.Queue()
+        stats: Dict[str, Any] = {}
+
+        async def synthesize() -> None:
+            while (sentence := await sentences.get()) is not None:
+                t = time.perf_counter()
+                pcm = await service.synthesize_speech(sentence)
+                timings["tts"] = timings.get("tts", 0.0) + time.perf_counter() - t
+                if pcm:
+                    await audio.put(pcm)
+            await audio.put(None)
+
+        async def play() -> None:
+            first = True
+            while (pcm := await audio.get()) is not None:
+                if first:
+                    timings["first_audio"] = time.perf_counter() - t0
+                    first = False
+                await self._play_pcm(pcm)
+
+        synth_task = asyncio.create_task(synthesize())
+        play_task = asyncio.create_task(play())
+        think = ThinkFilter()
+        pending = ""
+        reply = ""
+        try:
+            async for delta in stream_reply(chat_payload(conversation, voice_mode=True), stats):
+                reply += delta
+                pending += think.feed(delta)
+                done, pending = pop_sentences(pending)
+                for sentence in done:
+                    spoken = clean_for_speech(strip_name_prefix(sentence))
+                    if len(spoken) > 1:
+                        await sentences.put(spoken)
+            pending += think.flush()
+            tail = clean_for_speech(strip_name_prefix(pending))
+            if tail:
+                await sentences.put(tail)
+        except Exception as e:
+            print(f"Voice reply error: {e}")
+        finally:
+            await sentences.put(None)
+            await asyncio.gather(synth_task, play_task, return_exceptions=True)
+        return reply, stats
+
+    async def _play_pcm(self, pcm24k_mono: bytes) -> None:
+        """Play Kokoro output directly (no temp files or FFmpeg process per sentence)."""
+        if not self._active or not self.voice_client.is_connected():
+            return
+        from scipy.signal import resample_poly
+
+        samples = np.frombuffer(pcm24k_mono, dtype=np.int16).astype(np.float32)
+        upsampled = resample_poly(samples, 48000 // TTS_SAMPLE_RATE, 1)
+        stereo = np.repeat(np.clip(upsampled, -32768, 32767).astype(np.int16), 2)
+        source = discord.PCMAudio(io.BytesIO(stereo.tobytes()))
+
+        loop = asyncio.get_running_loop()
+        done = asyncio.Event()
+
+        def after(error: Optional[Exception]) -> None:
+            if error:
+                print(f"Playback error: {error}")
+            loop.call_soon_threadsafe(done.set)
+
+        self._speaking = True
+        if self.discard_while_speaking:
+            self._discard_buffers()
+        try:
+            self.voice_client.play(source, after=after)
+            duration = len(pcm24k_mono) / (TTS_SAMPLE_RATE * 2)
+            await asyncio.wait_for(done.wait(), timeout=duration + 5)
+        except asyncio.TimeoutError:
+            self.voice_client.stop()
+        except discord.ClientException as e:
+            print(f"Playback skipped: {e}")
+        finally:
+            self._speaking = False
+
+    @staticmethod
+    def _print_timings(timings: Dict[str, float], stats: Dict[str, Any], total: float) -> None:
+        tool = stats.get("tool_timings") or {}
+        rag = stats.get("rag_timings") or {}
+        rows = [
+            ("Transcription", timings.get("transcription")),
+            ("Judgment", timings.get("judgment")),
+            ("Tool selection", tool.get("tool_selection")),
+            ("Tool execution", tool.get("tool_execution")),
+            ("RAG queries", rag.get("query_generation")),
+            ("RAG retrieval", rag.get("retrieval")),
+            ("LLM first token", stats.get("ttft")),
+            ("LLM generation", stats.get("llm_generation_time")),
+            ("TTS (sum)", timings.get("tts")),
+        ]
+        print("\n⏱️  Voice pipeline")
+        for label, value in rows:
+            if value:
+                print(f"   {label:<18}{value:>7.2f}s")
+        if "first_audio" in timings:
+            print(f"   {'⚡ First audio':<18}{timings['first_audio']:>7.2f}s")
+        print(f"   {'Total':<18}{total:>7.2f}s\n")
 
 
+voice_receivers: Dict[int, VoiceReceiver] = {}  # guild id -> receiver
+
+
+async def _disconnect(guild: discord.Guild) -> None:
+    receiver = voice_receivers.pop(guild.id, None)
+    if receiver:
+        receiver.stop()
+    if guild.voice_client:
+        await guild.voice_client.disconnect(force=True)
+
+
+@bot.event
+async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+    guild = member.guild
+    if member == bot.user and after.channel is None:
+        receiver = voice_receivers.pop(guild.id, None)
+        if receiver:
+            receiver.stop()
+        return
+    vc = guild.voice_client
+    if vc and before.channel == vc.channel and after.channel != vc.channel:
+        # voice_states works without the privileged members intent (unlike channel.members).
+        if not any(uid != bot.user.id for uid in vc.channel.voice_states):
+            receiver = voice_receivers.get(guild.id)
+            await _disconnect(guild)
+            if receiver:
+                await receiver.text_channel.send("👋 Everyone left the voice channel, so I left too. Text chat is back on.")
+
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
 @bot.command(name="reset")
-async def reset_context(ctx):
-    """Reset the conversation context for this channel."""
-    channel_id = ctx.channel.id
-    if channel_id in channel_contexts:
-        del channel_contexts[channel_id]
-    await ctx.send("🔄 Conversation context has been reset!")
+async def reset_context(ctx: commands.Context):
+    """Forget this channel's conversation (it's saved to long-term memory first)."""
+    count = get_conversation(ctx.channel.id, "text").reset()
+    await ctx.send(f"🔄 Fresh start! {count} message(s) were saved to memory.")
 
 
 @bot.command(name="status")
-async def status(ctx):
-    """Show bot status and context size."""
-    channel_id = ctx.channel.id
-    context = get_channel_context(channel_id)
-    msg_count = len(context) - 1  # Exclude system message
-    await ctx.send(f"✅ Bot is online!\n📝 Messages in context: {msg_count}")
+async def status_command(ctx: commands.Context):
+    """Show what Metis is up to."""
+    from backend.token_utils import count_message_tokens
+
+    conversation = get_conversation(ctx.channel.id, "text")
+    tokens = await asyncio.to_thread(count_message_tokens, conversation.prompt())
+    embed = discord.Embed(title="Metis status", color=discord.Color.purple())
+    embed.add_field(name="Personality", value=str(config.get("personality")))
+    embed.add_field(name="Messages here", value=str(len(conversation.messages)))
+    embed.add_field(name="Context", value=f"~{tokens} / {config['model'].get('n_ctx', 8192)} tokens")
+    embed.add_field(name="Tools", value="on" if config.get("tools", {}).get("enabled") else "off")
+    embed.add_field(name="Knowledge base", value="on" if config.get("rag", {}).get("enabled") else "off")
+    if ctx.guild and ctx.guild.id in voice_receivers:
+        embed.add_field(name="Voice", value=voice_receivers[ctx.guild.id].voice_client.channel.name)
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="personality")
+async def personality_command(ctx: commands.Context, name: Optional[str] = None):
+    """List personalities, or switch with `>personality <name>` (requires Manage Server)."""
+    from backend.prompt_loader import load_prompts
+
+    available = sorted((load_prompts().get("text_chat") or {}).keys())
+    current = config.get("personality")
+    if not name:
+        listing = ", ".join(f"**{p}**" if p == current else p for p in available)
+        await ctx.send(f"🎭 Personalities: {listing}")
+        return
+    if ctx.guild and not ctx.author.guild_permissions.manage_guild:
+        await ctx.send("❌ You need the Manage Server permission to change my personality.")
+        return
+    if name not in available:
+        await ctx.send(f"❌ Unknown personality `{name}`. Try one of: {', '.join(available)}")
+        return
+    config["personality"] = name  # takes effect immediately, until the next restart
+    await ctx.send(f"🎭 Personality switched to **{name}** (until restart — set `personality` in config.yaml to keep it).")
 
 
 @bot.command(name="join")
-async def join_voice(ctx):
-    """Join the voice channel the user is currently in."""
-    # Check if user is in a voice channel
-    if not ctx.author.voice:
-        await ctx.send("❌ You need to be in a voice channel first!")
+async def join_voice(ctx: commands.Context):
+    """Join your voice channel and start talking."""
+    if not ctx.guild or not isinstance(ctx.author, discord.Member) or not ctx.author.voice:
+        await ctx.send("❌ Join a voice channel first!")
         return
-    
-    # Get the voice channel
-    voice_channel = ctx.author.voice.channel
-    
-    # Check if bot is already in a voice channel
+    target = ctx.author.voice.channel
     if ctx.voice_client:
-        if ctx.voice_client.channel == voice_channel:
-            await ctx.send("✅ Already in your voice channel!")
-            return
+        if ctx.voice_client.channel == target:
+            await ctx.send("✅ Already here!")
         else:
-            # Move to the new voice channel
-            await ctx.voice_client.move_to(voice_channel)
-            await ctx.send(f"🔊 Moved to **{voice_channel.name}**!")
-            return
-    
-    # Join the voice channel
+            await ctx.voice_client.move_to(target)
+            await ctx.send(f"🔊 Moved to **{target.name}**")
+        return
+
     try:
-        # Initialize voice service first (loads models before joining)
-        await ctx.send("⏳ Loading voice models...")
+        notice = await ctx.send("⏳ Loading voice models...")
         await get_voice_service()
-        
-        # Connect to voice channel
-        voice_client = await voice_channel.connect(cls=voice_recv.VoiceRecvClient, self_deaf=False)
-        
-        # Create voice receiver (it's already a VoiceRecvClient)
-        receiver = VoiceReceiver(voice_client, voice_channel.id, ctx.channel)
-        await receiver.start_listening()
-        
-        # Store receiver for this guild
-        if not hasattr(bot, 'voice_receivers'):
-            bot.voice_receivers = {}
-        bot.voice_receivers[ctx.guild.id] = receiver
-        
-        await ctx.send(
-            f"🔊 Joined **{voice_channel.name}**!\n"
-            f"🎤 I'll respond with voice when you send text messages.\n"
-            f"💬 Text chat is disabled for regular messages (commands still work)."
-        )
+        voice_client = await target.connect(cls=voice_recv.VoiceRecvClient, self_deaf=False)
+        receiver = VoiceReceiver(voice_client, ctx.channel)
+        receiver.start()
+        voice_receivers[ctx.guild.id] = receiver
+        await notice.edit(content=(
+            f"🔊 Joined **{target.name}** — just talk, I'm listening.\n"
+            "💬 Text replies are paused while I'm in voice. Use `>leave` when you're done."
+        ))
     except Exception as e:
-        await ctx.send(f"❌ Failed to join voice channel: {str(e)}")
+        await ctx.send(f"❌ Failed to join voice channel: {e}")
         import traceback
         traceback.print_exc()
 
 
 @bot.command(name="leave")
-async def leave_voice(ctx):
-    """Leave the current voice channel."""
-    # Check if bot is in a voice channel
-    if not ctx.voice_client:
+async def leave_voice(ctx: commands.Context):
+    """Leave the voice channel."""
+    if not ctx.guild or not ctx.voice_client:
         await ctx.send("❌ I'm not in a voice channel!")
         return
-    
-    # Disconnect from voice
+    name = ctx.voice_client.channel.name
+    await _disconnect(ctx.guild)
+    await ctx.send(f"👋 Left **{name}**. Text chat is back on.")
+
+
+@bot.event
+async def on_command_error(ctx: commands.Context, error: commands.CommandError):
+    if isinstance(error, commands.CommandNotFound):
+        return
+    if isinstance(error, (commands.BadArgument, commands.MissingRequiredArgument)):
+        await ctx.send(f"❌ {error}")
+        return
+    print(f"Command error in {ctx.command}: {error}")
+    await ctx.send(f"⚠️ Something went wrong: {str(error)[:200]}")
+
+
+# ---------------------------------------------------------------------------
+# Running
+# ---------------------------------------------------------------------------
+async def _run() -> None:
     try:
-        voice_channel_name = ctx.voice_client.channel.name
-        
-        # Stop voice receiver if exists
-        if hasattr(bot, 'voice_receivers') and ctx.guild.id in bot.voice_receivers:
-            receiver = bot.voice_receivers[ctx.guild.id]
-            receiver.stop_listening()
-            del bot.voice_receivers[ctx.guild.id]
-        
-        await ctx.voice_client.disconnect()
-        await ctx.send(f"👋 Left **{voice_channel_name}**! Text chat is now enabled.")
-    except Exception as e:
-        await ctx.send(f"❌ Failed to leave voice channel: {str(e)}")
+        async with bot:
+            await bot.start(DISCORD_TOKEN)
+    finally:
+        if _http and not _http.closed:
+            await _http.close()
 
 
+def start_in_background() -> Optional[threading.Thread]:
+    """Run the bot on its own event loop in a daemon thread."""
+    global _thread, _loop
+    if not config.get("discord", {}).get("enabled", True):
+        print("Discord bot disabled (discord.enabled: false in config.yaml).")
+        return None
+    if not DISCORD_TOKEN:
+        print("⚠ DISCORD_BOT_TOKEN is not set (see .env.example); the Discord bot will not start.")
+        return None
+    if _thread and _thread.is_alive():
+        return _thread
+
+    def runner() -> None:
+        global _loop
+        _loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(_loop)
+        try:
+            _loop.run_until_complete(_run())
+        except discord.LoginFailure:
+            print("✗ Discord rejected the bot token (DISCORD_BOT_TOKEN).")
+        except Exception as e:
+            print(f"✗ Discord bot stopped: {e}")
+        finally:
+            _loop.close()
+
+    discord.utils.setup_logging()
+    _thread = threading.Thread(target=runner, name="discord-bot", daemon=True)
+    _thread.start()
+    return _thread
 
 
+def stop(timeout: float = 10) -> None:
+    if _loop and _loop.is_running() and not bot.is_closed():
+        future = asyncio.run_coroutine_threadsafe(bot.close(), _loop)
+        try:
+            future.result(timeout)
+        except Exception:
+            pass
 
-def run_bot():
-    """Start the Discord bot."""
-    try:
-        print("Starting Discord bot...")
-        bot.run(DISCORD_TOKEN)
-    except Exception as e:
-        print(f"Failed to start Discord bot: {e}")
-        sys.exit(1)
+
+def status() -> Dict[str, Any]:
+    connected = bot.is_ready() and not bot.is_closed()
+    return {
+        "connected": connected,
+        "user": str(bot.user) if bot.user else None,
+        "voice_channels": [r.voice_client.channel.name for r in list(voice_receivers.values())
+                           if r.voice_client.is_connected()],
+    }
 
 
 if __name__ == "__main__":
-    run_bot()
+    if not DISCORD_TOKEN:
+        raise SystemExit("DISCORD_BOT_TOKEN is not set")
+    asyncio.run(_run())
