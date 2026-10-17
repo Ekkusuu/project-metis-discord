@@ -32,6 +32,106 @@ from backend.voice_service import get_voice_service
 # Load environment variables
 load_dotenv()
 
+# Common abbreviations that end with a period but are NOT sentence endings
+ABBREVIATIONS = {
+    # Titles
+    'mr', 'mrs', 'ms', 'dr', 'prof', 'sr', 'jr', 'rev', 'hon', 'gov', 'pres',
+    # Academic/Professional
+    'phd', 'md', 'esq', 'inc', 'ltd', 'corp', 'llc', 'co',
+    # Common abbreviations
+    'vs', 'etc', 'eg', 'ie', 'al', 'cf', 'approx', 'avg', 'dept', 'est',
+    'fig', 'min', 'max', 'misc', 'no', 'nos', 'vol', 'vols', 'ed', 'eds',
+    'ft', 'in', 'oz', 'lb', 'lbs', 'pt', 'qt', 'gal', 'cm', 'mm', 'km', 'kg',
+    # Time/Date
+    'jan', 'feb', 'mar', 'apr', 'jun', 'jul', 'aug', 'sep', 'sept', 'oct', 'nov', 'dec',
+    'mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun',
+    'am', 'pm', 'hr', 'hrs', 'sec', 'secs',
+    # Places
+    'st', 'ave', 'blvd', 'rd', 'mt', 'ft',
+    # Other
+    'i.e', 'e.g', 'p.s', 'n.b', 'a.k.a', 'c.e.o'
+}
+
+
+def is_sentence_boundary(text: str, pos: int) -> bool:
+    """
+    Check if the period/punctuation at position `pos` is a real sentence boundary.
+    Returns True if it's a sentence end, False if it's an abbreviation/decimal/etc.
+    """
+    if pos < 0 or pos >= len(text):
+        return False
+    
+    char = text[pos]
+    
+    # ! and ? are almost always sentence endings
+    if char in '!?':
+        return True
+    
+    # For periods, we need to check context
+    if char != '.':
+        return False
+    
+    # Check if followed by end of string - if so, we can't determine yet (might be decimal)
+    # Wait for more text to arrive before deciding
+    if pos + 1 >= len(text):
+        return False  # At end of current text, wait for more
+    
+    # Check if followed by a digit (decimal number like 50.3)
+    if text[pos + 1].isdigit():
+        return False  # Definitely a decimal, not a sentence end
+    
+    # Check if NOT followed by space or newline - not a sentence boundary
+    if text[pos + 1] not in ' \n\t':
+        return False
+    
+    # Get the word before the period
+    start = pos - 1
+    while start >= 0 and text[start].isalnum():
+        start -= 1
+    word_before = text[start + 1:pos].lower()
+    
+    # If word before is entirely digits, this might be a number with trailing period
+    # e.g., "50." at end of sentence - but we need to be careful
+    # Only treat as sentence end if followed by space AND next word starts with capital
+    if word_before.isdigit():
+        # Look ahead: if next non-space char is lowercase or digit, not a sentence end
+        next_pos = pos + 1
+        while next_pos < len(text) and text[next_pos] in ' \n\t':
+            next_pos += 1
+        if next_pos < len(text):
+            next_char = text[next_pos]
+            # If next char is lowercase letter or digit, probably not sentence end
+            if next_char.islower() or next_char.isdigit():
+                return False
+    
+    # Check if it's an abbreviation
+    if word_before in ABBREVIATIONS:
+        return False
+    
+    # Check for single letter abbreviations like "U.S." or "A.I."
+    if len(word_before) == 1 and word_before.isalpha():
+        # Look further back to see if there's a pattern like "U.S."
+        if start >= 2 and text[start - 1] == '.' and text[start - 2].isalpha():
+            return False
+    
+    # Check for ellipsis "..."
+    if pos >= 2 and text[pos - 2:pos + 1] == '...':
+        return True  # Ellipsis IS a sentence boundary
+    
+    return True
+
+
+def find_sentence_boundary(text: str) -> int:
+    """
+    Find the position of the first real sentence boundary in text.
+    Returns -1 if no boundary found.
+    """
+    for i, char in enumerate(text):
+        if char in '.!?':
+            if is_sentence_boundary(text, i):
+                return i
+    return -1
+
 # Configuration
 DISCORD_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 if not DISCORD_TOKEN:
@@ -284,6 +384,7 @@ class VoiceReceiver:
             # Call LLM with voice-specific system prompt
             chat_cfg = config.get("chat", {})
             voice_cfg = config.get("voice", {})
+            tools_cfg = config.get("tools", {})
             
             # Use voice system prompt (auto-selects based on personality setting)
             voice_system_prompt = resolve_prompt(voice_cfg.get("system_prompt", "@voice_chat"))
@@ -294,26 +395,39 @@ class VoiceReceiver:
                     "content": voice_system_prompt
                 }
             
+            # Check if tool system is enabled
+            use_tools = tools_cfg.get("enabled", False)
+            
             payload = {
                 "messages": context,
                 "temperature": chat_cfg.get("temperature", 0.7),
                 "top_p": chat_cfg.get("top_p", 0.95),
                 "max_tokens": chat_cfg.get("max_tokens", 512),
-                # Voice mode: use single RAG query for faster response
-                "rag_query_count": 1,
-                "rag_system_prompt": "@rag.query_generation_voice_system",
-                "rag_user_prompt": "@rag.query_generation_voice_user"
             }
+            
+            if use_tools:
+                # Voice mode: use tool system with MCP schemas (single tool for faster response)
+                payload.update({
+                    "use_tools": True,
+                    "max_tools": 1,  # Limit to single tool for faster voice response
+                    "voice_mode": True,  # Use single query for faster RAG
+                })
+            else:
+                # Legacy RAG mode: use single query for faster response
+                payload.update({
+                    "use_tools": False,
+                    "rag_query_count": 1,
+                    "rag_system_prompt": "@rag.query_generation_voice_system",
+                    "rag_user_prompt": "@rag.query_generation_voice_user"
+                })
             
             ai_response_full = ""
             rag_timings = {}
+            tool_timings_from_response = {}
             llm_generation_time = 0
             
             # Streaming TTS Setup
-            # Match sentence boundaries more flexibly (handles streaming where space comes later)
-            sentence_end_chars = set('.!?')
             current_sentence = ""
-            pending_sentences = []  # Queue of sentences ready for TTS
             audio_queue = asyncio.Queue()
             synthesis_queue = asyncio.Queue()  # Queue of sentences to synthesize
             
@@ -326,15 +440,29 @@ class VoiceReceiver:
             async def synthesis_worker():
                 voice_service = await get_voice_service()
                 while True:
-                    sentence = await synthesis_queue.get()
+                    try:
+                        # 10s timeout - if no sentence arrives, check if we should exit
+                        sentence = await asyncio.wait_for(synthesis_queue.get(), timeout=10.0)
+                    except asyncio.TimeoutError:
+                        # Check if voice client is still connected
+                        if not self.voice_client or not self.voice_client.is_connected():
+                            print("⚠️ Voice client disconnected, stopping synthesis")
+                            break
+                        continue
+                    
                     if sentence is None:
                         break
                     try:
                         t_synth_start = time.perf_counter()
-                        audio_bytes = await voice_service.synthesize_speech(sentence)
+                        audio_bytes = await asyncio.wait_for(
+                            voice_service.synthesize_speech(sentence),
+                            timeout=10.0  # 10s timeout for TTS synthesis
+                        )
                         timings['tts_synthesis'] = timings.get('tts_synthesis', 0) + (time.perf_counter() - t_synth_start)
                         if audio_bytes:
                             await audio_queue.put(audio_bytes)
+                    except asyncio.TimeoutError:
+                        print(f"⚠️ TTS synthesis timeout for: {sentence[:50]}...")
                     except Exception as e:
                         print(f"TTS synthesis error: {e}")
                     synthesis_queue.task_done()
@@ -369,17 +497,10 @@ class VoiceReceiver:
                                 ai_response_full += delta
                                 current_sentence += delta
                                 
-                                # Check for sentence boundaries
-                                # Split on sentence-ending punctuation followed by space or end
+                                # Check for sentence boundaries using smart detection
+                                # Handles abbreviations (Dr., Mr.), decimals (12.44), etc.
                                 while True:
-                                    # Find the first sentence-ending punctuation
-                                    end_pos = -1
-                                    for i, char in enumerate(current_sentence):
-                                        if char in sentence_end_chars:
-                                            # Check if followed by space, newline, or end of string
-                                            if i + 1 >= len(current_sentence) or current_sentence[i + 1] in ' \n\t':
-                                                end_pos = i
-                                                break
+                                    end_pos = find_sentence_boundary(current_sentence)
                                     
                                     if end_pos == -1:
                                         break
@@ -397,6 +518,7 @@ class VoiceReceiver:
                             
                             if chunk.get("done"):
                                 rag_timings = chunk.get("rag_timings", {})
+                                tool_timings_from_response = chunk.get("tool_timings", {})
                                 llm_generation_time = chunk.get("llm_generation_time", 0)
                                 break
                                 
@@ -417,6 +539,9 @@ class VoiceReceiver:
             await audio_queue.put(None)
             
             timings['llm_total'] = time.perf_counter() - t_start
+            # Handle both tool and legacy RAG timings
+            timings['tool_selection'] = tool_timings_from_response.get('tool_selection', 0)
+            timings['tool_execution'] = tool_timings_from_response.get('tool_execution', 0)
             timings['rag_query_generation'] = rag_timings.get('query_generation', 0)
             timings['rag_retrieval'] = rag_timings.get('retrieval', 0)
             timings['llm_generation'] = llm_generation_time
@@ -495,8 +620,13 @@ class VoiceReceiver:
                 print(f"{'='*60}")
                 print(f"  1.  Transcription (STT):        {timings.get('transcription', 0):>7.3f}s")
                 print(f"  2.  Judgment AI:                {timings.get('judgment', 0):>7.3f}s")
-                print(f"  3.  RAG Query Generation:       {timings.get('rag_query_generation', 0):>7.3f}s")
-                print(f"  4.  RAG Retrieval + Rerank:     {timings.get('rag_retrieval', 0):>7.3f}s")
+                # Show tool or RAG timings depending on what was used
+                if timings.get('tool_selection', 0) > 0:
+                    print(f"  3.  Tool Selection:             {timings.get('tool_selection', 0):>7.3f}s")
+                    print(f"  4.  Tool Execution:             {timings.get('tool_execution', 0):>7.3f}s")
+                else:
+                    print(f"  3.  RAG Query Generation:       {timings.get('rag_query_generation', 0):>7.3f}s")
+                    print(f"  4.  RAG Retrieval + Rerank:     {timings.get('rag_retrieval', 0):>7.3f}s")
                 print(f"  5.  LLM Generation:             {timings.get('llm_generation', 0):>7.3f}s")
                 print(f"      (LLM total w/ overhead):    {timings.get('llm_total', 0):>7.3f}s")
                 print(f"  6.  TTS Synthesis (Total):      {timings.get('tts_synthesis', 0):>7.3f}s")
@@ -551,7 +681,17 @@ class VoiceReceiver:
         """Process audio chunks from the queue and play them sequentially."""
         first_chunk = True
         while True:
-            audio_bytes = await audio_queue.get()
+            try:
+                # Timeout to prevent hanging if no audio comes
+                audio_bytes = await asyncio.wait_for(audio_queue.get(), timeout=10.0)
+            except asyncio.TimeoutError:
+                # Check if voice client is still connected
+                if not self.voice_client or not self.voice_client.is_connected():
+                    print("⚠️ Voice client disconnected, stopping audio queue")
+                    break
+                # Otherwise keep waiting - synthesis might be slow
+                continue
+            
             if audio_bytes is None:
                 break
             
@@ -580,8 +720,6 @@ class VoiceReceiver:
             if voice_cfg.get("discard_while_speaking", True):
                 for user_id in list(self.user_audio_buffers.keys()):
                     if len(self.user_audio_buffers[user_id]) > 0:
-                        # Only log once per interaction to avoid spam
-                        # print(f"🔇 Clearing buffered audio for user {user_id}")
                         self.user_audio_buffers[user_id] = bytearray()
             
             # Convert PCM bytes to WAV format for FFmpeg
@@ -595,11 +733,30 @@ class VoiceReceiver:
             
             # Play the audio using FFmpeg
             audio_source = discord.FFmpegPCMAudio(str(temp_wav))
-            self.voice_client.play(audio_source)
             
-            # Wait for playback to finish
-            while self.voice_client.is_playing():
-                await asyncio.sleep(0.1)
+            # Use a callback to know when playback is done
+            playback_done = asyncio.Event()
+            loop = asyncio.get_running_loop()  # Get loop BEFORE the callback
+            
+            def after_playback(error):
+                if error:
+                    print(f"Playback error: {error}")
+                # Use call_soon_threadsafe since callback runs in FFmpeg thread
+                loop.call_soon_threadsafe(playback_done.set)
+            
+            self.voice_client.play(audio_source, after=after_playback)
+            
+            # Wait for playback to finish with timeout
+            # Calculate expected duration: bytes / (sample_rate * bytes_per_sample)
+            expected_duration = len(audio_bytes) / (24000 * 2)  # 24kHz, 16-bit
+            timeout = max(expected_duration * 2, 5.0)  # At least 5s, or 2x expected
+            
+            try:
+                await asyncio.wait_for(playback_done.wait(), timeout=timeout)
+            except asyncio.TimeoutError:
+                print(f"⚠️ Playback timeout after {timeout:.1f}s, stopping")
+                if self.voice_client and self.voice_client.is_playing():
+                    self.voice_client.stop()
             
             # Clean up temp file
             temp_wav.unlink(missing_ok=True)

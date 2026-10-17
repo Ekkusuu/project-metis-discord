@@ -278,6 +278,7 @@ memory:
     - User jeffrey23 struggles with anxiety.
 
 rag:
+  # Legacy RAG query generation prompts (kept for backward compatibility)
   query_generation_system: >
     You are a query optimization assistant. Generate a concise search query based on conversation context.
     
@@ -332,3 +333,25 @@ rag:
     The query should be designed to maximize retrieval of useful information.
     The query should be short.
     For personal information about the user use the keywords "user personal information".
+
+
+# ============================================================================
+# Tool System Prompts (DEPRECATED - Now using MCP JSON Schemas)
+# ============================================================================
+# NOTE: The tool system now uses MCP-compliant JSON schemas directly in the prompt.
+# These prompts are kept for reference but are no longer used by the tool_manager.
+# The actual tool selection is done using the JSON schemas from each tool's definition.
+tools:
+  # Legacy tool selection prompts (not used - MCP schemas used instead)
+  selection_system: >
+    DEPRECATED: Tool selection now uses MCP JSON schemas directly.
+    See backend/tool_manager.py select_tools() for the actual implementation.
+
+  selection_user: >
+    DEPRECATED: Tool selection now uses MCP JSON schemas directly.
+
+  selection_voice_system: >
+    DEPRECATED: Tool selection now uses MCP JSON schemas directly.
+
+  selection_voice_user: >
+    DEPRECATED: Tool selection now uses MCP JSON schemas directly.

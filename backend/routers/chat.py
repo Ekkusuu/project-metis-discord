@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import List, Optional, Literal, Dict, Any
+import asyncio
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
@@ -21,6 +22,9 @@ router = APIRouter(prefix="", tags=["chat"])
 # Store last RAG retrieval results
 _last_rag_results: List[Dict[str, Any]] = []
 
+# Store last tool execution results
+_last_tool_results: Dict[str, Any] = {}
+
 # Store current chat context (replaces on each request)
 _current_context: List[Dict[str, Any]] = []
 
@@ -40,15 +44,25 @@ class ChatRequest(BaseModel):
     temperature: Optional[float] = None
     top_p: Optional[float] = None
     max_tokens: Optional[int] = None
-    # RAG query generation overrides (for voice mode optimization)
+    # Tool system options (uses MCP JSON schemas)
+    use_tools: Optional[bool] = Field(
+        default=None, description="Override tool system usage (None = use config)"
+    )
+    max_tools: Optional[int] = Field(
+        default=None, description="Maximum tools to select (default: 3)"
+    )
+    voice_mode: Optional[bool] = Field(
+        default=False, description="Voice mode uses single query for faster response"
+    )
+    # Legacy RAG options (for backward compatibility when tools disabled)
     rag_query_count: Optional[int] = Field(
-        default=None, description="Override number of RAG queries to generate (1 for voice mode)"
+        default=None, description="Override number of RAG queries to generate (legacy mode)"
     )
     rag_system_prompt: Optional[str] = Field(
-        default=None, description="Override RAG query generation system prompt"
+        default=None, description="Override RAG query generation system prompt (legacy mode)"
     )
     rag_user_prompt: Optional[str] = Field(
-        default=None, description="Override RAG query generation user prompt template"
+        default=None, description="Override RAG query generation user prompt (legacy mode)"
     )
 
 
@@ -102,6 +116,8 @@ def chat_stream(req: ChatRequest):
     """
     Streaming version of /chat endpoint. Returns newline-delimited JSON chunks.
     Each line is a JSON object: {"delta": "token text"} or {"done": true}
+    
+    Supports both the new tool system and legacy RAG mode.
     """
     if (not req.messages or len(req.messages) == 0) and (not req.prompt):
         raise HTTPException(status_code=400, detail="Provide `messages` or `prompt`.")
@@ -109,6 +125,7 @@ def chat_stream(req: ChatRequest):
     config = get_config()
     chat_cfg = config["chat"]
     rag_cfg = config.get("rag", {})
+    tools_cfg = config.get("tools", {})
     system_prompt = chat_cfg.get("system_prompt", "You are Metis, a helpful AI assistant.")
 
     messages: List[Message]
@@ -124,177 +141,306 @@ def chat_stream(req: ChatRequest):
             Message(role="user", content=req.prompt or ""),
         ]
 
-    # RAG: Retrieve context if enabled
-    global _last_rag_results
+    # Determine whether to use tool system or legacy RAG
+    global _last_rag_results, _last_tool_results
     import time as time_module
-    rag_timings = {}  # Store timing data for RAG operations
+    tool_timings = {}  # Store timing data for tool operations
     
-    if rag_cfg.get("enabled", False):
-        # Get the last user message as the query
-        user_messages = [m for m in messages if m.role == "user"]
-        if user_messages:
-            last_user_query = user_messages[-1].content
+    # Use tool system if enabled in config (can be overridden by request)
+    use_tools = req.use_tools if req.use_tools is not None else tools_cfg.get("enabled", False)
+    rag_enabled = rag_cfg.get("enabled", False)
+    
+    # Get the last user message
+    user_messages = [m for m in messages if m.role == "user"]
+    last_user_query = user_messages[-1].content if user_messages else ""
+    
+    tool_results_for_context = ""
+    
+    if use_tools and last_user_query:
+        # === NEW TOOL SYSTEM ===
+        try:
+            from backend.tool_manager import select_tools, execute_tools, format_tool_results_for_context, get_tool_registry
             
-            # === RAG QUERY GENERATION ===
+            # Initialize registry if needed
+            get_tool_registry()
+            
+            # === TOOL SELECTION (uses MCP JSON schemas) ===
             t_start = time_module.perf_counter()
-            # Generate contextual RAG queries using conversation history
-            # Pass through any RAG overrides from the request (e.g., voice mode uses fewer queries)
-            messages_for_query = [{"role": m.role, "content": m.content} for m in messages]
-            rag_queries = generate_rag_queries(
-                messages_for_query, 
-                last_user_query,
-                num_queries=req.rag_query_count,
-                system_prompt_override=req.rag_system_prompt,
-                user_prompt_override=req.rag_user_prompt
+            messages_for_tools = [{"role": m.role, "content": m.content} for m in messages]
+            
+            # Build conversation context string for RAG query generation
+            context_messages = tools_cfg.get("context_messages", 3)
+            conversation_context = ""
+            if context_messages > 0 and len(messages_for_tools) > 1:
+                recent = messages_for_tools[-context_messages-1:-1] if len(messages_for_tools) > context_messages else messages_for_tools[:-1]
+                conversation_context = "\n".join([
+                    f"{'User' if m['role'] == 'user' else 'Assistant'}: {m['content']}"
+                    for m in recent
+                ])
+            
+            # Run tool selection synchronously (wrap async)
+            import asyncio
+            try:
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            
+            tool_calls = loop.run_until_complete(
+                select_tools(
+                    messages_for_tools,
+                    last_user_query,
+                    max_tools=req.max_tools or tools_cfg.get("max_tools", 3)
+                )
             )
-            rag_timings['query_generation'] = time_module.perf_counter() - t_start
+            tool_timings['tool_selection'] = time_module.perf_counter() - t_start
             
-            # Record generated queries so the UI can display them immediately,
-            # even if later no chunks are found for these queries.
-            _last_rag_results = {
-                "queries": rag_queries,
-                "original_query": last_user_query,
-                "results": []
-            }
-
-            # === RAG RETRIEVAL (embedding + vector search + reranking) ===
-            t_start = time_module.perf_counter()
-            # Run separate retrievals for each generated query and combine results
-            combined_contexts: List[Dict[str, Any]] = []
-            seen = set()
-            # Collect per-query buckets without deduplication (queries are independent)
-            per_query_results: List[Dict[str, Any]] = []
-            for q in rag_queries:
-                try:
-                    results = retrieve_context(q)
-                except Exception:
-                    results = {"accepted": [], "rejected_by_distance": []}
-
-                # Combine rejected lists (distance and score) so UI shows both reasons
-                rejected_distance = results.get("rejected_by_distance", []) or []
-                rejected_score = results.get("rejected_by_score", []) or []
-                per_query_results.append({
-                    "query": q,
-                    "accepted": results.get("accepted", []),
-                    "rejected": rejected_distance + rejected_score,
-                })
-            rag_timings['retrieval'] = time_module.perf_counter() - t_start
-
-            # Now combine accepted chunks across queries, but dedupe only at this final stage
-            combined_accepted: List[Dict[str, Any]] = []
-            seen = set()
-            for bucket in per_query_results:
-                for ctx in bucket["accepted"]:
-                    md = ctx.get("metadata", {})
-                    src = md.get("source_file")
-                    idx = md.get("chunk_index")
-                    if src is None or idx is None:
-                        key = (None, ctx.get("text", "")[:160])
-                    else:
-                        key = (src, idx)
-
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    combined_accepted.append(ctx)
-
-            # For the UI, also collect unique rejected-by-distance chunks (but keep per-query buckets separately)
-            combined_rejected: List[Dict[str, Any]] = []
-            for bucket in per_query_results:
-                for ctx in bucket["rejected"]:
-                    md = ctx.get("metadata", {})
-                    src = md.get("source_file")
-                    idx = md.get("chunk_index")
-                    if src is None or idx is None:
-                        key = (None, ctx.get("text", "")[:160])
-                    else:
-                        key = (src, idx)
-
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    if "rejection_reason" not in ctx:
-                        ctx["rejection_reason"] = "distance"
-                    combined_rejected.append(ctx)
-
-            # Combined contexts for UI/injection: accepted first, then unique rejected
-            combined_contexts = combined_accepted + combined_rejected
-
-            # Per-query retrieval already applied distance/rerank/min-score filters.
-            # `retrieve_context` returns the final per-query chunks. We simply combine them here.
-            contexts = combined_contexts
-            # Only include accepted chunks (those without a rejection_reason)
-            relevant_contexts = [c for c in contexts if "rejection_reason" not in c]
-            
-            # Store results for the frontend to display, including the generated queries
-            # Sort and build results list: accepted by rerank_score (highest first),
-            # rejected by distance (lowest first).
-            accepted_list = [c for c in combined_contexts if "rejection_reason" not in c]
-            rejected_list = [c for c in combined_contexts if "rejection_reason" in c]
-
-            # Sort per-query buckets too
-            for bucket in per_query_results:
-                acc = bucket.get("accepted", [])
-                rej = bucket.get("rejected", [])
-                # If rerank scores present, sort accepted by rerank_score desc, else by distance asc
-                if any(x.get("rerank_score") is not None for x in acc):
-                    acc.sort(key=lambda x: float(x.get("rerank_score") or -1e9), reverse=True)
-                else:
-                    acc.sort(key=lambda x: float(x.get("distance", 0)))
-                # Sort rejected by distance asc
-                rej.sort(key=lambda x: float(x.get("distance", 0)))
-                bucket["accepted"] = acc
-                bucket["rejected"] = rej
-
-            # Now sort the combined lists for display
-            if any(x.get("rerank_score") is not None for x in accepted_list):
-                accepted_list.sort(key=lambda x: float(x.get("rerank_score") or -1e9), reverse=True)
-            else:
-                accepted_list.sort(key=lambda x: float(x.get("distance", 0)))
-
-            rejected_list.sort(key=lambda x: float(x.get("distance", 0)))
-
-            results_list = []
-            for ctx in accepted_list + rejected_list:
-                md = ctx.get("metadata", {})
-                is_used = "rejection_reason" not in ctx
-                item = {
-                    "source_file": md.get("source_file", "unknown"),
-                    "distance": ctx.get("distance", 0),
-                    "rerank_score": ctx.get("rerank_score"),
-                    "text_preview": ctx.get("text", "")[:200],
-                    "chunk_index": md.get("chunk_index", 0),
-                    "used": is_used,
-                }
-                if not is_used:
-                    item["rejection_reason"] = ctx.get("rejection_reason")
-                results_list.append(item)
-
-            _last_rag_results = {
-                "queries": rag_queries,
-                "original_query": last_user_query,
-                "per_query_results": per_query_results,
-                "results": results_list,
-            }
-            
-            if relevant_contexts:
-                # Inject context into the system prompt
-                context_text = format_context_for_prompt(relevant_contexts)
+            # === TOOL EXECUTION ===
+            if tool_calls:
+                t_start = time_module.perf_counter()
                 
-                # Find the system message and append context to it
-                for i, msg in enumerate(messages):
-                    if msg.role == "system":
-                        enhanced_system = f"{msg.content}\n\n---\nRelevant information from your knowledge base:\n\n{context_text}\n\nUse this information to answer the user's question."
-                        messages[i] = Message(role="system", content=enhanced_system)
-                        break
+                # Pass conversation context to tools (especially for RAG query generation)
+                extra_context = {
+                    "conversation_context": conversation_context,
+                    "voice_mode": req.voice_mode or False  # Voice mode uses single query
+                }
+                
+                tool_results = loop.run_until_complete(execute_tools(tool_calls, extra_context))
+                tool_timings['tool_execution'] = time_module.perf_counter() - t_start
+                
+                # Format results for context injection
+                tool_results_for_context = format_tool_results_for_context(tool_results)
+                
+                # Store results for UI
+                _last_tool_results = {
+                    "tool_calls": [
+                        {"tool": tc.tool_name, "arguments": tc.arguments}
+                        for tc in tool_calls
+                    ],
+                    "results": [
+                        {
+                            "tool": tr.tool_name,
+                            "success": tr.success,
+                            "execution_time": tr.execution_time,
+                            "error": tr.error
+                        }
+                        for tr in tool_results
+                    ]
+                }
+                
+                # Also update RAG results for backward compatibility with UI
+                for tr in tool_results:
+                    if tr.tool_name == "knowledge_search" and tr.success:
+                        # Extract RAG-specific data for the panel from raw_response
+                        raw_response = tr.raw_response or {}
+                        raw_contexts = raw_response.get("raw_contexts", {})
+                        metadata = raw_response.get("metadata", {})
+                        
+                        # Get the optimized queries (generated by RAG tool)
+                        optimized_queries = metadata.get("optimized_queries", [])
+                        original_query = metadata.get("original_query", "")
+                        
+                        # Fallback to tool call query if no optimized queries
+                        if not optimized_queries:
+                            for tc in tool_calls:
+                                if tc.tool_name == "knowledge_search":
+                                    optimized_queries = [tc.arguments.get("query", "")]
+                                    break
+                        
+                        accepted = raw_contexts.get("accepted", []) if raw_contexts else []
+                        rejected_distance = raw_contexts.get("rejected_by_distance", []) if raw_contexts else []
+                        rejected_score = raw_contexts.get("rejected_by_score", []) if raw_contexts else []
+                        
+                        results_list = []
+                        for ctx in accepted:
+                            md = ctx.get("metadata", {})
+                            results_list.append({
+                                "source_file": md.get("source_file", "unknown"),
+                                "distance": ctx.get("distance", 0),
+                                "rerank_score": ctx.get("rerank_score"),
+                                "text_preview": ctx.get("text", "")[:200],
+                                "chunk_index": md.get("chunk_index", 0),
+                                "used": True,
+                            })
+                        for ctx in rejected_distance + rejected_score:
+                            md = ctx.get("metadata", {})
+                            results_list.append({
+                                "source_file": md.get("source_file", "unknown"),
+                                "distance": ctx.get("distance", 0),
+                                "rerank_score": ctx.get("rerank_score"),
+                                "text_preview": ctx.get("text", "")[:200],
+                                "chunk_index": md.get("chunk_index", 0),
+                                "used": False,
+                                "rejection_reason": ctx.get("rejection_reason", "unknown")
+                            })
+                        
+                        _last_rag_results = {
+                            "queries": optimized_queries,
+                            "original_query": original_query or last_user_query,
+                            "results": results_list,
+                            "tool_mode": True
+                        }
             else:
-                # No relevant contexts, but still include the generated queries info
-                if not contexts:
-                    _last_rag_results = {
-                        "queries": rag_queries,
-                        "original_query": last_user_query,
-                        "results": []
-                    }
+                _last_tool_results = {
+                    "tool_calls": [],
+                    "results": [],
+                    "message": "No tools selected"
+                }
+                _last_rag_results = {
+                    "queries": [],
+                    "original_query": last_user_query,
+                    "results": [],
+                    "tool_mode": True,
+                    "message": "No tools needed"
+                }
+                
+        except Exception as e:
+            import traceback
+            print(f"Tool system error: {e}")
+            traceback.print_exc()
+            # Fall back to legacy RAG if tool system fails
+            use_tools = False
+    
+    # Legacy RAG mode (if tools disabled or failed)
+    rag_timings = {}
+    if not use_tools and rag_enabled and last_user_query:
+        # === RAG QUERY GENERATION ===
+        t_start = time_module.perf_counter()
+        messages_for_query = [{"role": m.role, "content": m.content} for m in messages]
+        rag_queries = generate_rag_queries(
+            messages_for_query, 
+            last_user_query,
+            num_queries=req.rag_query_count,
+            system_prompt_override=req.rag_system_prompt,
+            user_prompt_override=req.rag_user_prompt
+        )
+        rag_timings['query_generation'] = time_module.perf_counter() - t_start
+        
+        # Record generated queries
+        _last_rag_results = {
+            "queries": rag_queries,
+            "original_query": last_user_query,
+            "results": []
+        }
+        
+        # === RAG RETRIEVAL ===
+        t_start = time_module.perf_counter()
+        combined_contexts: List[Dict[str, Any]] = []
+        seen = set()
+        per_query_results: List[Dict[str, Any]] = []
+        
+        for q in rag_queries:
+            try:
+                results = retrieve_context(q)
+            except Exception:
+                results = {"accepted": [], "rejected_by_distance": []}
+
+            rejected_distance = results.get("rejected_by_distance", []) or []
+            rejected_score = results.get("rejected_by_score", []) or []
+            per_query_results.append({
+                "query": q,
+                "accepted": results.get("accepted", []),
+                "rejected": rejected_distance + rejected_score,
+            })
+        rag_timings['retrieval'] = time_module.perf_counter() - t_start
+
+        # Combine accepted chunks
+        combined_accepted: List[Dict[str, Any]] = []
+        seen = set()
+        for bucket in per_query_results:
+            for ctx in bucket["accepted"]:
+                md = ctx.get("metadata", {})
+                src = md.get("source_file")
+                idx = md.get("chunk_index")
+                if src is None or idx is None:
+                    key = (None, ctx.get("text", "")[:160])
+                else:
+                    key = (src, idx)
+
+                if key in seen:
+                    continue
+                seen.add(key)
+                combined_accepted.append(ctx)
+
+        # Collect rejected chunks
+        combined_rejected: List[Dict[str, Any]] = []
+        for bucket in per_query_results:
+            for ctx in bucket["rejected"]:
+                md = ctx.get("metadata", {})
+                src = md.get("source_file")
+                idx = md.get("chunk_index")
+                if src is None or idx is None:
+                    key = (None, ctx.get("text", "")[:160])
+                else:
+                    key = (src, idx)
+
+                if key in seen:
+                    continue
+                seen.add(key)
+                if "rejection_reason" not in ctx:
+                    ctx["rejection_reason"] = "distance"
+                combined_rejected.append(ctx)
+
+        combined_contexts = combined_accepted + combined_rejected
+        contexts = combined_contexts
+        relevant_contexts = [c for c in contexts if "rejection_reason" not in c]
+        
+        # Build results list for UI
+        accepted_list = [c for c in combined_contexts if "rejection_reason" not in c]
+        rejected_list = [c for c in combined_contexts if "rejection_reason" in c]
+
+        for bucket in per_query_results:
+            acc = bucket.get("accepted", [])
+            rej = bucket.get("rejected", [])
+            if any(x.get("rerank_score") is not None for x in acc):
+                acc.sort(key=lambda x: float(x.get("rerank_score") or -1e9), reverse=True)
+            else:
+                acc.sort(key=lambda x: float(x.get("distance", 0)))
+            rej.sort(key=lambda x: float(x.get("distance", 0)))
+            bucket["accepted"] = acc
+            bucket["rejected"] = rej
+
+        if any(x.get("rerank_score") is not None for x in accepted_list):
+            accepted_list.sort(key=lambda x: float(x.get("rerank_score") or -1e9), reverse=True)
+        else:
+            accepted_list.sort(key=lambda x: float(x.get("distance", 0)))
+
+        rejected_list.sort(key=lambda x: float(x.get("distance", 0)))
+
+        results_list = []
+        for ctx in accepted_list + rejected_list:
+            md = ctx.get("metadata", {})
+            is_used = "rejection_reason" not in ctx
+            item = {
+                "source_file": md.get("source_file", "unknown"),
+                "distance": ctx.get("distance", 0),
+                "rerank_score": ctx.get("rerank_score"),
+                "text_preview": ctx.get("text", "")[:200],
+                "chunk_index": md.get("chunk_index", 0),
+                "used": is_used,
+            }
+            if not is_used:
+                item["rejection_reason"] = ctx.get("rejection_reason")
+            results_list.append(item)
+
+        _last_rag_results = {
+            "queries": rag_queries,
+            "original_query": last_user_query,
+            "per_query_results": per_query_results,
+            "results": results_list,
+        }
+        
+        if relevant_contexts:
+            context_text = format_context_for_prompt(relevant_contexts)
+            tool_results_for_context = context_text
+    
+    # Inject tool/RAG results into system prompt
+    if tool_results_for_context:
+        for i, msg in enumerate(messages):
+            if msg.role == "system":
+                enhanced_system = f"{msg.content}\n\n---\nRelevant information from your knowledge base:\n\n{tool_results_for_context}\n\nUse this information to answer the user's question."
+                messages[i] = Message(role="system", content=enhanced_system)
+                break
 
     # Use request params or fall back to config defaults
     temperature = req.temperature if req.temperature is not None else chat_cfg.get("temperature", 0.7)
@@ -358,6 +504,7 @@ def chat_stream(req: ChatRequest):
             "done": True,
             "tokens_per_second": round(tokens_per_second, 2),
             "rag_timings": rag_timings,
+            "tool_timings": tool_timings,
             "llm_generation_time": round(llm_generation_time, 3),
             "trimmed_messages": [
                 {"role": msg["role"], "content": msg["content"]}
@@ -452,6 +599,38 @@ def get_last_rag_retrieval():
     return {
         "results": _last_rag_results
     }
+
+
+@router.get("/tools/last-execution")
+def get_last_tool_execution():
+    """Get the last tool execution results."""
+    global _last_tool_results
+    return {
+        "results": _last_tool_results
+    }
+
+
+@router.get("/tools/available")
+def get_available_tools():
+    """Get list of available tools and their schemas."""
+    try:
+        from backend.tool_manager import get_tool_registry
+        
+        registry = get_tool_registry()
+        tools = registry.get_all_enabled()
+        
+        return {
+            "tools": [
+                {
+                    "name": tool.definition.name,
+                    "description": tool.definition.description,
+                    "schema": tool.definition.to_json_schema()
+                }
+                for tool in tools.values()
+            ]
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get tools: {str(e)}")
 
 
 @router.get("/rag/stream")

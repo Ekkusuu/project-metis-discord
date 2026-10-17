@@ -4,7 +4,7 @@
 # Options: therapist, casual, mean
 # This automatically selects the matching prompts from system_prompts.yaml
 # To add more: just add new personality sections in system_prompts.yaml
-personality: "therapist"
+personality: "flirty"
 
 # ============================================================================
 # LLM Model Settings
@@ -105,10 +105,40 @@ rag:
   reranker_top_k: 2  # Number of top chunks to keep after reranking (must be <= top_k)
   reranker_min_score: 0.1  # Minimum rerank score threshold - contexts with lower scores are filtered out (-1 = no threshold)
   
-  # RAG Query Generation
+  # RAG Query Generation (legacy - now uses tool system)
   query_generation_count: 3
   query_generation_system_prompt: "@rag.query_generation_system"
   query_generation_user_prompt: "@rag.query_generation_user"
+
+# ============================================================================
+# Tool System Settings
+# ============================================================================
+tools:
+  # Enable/disable the tool system (if disabled, falls back to legacy RAG)
+  enabled: true
+  
+  # Number of previous messages to use for tool selection context
+  context_messages: 3
+  
+  # Maximum tools that can be selected per request
+  max_tools: 3
+  
+  # Tool selection prompts
+  selection_system_prompt: "@tools.selection_system"
+  selection_user_prompt: "@tools.selection_user"
+  
+  # Voice-optimized prompts (faster, single tool)
+  selection_voice_system_prompt: "@tools.selection_voice_system"
+  selection_voice_user_prompt: "@tools.selection_voice_user"
+  
+  # Individual tool settings
+  # Add tool-specific configuration here
+  knowledge_search:
+    enabled: true
+  
+  # Web search using DuckDuckGo (no server or Docker needed)
+  web_search:
+    enabled: true
 
 # ============================================================================
 # Memory System Settings
