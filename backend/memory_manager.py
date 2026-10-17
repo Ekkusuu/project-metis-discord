@@ -1,273 +1,180 @@
 """
-Memory management system for Project Metis.
-Handles temporary memory storage and long-term memory summarization.
-"""
-from pathlib import Path
-from typing import List, Dict
-import datetime
-from backend.llama_engine import chat_completion, get_config
-from backend.token_utils import count_tokens
-from backend.prompt_loader import resolve_prompt
+Memory system for Project Metis.
 
-# Memory paths
-PROJECT_ROOT = Path(__file__).parent.parent
-MEMORY_DIR = PROJECT_ROOT / "memory"
+Messages that fall out of the context window are appended to
+memory/temp_memory.txt. When that file grows past `memory.temp_memory_token_limit`
+the LLM extracts user facts from it into memory/long_term/*.md, which the RAG
+index picks up so Metis can "remember" things later.
+
+All file work happens on a single background worker so the chat path never
+waits for a summary and two summaries can't race on the same files.
+"""
+from __future__ import annotations
+
+import datetime
+import threading
+from concurrent.futures import Future, ThreadPoolExecutor
+from typing import Dict, Iterable, List, Optional, Union
+
+from backend.config import MEMORY_DIR, get_config
+from backend.llama_engine import chat_completion
+from backend.prompt_loader import resolve_prompt
+from backend.text_utils import strip_thinking
+from backend.token_utils import count_tokens
+
 TEMP_MEMORY_FILE = MEMORY_DIR / "temp_memory.txt"
 LONG_TERM_DIR = MEMORY_DIR / "long_term"
 
-# Ensure directories exist
 MEMORY_DIR.mkdir(exist_ok=True)
 LONG_TERM_DIR.mkdir(exist_ok=True)
+TEMP_MEMORY_FILE.touch(exist_ok=True)
 
-# Ensure temp memory file exists
-if not TEMP_MEMORY_FILE.exists():
-    try:
-        TEMP_MEMORY_FILE.write_text("", encoding="utf-8")
-    except Exception as _e:
-        print(f"Warning: Failed to create temp memory file: {_e}")
+_lock = threading.RLock()
+_worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="memory")
 
 
-def append_to_temp_memory(messages) -> None:
-    """
-    Append messages to temp_memory.txt.
-    
-    Args:
-        messages: List of message dicts with role and content, or list of strings
-    """
-    if not messages:
+# ---------------------------------------------------------------------------
+# Temp memory
+# ---------------------------------------------------------------------------
+def _format_line(msg: Union[Dict[str, str], str]) -> Optional[str]:
+    if isinstance(msg, dict):
+        role = msg.get("role")
+        content = strip_thinking(str(msg.get("content", "")))
+        if not content:
+            return None
+        if role == "user":
+            return f"User: {content}"
+        if role == "assistant":
+            return f"AI: {content}"
+        return None
+    content = strip_thinking(str(msg))
+    return f"User: {content}" if content else None
+
+
+def append_to_temp_memory(messages: Iterable[Union[Dict[str, str], str]], summarize: bool = True) -> None:
+    """Append messages to temp memory (synchronous). Optionally summarize if over the limit."""
+    lines = [line for line in (_format_line(m) for m in messages) if line]
+    if not lines:
         return
-    
-    import re
+    with _lock:
+        with open(TEMP_MEMORY_FILE, "a", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n\n")
+        print(f"Appended {len(lines)} message(s) to temp memory")
+        if summarize:
+            check_and_summarize_temp_memory()
 
-    def _strip_thinking(text: str) -> str:
-        # Remove complete <think>...</think> blocks (multiline)
-        text = re.sub(r'<think>[\s\S]*?<\/think>', '', text, flags=re.IGNORECASE)
-        # If there's a stray closing tag, remove everything before it
-        text = re.sub(r'^[\s\S]*?<\/think>\s*', '', text, flags=re.IGNORECASE)
-        # Remove any remaining stray tags
-        text = re.sub(r'<\/?think>', '', text, flags=re.IGNORECASE)
-        return text.strip()
 
-    with open(TEMP_MEMORY_FILE, "a", encoding="utf-8") as f:
-        for msg in messages:
-            # Handle both dict messages and plain strings
-            if isinstance(msg, dict):
-                role = msg.get("role", "user")
-                content = msg.get("content", "")
-                # Strip thinking tags from assistant/user content before saving
-                content = _strip_thinking(str(content))
-                if role == "user":
-                    f.write(f"User: {content}\n")
-                elif role == "assistant":
-                    f.write(f"AI: {content}\n")
-            else:
-                # Plain string (legacy support)
-                clean = _strip_thinking(str(msg))
-                f.write(f"User: {clean}\n")
-        f.write("\n")  # Add blank line between conversation chunks
-    
-    print(f"Appended {len(messages)} message(s) to temp_memory")
-    
-    # Check if we need to summarize
-    check_and_summarize_temp_memory()
+def archive_messages(messages: List[Dict[str, str]]) -> Future:
+    """Queue messages for temp memory + summarization without blocking the caller."""
+    return _worker.submit(_safe, append_to_temp_memory, list(messages))
+
+
+def _safe(fn, *args):
+    try:
+        return fn(*args)
+    except Exception as e:
+        import traceback
+        print(f"Memory task failed: {e}")
+        traceback.print_exc()
 
 
 def get_temp_memory_content() -> str:
-    """Get the current content of temp_memory.txt."""
-    if not TEMP_MEMORY_FILE.exists():
+    try:
+        return TEMP_MEMORY_FILE.read_text(encoding="utf-8")
+    except FileNotFoundError:
         return ""
-    
-    with open(TEMP_MEMORY_FILE, "r", encoding="utf-8") as f:
-        return f.read()
 
 
 def get_temp_memory_token_count() -> int:
-    """Get the accurate token count of temp_memory."""
-    content = get_temp_memory_content()
-    return count_tokens(content)
+    return count_tokens(get_temp_memory_content())
 
 
 def check_and_summarize_temp_memory() -> None:
-    """
-    Check if temp_memory has reached the token threshold from config.
-    If so, summarize it and move to long_term storage.
-    """
-    config = get_config()
-    memory_cfg = config.get("memory", {})
-    threshold = memory_cfg.get("temp_memory_token_limit", 1000)
-    
-    token_count = get_temp_memory_token_count()
-    
-    if token_count >= threshold:
-        print(f"Temp memory reached {token_count} tokens (threshold: {threshold}), creating summary...")
+    threshold = int(get_config().get("memory", {}).get("temp_memory_token_limit", 1000))
+    tokens = get_temp_memory_token_count()
+    if tokens >= threshold:
+        print(f"Temp memory at {tokens} tokens (limit {threshold}); summarizing...")
         summarize_and_archive_temp_memory()
 
 
+# ---------------------------------------------------------------------------
+# Long-term memory
+# ---------------------------------------------------------------------------
 def format_summary_with_prefix(summary: str) -> str:
-    """
-    Add 'user personal information: ' prefix to each bullet point in the summary.
-    Also strips thinking tags from reasoning models.
-    
-    Args:
-        summary: Raw summary text from LLM
-    
-    Returns:
-        Formatted summary with prefixes added and thinking tags removed
-    """
-    import re
-    
-    # Strip thinking tags first
-    # Remove complete <think>...</think> blocks (handles multiline)
-    summary = re.sub(r'<think>.*?</think>', '', summary, flags=re.DOTALL | re.IGNORECASE)
-    # Remove everything before </think> if only closing tag is present
-    summary = re.sub(r'^.*?</think>\s*', '', summary, flags=re.DOTALL | re.IGNORECASE)
-    # Remove any remaining stray tags
-    summary = re.sub(r'</?think>', '', summary, flags=re.IGNORECASE)
-    summary = summary.strip()
-    
-    lines = summary.split('\n')
-    formatted_lines = []
-    
-    for line in lines:
+    """Prefix each bullet with 'user personal information:' so RAG queries can target them."""
+    out = []
+    for line in strip_thinking(summary).split("\n"):
         stripped = line.strip()
-        # Check if line starts with a bullet point (-, *, •)
-        if stripped.startswith('- ') or stripped.startswith('* ') or stripped.startswith('• '):
-            # Get the bullet character and the rest of the line
-            bullet_char = stripped[0]
-            rest_of_line = stripped[2:].strip()
-            
-            # Check if it already has the prefix (avoid double-adding)
-            if not rest_of_line.lower().startswith('user personal information:'):
-                # Add the prefix
-                indentation = len(line) - len(line.lstrip())
-                formatted_lines.append(' ' * indentation + f"{bullet_char} user personal information: {rest_of_line}")
-            else:
-                formatted_lines.append(line)
-        else:
-            # Keep non-bullet lines as-is
-            formatted_lines.append(line)
-    
-    return '\n'.join(formatted_lines)
+        if stripped[:2] in ("- ", "* ", "• "):
+            rest = stripped[2:].strip()
+            if not rest.lower().startswith("user personal information:"):
+                indent = len(line) - len(line.lstrip())
+                line = " " * indent + f"{stripped[0]} user personal information: {rest}"
+        out.append(line)
+    return "\n".join(out).strip()
 
 
-def summarize_and_archive_temp_memory() -> None:
+def _now() -> str:
+    return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def summarize_and_archive_temp_memory() -> Optional[str]:
     """
-    Use AI to summarize temp_memory content and append to active long_term file.
-    Creates a new long_term file when the current one exceeds the token limit.
-    Clears temp_memory after archiving.
+    Summarize temp memory into the newest long-term file (or a new one when it
+    would exceed `memory.long_term_memory_token_limit`), then clear temp memory.
+    Returns the long-term file name written, or None.
     """
-    content = get_temp_memory_content()
-    
-    if not content.strip():
-        print("Temp memory is empty, nothing to summarize")
-        return
-    
-    print(f"Starting summarization of {len(content)} characters...")
-    
-    # Create summary using AI
-    try:
+    with _lock:
+        content = get_temp_memory_content()
+        if not content.strip():
+            return None
+
         config = get_config()
         prompts_cfg = config.get("prompts", {})
         memory_cfg = config.get("memory", {})
-        
-        # Get prompts from config with fallback defaults
-        system_prompt = resolve_prompt(prompts_cfg.get("memory_summarization_system", 
-            "You are a memory extraction assistant. Extract only explicitly stated facts about the user."))
-        
-        user_prompt_template = resolve_prompt(prompts_cfg.get("memory_summarization_user",
-            "Extract the key facts about the user from this conversation:\n\n```\n{content}\n```"))
-        
-        # Format user prompt with content
-        user_prompt = user_prompt_template.format(content=content)
+        system_prompt = resolve_prompt(prompts_cfg.get(
+            "memory_summarization_system",
+            "You are a memory extraction assistant. Extract only explicitly stated facts about the user.",
+        ))
+        user_template = resolve_prompt(prompts_cfg.get(
+            "memory_summarization_user",
+            "Extract the key facts about the user from this conversation:\n\n```\n{content}\n```",
+        ))
 
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt}
-        ]
-        
-        print("Calling LLM service for summarization...")
-        summary = chat_completion(messages, temperature=0.1, max_tokens=1000)
-        print(f"Summary generated: {len(summary)} characters")
-        
-        # Format summary with user personal information prefix
-        formatted_summary = format_summary_with_prefix(summary)
-        
-        # Get the most recent long-term memory file
-        long_term_token_limit = memory_cfg.get("long_term_memory_token_limit", 1000)
-        existing_files = sorted(LONG_TERM_DIR.glob("memory_*.md"))
-        
-        # Determine which file to append to
-        if existing_files:
-            latest_file = existing_files[-1]
-            
-            # Read existing content and check token count
-            with open(latest_file, "r", encoding="utf-8") as f:
-                existing_content = f.read()
-            
-            existing_tokens = count_tokens(existing_content)
-            new_summary_tokens = count_tokens(formatted_summary)
-            
-            # If adding the new summary would exceed the limit, create a new file
-            if existing_tokens + new_summary_tokens >= long_term_token_limit:
-                print(f"Current file has {existing_tokens} tokens, new summary is {new_summary_tokens} tokens")
-                print(f"Total would exceed limit ({long_term_token_limit}), creating new file")
-                timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                summary_file = LONG_TERM_DIR / f"memory_{timestamp}.md"
-                
-                with open(summary_file, "w", encoding="utf-8") as f:
-                    f.write(f"# Memory Summary\n")
-                    f.write(f"**Created:** {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-                    f.write(f"---\n\n")
-                    f.write(formatted_summary)
-                
-                print(f"✓ Created new long-term memory: {summary_file.name}")
-            else:
-                # Append to existing file
-                print(f"Appending to existing file: {latest_file.name} ({existing_tokens} tokens)")
-                
-                with open(latest_file, "a", encoding="utf-8") as f:
-                    f.write(f"\n\n---\n")
-                    f.write(f"**Updated:** {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-                    f.write(formatted_summary)
-                
-                print(f"✓ Appended to long-term memory: {latest_file.name}")
+        summary = chat_completion(
+            [{"role": "system", "content": system_prompt},
+             {"role": "user", "content": user_template.format(content=content)}],
+            temperature=0.1,
+            max_tokens=1000,
+        )
+        formatted = format_summary_with_prefix(summary)
+        if not formatted:
+            print("Memory summary was empty; keeping temp memory for next time")
+            return None
+
+        limit = int(memory_cfg.get("long_term_memory_token_limit", 1000))
+        existing = sorted(LONG_TERM_DIR.glob("memory_*.md"))
+        latest = existing[-1] if existing else None
+        if latest and count_tokens(latest.read_text(encoding="utf-8")) + count_tokens(formatted) < limit:
+            with open(latest, "a", encoding="utf-8") as f:
+                f.write(f"\n\n---\n**Updated:** {_now()}\n\n{formatted}\n")
+            target = latest
         else:
-            # No existing files, create the first one
-            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            summary_file = LONG_TERM_DIR / f"memory_{timestamp}.md"
-            
-            with open(summary_file, "w", encoding="utf-8") as f:
-                f.write(f"# Memory Summary\n")
-                f.write(f"**Created:** {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-                f.write(f"---\n\n")
-                f.write(formatted_summary)
-            
-            print(f"✓ Created first long-term memory: {summary_file.name}")
-        
-        # Clear temp_memory
+            target = LONG_TERM_DIR / f"memory_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
+            target.write_text(f"# Memory Summary\n**Created:** {_now()}\n\n---\n\n{formatted}\n", encoding="utf-8")
+
         TEMP_MEMORY_FILE.write_text("", encoding="utf-8")
-        print("✓ Cleared temp_memory.txt")
-        
+        print(f"✓ Archived memory summary to {target.name}")
+
+    # Make the new memories searchable right away instead of after the next restart.
+    try:
+        from backend.rag_engine import reindex_path_if_tracked
+        reindex_path_if_tracked(target)
     except Exception as e:
-        print(f"ERROR summarizing temp memory: {e}")
-        import traceback
-        traceback.print_exc()
-        # Don't re-raise to avoid blocking the main flow
+        print(f"Warning: could not reindex {target.name}: {e}")
+    return target.name
 
 
-def save_messages_before_reset(messages: List[Dict[str, str]]) -> None:
-    """
-    Save all messages (user and assistant) to temp_memory before chat reset.
-    
-    Args:
-        messages: List of message dicts with role and content
-    """
-    # Save all messages for context, not just user messages
-    conversation_messages = [
-        msg for msg in messages 
-        if msg.get("role") in ["user", "assistant"]
-    ]
-    
-    if conversation_messages:
-        append_to_temp_memory(conversation_messages)
-        print(f"Saved {len(conversation_messages)} message(s) before reset")
+def save_messages_before_reset(messages: List[Dict[str, str]]) -> Future:
+    """Archive a conversation that is being reset."""
+    return archive_messages([m for m in messages if m.get("role") in ("user", "assistant")])
