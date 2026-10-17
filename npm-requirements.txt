@@ -1,11 +1,10 @@
 # npm-requirements.txt — generated from `frontend/package.json`
-# Run `install_frontend_deps.bat` to install these in the `frontend` folder.
+# start.bat runs `npm install` in frontend/ and backend/llm_service/ on first launch.
 
 # Dependencies
 react@^19.1.1
 react-dom@^19.1.1
 react-markdown@^10.1.0
-react-router-dom@^7.9.5
 rehype-highlight@^7.0.2
 remark-breaks@^4.0.0
 remark-gfm@^4.0.1
@@ -26,7 +25,7 @@ vite@^7.1.7
 
 # Notes:
 # - This file is informational and can be used to reproduce/compare frontend dependencies.
-# - Use `install_frontend_deps.bat` to install the packages in `frontend` (it runs `npm ci` if a lockfile exists, otherwise `npm install`).
+# - package.json / package-lock.json are the source of truth.
 
 
 # backend/llm_service dependencies (for the Node LLM service)
