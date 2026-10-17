@@ -451,7 +451,7 @@ class VoiceReceiver:
         user_content = f"[{username}] {text}"
         async with conversation.lock:
             conversation.messages.append({"role": "user", "content": user_content})
-        channel_label = f"🎤 {self.voice_client.channel.name}"
+        channel_label = self.voice_client.channel.name  # the dashboard shows a voice badge
         asyncio.create_task(publish({
             "id": f"voice-{user_id}-{time.time_ns()}",
             "text": user_content,
