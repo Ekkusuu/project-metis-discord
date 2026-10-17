@@ -1,107 +1,63 @@
-# Voice Chat Setup Guide
+# Voice Chat Setup
 
-## Prerequisites
+Metis can sit in a Discord voice channel, listen to everyone, and answer out loud.
 
-### 1. Install FFmpeg (Required for voice playback)
+## Requirements
 
-**Windows:**
-1. Download FFmpeg from: https://www.gyan.dev/ffmpeg/builds/
-2. Download the "ffmpeg-release-essentials.zip"
-3. Extract to `C:\ffmpeg`
-4. Add to PATH:
-   - Open System Properties → Environment Variables
-   - Edit "Path" variable
-   - Add new entry: `C:\ffmpeg\bin`
-   - Click OK and restart your terminal
+- **espeak-ng** (used by Kokoro TTS for pronunciation):
+  install the `.msi` from <https://github.com/espeak-ng/espeak-ng/releases> and restart your terminal.
+- Python packages from `requirements.txt` (`nemo_toolkit[asr]`, `kokoro`, `discord-ext-voice-recv`, `PyNaCl`).
+- **Parakeet STT model**: place `parakeet-tdt-0.6b-v2.nemo` in `model/`, or let it download
+  from Hugging Face on the first `>join` (~2 GB). Kokoro (~300 MB) downloads automatically.
+- The bot needs the **Connect** and **Speak** permissions in the voice channel.
 
-**Verify installation:**
-```cmd
-ffmpeg -version
+FFmpeg is **not** required: replies are resampled in memory and streamed straight to Discord.
+
+## Using it
+
+1. Join a voice channel and type `>join` in a text channel.
+2. Talk. When you pause for `voice.listen_timeout` seconds, Metis transcribes what you said,
+   decides whether to answer (saying "Metis" always gets an answer), and starts speaking
+   as soon as the first sentence of her reply is ready.
+3. `>leave` when you're done — she also leaves on her own once everyone else has.
+
+While she's in voice, text messages in that server are ignored (commands still work).
+Voice conversations are kept separately from text conversations and are saved to memory the same way.
+
+## How a voice turn works
+
+```
+audio (48 kHz stereo) ─► pause detected ─► Parakeet STT ─► name correction (voice_corrections.yaml)
+   ─► judgment ─► /chat/stream (1 tool max, no query expansion) ─► sentence splitter
+   ─► Kokoro TTS per sentence ─► 24→48 kHz in memory ─► Discord
 ```
 
-### 2. Install espeak-ng (Required for Kokoro TTS)
+Each turn prints a timing breakdown (STT, judgment, tools, first token, TTS, time to first audio)
+in the backend console.
 
-1. Download from: https://github.com/espeak-ng/espeak-ng/releases
-2. Download the latest `.msi` installer (e.g., `espeak-ng-X64.msi`)
-3. Run the installer
-4. Restart your terminal
+## Configuration (`config.yaml` → `voice`)
 
-### 3. Install Python Dependencies
+| Key | Meaning |
+|---|---|
+| `tts_voice` | Kokoro voice, e.g. `af_heart`, `af_sarah`, `am_adam`, `am_michael` |
+| `tts_lang_code` | `a` American English, `b` British English |
+| `tts_speed` | Speaking rate (1.0 = normal) |
+| `listen_timeout` | Seconds of silence that end an utterance |
+| `chunk_duration` | How often (s) to check for pauses |
+| `input_gain` | Microphone gain applied to captured audio |
+| `min_rms` | Noise floor; quieter clips are ignored |
+| `min_speech_seconds` | Clips shorter than this are ignored |
+| `discard_while_speaking` | Ignore speech while Metis is talking (prevents her answering herself / stale input) |
+| `name_correction_threshold` | Fuzzy-match threshold for snapping transcribed names to `voice_corrections.yaml` |
+| `judgment.enabled` | Turn the "should I answer?" step off to answer everything |
 
-```cmd
-cd C:\Users\saval\Desktop\project-metis-discord
-venv\Scripts\activate
-pip install -r requirements.txt
-```
-
-### 4. Download Parakeet Model (Optional - auto-downloads on first use)
-
-The Parakeet STT model will automatically download from HuggingFace on first use.
-
-To manually place it:
-1. Download `parakeet-tdt-0.6b-v2.nemo` from HuggingFace
-2. Place in `model/` folder
-
-## Usage
-
-### Text-to-Voice Mode
-
-1. Start the bot:
-```cmd
-python backend\main.py
-```
-
-2. In Discord:
-   - Join a voice channel
-   - Use command: `>join`
-   - Send text messages in the channel
-   - Bot will respond with text AND voice
-
-3. To leave:
-   - Use command: `>leave`
-
-### How It Works
-
-- **Text Messages in Voice Mode**: When bot is in voice channel, it responds to text messages with both text and spoken audio
-- **Text-Only Mode**: When not in voice, works normally with text only
-- **TTS Voice**: Configured in `config.yaml` (`voice.tts_voice`)
-- **Available Voices**: `af_heart`, `af_sarah`, `am_adam`, `am_michael`, etc.
-
-## Configuration
-
-Edit `config.yaml`:
-
-```yaml
-voice:
-  tts_voice: "af_heart"  # Change voice here
-  tts_lang_code: "a"     # a=American English, b=British English
-  sample_rate: 24000
-```
+Add names people use (server members, games, Metis herself) to `voice_corrections.yaml` so the
+transcriber spells them correctly.
 
 ## Troubleshooting
 
-### "Couldn't find ffmpeg or avconv"
-- FFmpeg not in PATH
-- Restart terminal after installing FFmpeg
-- Verify with `ffmpeg -version`
-
-### "Failed to start Discord bot: module 'discord' has no attribute 'sinks'"
-- Fixed in latest version (uses alternative approach)
-- Bot now responds to text with voice in voice channels
-
-### TTS playback issues
-- Check FFmpeg installation
-- Ensure bot has "Speak" permission in voice channel
-- Check `temp_tts.wav` is being created in project root
-
-### STT (Speech-to-Text) not working
-- Currently simplified to text-to-voice mode only
-- Full voice input coming in future update
-- Use text messages to interact
-
-## Notes
-
-- Voice playback requires FFmpeg
-- First run downloads Kokoro TTS (~300MB) and optionally Parakeet STT (~2GB)
-- Voice responses only work when bot is in voice channel
-- Text chat works normally when not in voice
+- **She doesn't react at all** — check the backend console: "Ignoring audio" means the clip was
+  too quiet/short (raise `input_gain` or lower `min_rms`).
+- **She talks over people / answers stale input** — keep `discard_while_speaking: true`.
+- **Slow first reply** — the first `>join` loads Parakeet and Kokoro; later joins are instant.
+- **TTS errors about espeak** — espeak-ng isn't installed or not on PATH.

@@ -1,7 +1,8 @@
 # ============================================================================
 # Global Personality Setting
 # ============================================================================
-# Options: therapist, casual, mean
+# Options: therapist, casual, mean, flirty (any key under text_chat/voice_chat in system_prompts.yaml)
+# Can also be switched at runtime from Discord with ">personality <name>".
 # This automatically selects the matching prompts from system_prompts.yaml
 # To add more: just add new personality sections in system_prompts.yaml
 personality: "flirty"
@@ -17,10 +18,23 @@ model:
   n_threads: null   # null = auto-detect CPU cores
   use_flash_attn: true
   use_mlock: true
+  # Prompt format. "auto" reads it from the GGUF file (recommended).
+  # Override with e.g. "llama3.1", "chatML", "mistral", "gemma" if a model's metadata is wrong.
+  chat_wrapper: "auto"
 
 llm_service:
   host: "localhost"
   port: 3000
+  # Separate small context for judgment / tool selection / query generation / memory,
+  # so the main chat context keeps its cache between turns. 0 = share the main context (less VRAM).
+  aux_context_size: 4096
+
+backend:
+  host: "127.0.0.1"
+  port: 8000
+
+discord:
+  enabled: true  # false = run backend + dashboard without connecting the bot
 
 # ============================================================================
 # Text Chat Settings (Discord text channels)
@@ -54,7 +68,9 @@ voice:
   tts_lang_code: "a"  # 'a' = American English
   sample_rate: 24000
   listen_timeout: 1  # Seconds of silence before stopping recording
-  chunk_duration: 0.5  # Audio chunk duration in seconds
+  chunk_duration: 0.25  # How often (seconds) to check whether a speaker has paused
+  min_speech_seconds: 0.3  # Ignore clips shorter than this (coughs, clicks)
+  tts_speed: 1.0
   name_correction_threshold: 0.70  # Minimum similarity (0.0-1.0) for fuzzy name matching
   # Input gain for captured audio (1.0 = 100%, 2.0 = 200%). This scales only the bot's input capture.
   input_gain: 2.0
@@ -104,8 +120,9 @@ rag:
   reranker_model: "rag-models/bge-reranker-base"  # Local folder path to reranker model
   reranker_top_k: 2  # Number of top chunks to keep after reranking (must be <= top_k)
   reranker_min_score: 0.1  # Minimum rerank score threshold - contexts with lower scores are filtered out (-1 = no threshold)
+  reranker_device: "cpu"  # cpu | cuda | auto (cpu keeps VRAM free for the LLM)
   
-  # RAG Query Generation (legacy - now uses tool system)
+  # Query generation (used by knowledge_search in text chat, and by the plain RAG fallback)
   query_generation_count: 3
   query_generation_system_prompt: "@rag.query_generation_system"
   query_generation_user_prompt: "@rag.query_generation_user"
@@ -120,21 +137,15 @@ tools:
   # Number of previous messages to use for tool selection context
   context_messages: 3
   
-  # Maximum tools that can be selected per request
+  # Maximum tools that can be selected per request (voice chat always uses 1)
   max_tools: 3
   
-  # Tool selection prompts
-  selection_system_prompt: "@tools.selection_system"
-  selection_user_prompt: "@tools.selection_user"
-  
-  # Voice-optimized prompts (faster, single tool)
-  selection_voice_system_prompt: "@tools.selection_voice_system"
-  selection_voice_user_prompt: "@tools.selection_voice_user"
-  
   # Individual tool settings
-  # Add tool-specific configuration here
   knowledge_search:
     enabled: true
+    # Expand the selector's query into rag.query_generation_count extra queries with the LLM
+    # (better recall, one extra LLM call). Always skipped in voice chat for latency.
+    expand_queries: true
   
   # Web search using DuckDuckGo (no server or Docker needed)
   web_search:

@@ -1,60 +1,32 @@
-# Memory Folder
+# Memory
 
-This folder stores chat history and memory data for Project Metis.
+This folder is Metis' memory. Its contents are git-ignored (they're about real people);
+only this README and `.gitkeep` are tracked.
 
-## Files & Folders
+| File | What it is |
+|---|---|
+| `chat_history.jsonl` | Append-only log of the current session's Discord messages. On the next startup it is moved into `temp_memory.txt` and deleted. |
+| `temp_memory.txt` | Raw conversation that has left the context window (or was `>reset`), waiting to be summarized. |
+| `long_term/memory_*.md` | Facts the model extracted from temp memory, one bullet per fact, prefixed with `user personal information:` so retrieval can target them. |
 
-### `chat_history.json`
-- Stores all chat messages between user and AI
-- Automatically saved after each message
-- Automatically loaded on application startup
-- Can be reset using the Reset button in the UI
-
-### `temp_memory.txt`
-- Temporary storage for deleted conversation messages
-- Messages are added when:
-  - Chat context limit (n_ctx) is reached and older messages are removed
-  - Reset button is pressed (all messages saved before deletion)
-- Format: Conversational format with role prefixes
-  ```
-  User: I like bananas
-  AI: That's great! Bananas are nutritious.
-  User: I have a pet parrot
-  
-  ```
-- **Auto-summarization**: When temp_memory reaches configured token limit (default: 1000), it's automatically:
-  1. Sent to AI for summarization (extracts user information only)
-  2. Saved as a markdown file in `long_term/` folder
-  3. Cleared for new messages
-- Token limit configurable in `config.yaml` under `memory.temp_memory_token_limit`
-- Includes both user and AI messages for context, but summaries focus on user information
-
-### `long_term/` folder
-- Stores AI-generated summaries of conversation history
-- Files named: `memory_YYYYMMDD_HHMMSS.md`
-- Contains structured markdown summaries with:
-  - Main topics discussed
-  - Important facts and context
-  - Goals, tasks, or ongoing projects
-  - Relevant personal information
-
-## Privacy
-
-All memory data is stored locally on your machine and is never sent to external servers.
-The `chat_history.json` file is excluded from git commits (see `.gitignore`).
-
-## Memory System Flow
+## Flow
 
 ```
-User Messages (trimmed/deleted)
-         ↓
-  temp_memory.txt
-         ↓
-   (1000 tokens)
-         ↓
-   AI Summarization
-         ↓
-  long_term/*.md
-         ↓
-  temp_memory cleared
+Discord conversation (per channel / voice session, kept by the bot)
+        │  history outgrows the context window → oldest ~30% is cut once
+        │  >reset → whole conversation
+        ▼
+temp_memory.txt ──(≥ memory.temp_memory_token_limit tokens)──► LLM fact extraction
+                                                                    │
+                                   long_term/memory_*.md ◄──────────┘
+                                   (new file once memory.long_term_memory_token_limit is reached)
+                                        │  indexed immediately if the folder is in rag.folders_to_index
+                                        ▼
+                                knowledge_search tool ─► injected into future replies
 ```
+
+- All memory writes and summaries run on a single background worker, so replies never wait for them.
+- Summarization prompts: `memory.summarization_system` / `memory.summarization_user` in `system_prompts.yaml`.
+- Force a summary now: `POST http://localhost:8000/memory/summarize`. Check status: `GET /memory/status`.
+- To make Metis forget something, edit or delete the relevant `long_term/*.md` file and run
+  `POST /rag/reindex` (or restart).

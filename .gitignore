@@ -66,6 +66,7 @@ model/*
 # Keep the memory folder, ignore its contents by default, but allow tracking placeholder files
 memory/*
 !memory/.gitkeep
+!memory/README.md
 # Keep temp memory file ignored explicitly (sensitive)
 memory/temp_memory.txt
 

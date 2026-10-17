@@ -11,16 +11,17 @@ backend/
 ├── tool_manager.py      # Core tool management (registry, selection, execution)
 └── tools/
     ├── __init__.py      # Tool registration
-    ├── rag_tool.py      # Knowledge base search tool
+    ├── rag_tool.py      # knowledge_search: notes + long-term memories
+    ├── web_search_tool.py  # web_search: DuckDuckGo, no API key
     └── (future tools)   # Add new tools here
 ```
 
 ## How It Works
 
-1. **Tool Selection**: When a message comes in, the LLM is asked to select which tools (if any) to use
-2. **Tool Execution**: Selected tools are executed with their arguments
-3. **Context Injection**: Tool results are injected into the system prompt
-4. **Response Generation**: The LLM generates a response using the tool results
+1. **Tool Selection**: the LLM sees each enabled tool's name and description and answers with a JSON array of calls (or `[]`). Malformed/truncated JSON is recovered where possible; unknown tools are dropped.
+2. **Tool Execution**: selected tools run **concurrently**. `execute()` must not block the event loop — wrap blocking work in `asyncio.to_thread`.
+3. **Context Injection**: results are inserted as a system message *just before the latest user message* (with the current date/time). The system prompt and earlier history stay byte-identical between turns, which lets the LLM service reuse its KV cache.
+4. **Response Generation**: the reply is streamed back to Discord.
 
 ## Configuration
 
@@ -30,18 +31,13 @@ In `config.yaml`:
 tools:
   enabled: true                    # Enable/disable tool system
   context_messages: 3              # Messages to include for context
-  max_tools: 3                     # Max tools per request
+  max_tools: 3                     # Max tools per request (voice: always 1)
   
-  # Tool selection prompts
-  selection_system_prompt: "@tools.selection_system"
-  selection_user_prompt: "@tools.selection_user"
-  
-  # Voice-optimized prompts
-  selection_voice_system_prompt: "@tools.selection_voice_system"
-  selection_voice_user_prompt: "@tools.selection_voice_user"
-  
-  # Individual tool settings
+  # Individual tool settings (every tool reads tools.<name>.enabled)
   knowledge_search:
+    enabled: true
+    expand_queries: true           # extra LLM-generated queries in text chat
+  web_search:
     enabled: true
 ```
 
@@ -128,18 +124,10 @@ tools:
     api_key: "your-api-key"
 ```
 
-### 4. Update Prompts (Optional)
+### 4. Describe When to Use It
 
-If your tool needs special guidance, update `system_prompts.yaml`:
-
-```yaml
-tools:
-  selection_system: >
-    ...
-    WHEN TO USE TOOLS:
-    - Use web_search when: user asks about current events, news, or real-time information
-    ...
-```
+The selector decides from your tool's `description`, so state plainly *when* the tool should
+be used. If it still needs a nudge, add a rule to `_SELECTION_PROMPT` in `backend/tool_manager.py`.
 
 ## Tool Definition Components
 
@@ -209,15 +197,8 @@ Tools are converted to MCP/OpenAI-style JSON schemas:
 
 ## Debugging
 
-Enable debug logging to see tool selection and execution:
-
-```python
-# In tool_manager.py
-print(f"Tool selection result: {tool_calls}")
-print(f"Tool execution result: {results}")
-```
-
-Check the console output for:
+The dashboard's **Tools** tab shows every selection live (arguments, success, execution time),
+and the backend console logs `Tool selection: [...]`. Check for:
 - Which tools were selected
 - What arguments were passed
 - Execution times
@@ -225,10 +206,10 @@ Check the console output for:
 
 ## Voice Mode Optimization
 
-Voice mode uses optimized prompts for faster tool selection:
-- `@tools.selection_voice_system` - Simplified system prompt
-- `@tools.selection_voice_user` - Shorter user prompt
-- `max_tools: 1` - Limit to single tool
+Voice requests send `voice_mode: true`, which:
+- limits selection to a single tool (`max_tools: 1`)
+- makes `knowledge_search` use the selector's query directly instead of asking the LLM for
+  extra queries (saves a full LLM round-trip, ~0.5 s)
 
 ## Fallback Behavior
 
