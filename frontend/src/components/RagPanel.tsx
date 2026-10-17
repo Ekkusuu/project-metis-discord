@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { clearRag, getRagStats, reindexRag } from '../api';
 import type { RagRetrieval, RagStats } from '../api';
+import Icon from './Icon';
 import './RagPanel.css';
 
 interface Notice {
@@ -42,11 +43,11 @@ function RagPanel({ retrieval }: { retrieval: RagRetrieval | null }) {
     setBusy(true);
     setNotice(null);
     try {
-      setNotice({ text: `✓ ${await action()}`, type: 'success' });
+      setNotice({ text: await action(), type: 'success' });
       await fetchStats();
     } catch (err) {
       setNotice({
-        text: `✗ ${failLabel}: ${err instanceof Error ? err.message : String(err)}`,
+        text: `${failLabel}: ${err instanceof Error ? err.message : String(err)}`,
         type: 'error',
       });
     } finally {
@@ -101,17 +102,30 @@ function RagPanel({ retrieval }: { retrieval: RagRetrieval | null }) {
 
       <div className="rag-actions">
         <button type="button" className="rag-button primary" onClick={handleReindex} disabled={busy}>
-          {busy ? 'Working…' : '🔄 Check for changes'}
+          {busy ? (
+            <>
+              <Icon name="spinner" size={15} /> Working…
+            </>
+          ) : (
+            <>
+              <Icon name="refresh" size={15} /> Check for changes
+            </>
+          )}
         </button>
         <button type="button" className="rag-button" onClick={handleFullReindex} disabled={busy}>
-          🔃 Full reindex
+          <Icon name="database" size={15} /> Full reindex
         </button>
         <button type="button" className="rag-button danger" onClick={handleClearAll} disabled={busy}>
-          🗑️ Clear all
+          <Icon name="trash" size={15} /> Clear all
         </button>
       </div>
 
-      {notice && <div className={`rag-notice ${notice.type}`}>{notice.text}</div>}
+      {notice && (
+        <div className={`rag-notice ${notice.type}`}>
+          <Icon name={notice.type === 'success' ? 'check' : 'x'} size={14} />
+          {notice.text}
+        </div>
+      )}
 
       <h3 className="panel-section-title">Last retrieval</h3>
       {!retrieval || (queries.length === 0 && retrieval.results.length === 0 && !retrieval.message) ? (
@@ -139,7 +153,9 @@ function RagPanel({ retrieval }: { retrieval: RagRetrieval | null }) {
           {retrieval.results.map((result, i) => (
             <div key={i} className={`rag-result ${result.used ? 'used' : 'rejected'}`}>
               <div className="rag-result-head">
-                <span className="rag-result-status">{result.used ? '✓' : '✗'}</span>
+                <span className="rag-result-status">
+                  <Icon name={result.used ? 'check' : 'x'} size={14} label={result.used ? 'used' : 'rejected'} />
+                </span>
                 <span className="rag-result-file" title={result.source_file}>
                   {fileName(result.source_file)}
                 </span>

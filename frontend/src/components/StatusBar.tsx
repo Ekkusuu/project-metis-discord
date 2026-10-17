@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { getStatus } from '../api';
 import type { BackendStatus } from '../api';
+import Icon from './Icon';
 import './StatusBar.css';
 
 const POLL_INTERVAL_MS = 10_000;
@@ -63,7 +64,9 @@ function StatusBar() {
         label={status.discord_connected ? 'Discord connected' : 'Discord offline'}
       />
       {status.voice_channels.length > 0 && (
-        <span className="status-pill voice">🎤 In voice: {status.voice_channels.join(', ')}</span>
+        <span className="status-pill voice">
+          <Icon name="mic" size={12} /> In voice: {status.voice_channels.join(', ')}
+        </span>
       )}
     </div>
   );

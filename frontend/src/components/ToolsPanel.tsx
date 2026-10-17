@@ -1,4 +1,5 @@
 import type { ToolExecution } from '../api';
+import Icon from './Icon';
 import './ToolsPanel.css';
 
 /** Execution times from the backend are in seconds. */
@@ -41,10 +42,13 @@ function ToolsPanel({ tools }: { tools: ToolExecution | null }) {
                   <span className="tool-name">{name}</span>
                   {result ? (
                     <span className={`badge ${result.success ? 'ok' : 'bad'}`}>
-                      {result.success ? '✓ success' : '✗ failed'}
+                      <Icon name={result.success ? 'check' : 'x'} size={12} />
+                      {result.success ? 'success' : 'failed'}
                     </span>
                   ) : (
-                    <span className="tool-pending">running…</span>
+                    <span className="tool-pending">
+                      <Icon name="spinner" size={12} /> running…
+                    </span>
                   )}
                 </div>
                 {args.length > 0 && (

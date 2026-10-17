@@ -1,19 +1,19 @@
 :root {
-  /* Colors */
-  --bg: #0d1117;
-  --surface: #161b22;
-  --surface-2: #1c2330;
-  --border: #30363d;
-  --text: #e6edf3;
-  --text-muted: #8b949e;
-  --accent: #58a6ff;
-  --accent-strong: #1f6feb;
-  --success: #3fb950;
-  --warning: #d29922;
-  --danger: #f85149;
-  --user-bubble: #16365f;
-  --user-border: #1f4c85;
-  --ai-bubble: #1c2330;
+  /* Colors — near-black neutrals with bright text for high contrast */
+  --bg: #000000;
+  --surface: #0a0a0a;
+  --surface-2: #141414;
+  --border: #262626;
+  --text: #f5f5f5;
+  --text-muted: #a3a3a3;
+  --accent: #6cb6ff;
+  --accent-strong: #2f81f7;
+  --success: #4ade80;
+  --warning: #facc15;
+  --danger: #ff6b6b;
+  --user-bubble: #0c2647;
+  --user-border: #1e4f8f;
+  --ai-bubble: #121212;
 
   /* Radii */
   --radius-sm: 4px;
@@ -89,4 +89,32 @@ button:focus-visible {
 
 ::-webkit-scrollbar-thumb:hover {
   background: #545d68;
+}
+
+/* Inline SVG icons (components/Icon.tsx) */
+.icon {
+  flex-shrink: 0;
+}
+
+.icon-spin {
+  animation: icon-spin 0.9s linear infinite;
+}
+
+@keyframes icon-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .icon-spin {
+    animation-duration: 2.5s;
+  }
+}
+
+button:has(> .icon),
+span:has(> .icon) {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }

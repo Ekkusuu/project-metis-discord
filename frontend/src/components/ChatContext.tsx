@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useState } from 'react';
 import { AI_MESSAGE_EVENT, getChatContext } from '../api';
 import type { ContextMessage } from '../api';
+import Icon from './Icon';
+import type { IconName } from './Icon';
 import './ChatContext.css';
 
-const ROLE_LABELS: Record<ContextMessage['role'], string> = {
-  system: '⚙️ System',
-  user: '👤 User',
-  assistant: '🤖 Metis',
+const ROLES: Record<ContextMessage['role'], { label: string; icon: IconName }> = {
+  system: { label: 'System', icon: 'sliders' },
+  user: { label: 'User', icon: 'user' },
+  assistant: { label: 'Metis', icon: 'bot' },
 };
 
 function ChatContext() {
@@ -45,7 +47,7 @@ function ChatContext() {
           disabled={loading}
           title="Refresh"
         >
-          {loading ? '…' : '🔄'} Refresh
+          <Icon name={loading ? 'spinner' : 'refresh'} size={14} /> Refresh
         </button>
       </div>
       <div className="ctx-count">{messages.length} messages sent to the LLM</div>
@@ -61,7 +63,10 @@ function ChatContext() {
           return (
             <div key={i} className={`ctx-message ${msg.role}`}>
               <div className="ctx-head">
-                <span className="ctx-role">{ROLE_LABELS[msg.role] ?? msg.role}</span>
+                <span className="ctx-role">
+                  {ROLES[msg.role] && <Icon name={ROLES[msg.role].icon} size={14} />}
+                  {ROLES[msg.role]?.label ?? msg.role}
+                </span>
                 {msg.timestamp && (
                   <span className="ctx-time">{new Date(msg.timestamp).toLocaleTimeString()}</span>
                 )}

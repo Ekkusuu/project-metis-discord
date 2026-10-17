@@ -4,6 +4,7 @@ import type { DiscordMessage } from '../api';
 import { useEventSource } from '../hooks/useEventSource';
 import MessageText from './MessageText';
 import StatusBar from './StatusBar';
+import Icon from './Icon';
 import './ChatInterface.css';
 
 const NEAR_BOTTOM_PX = 120;
@@ -59,7 +60,7 @@ const MessageItem = memo(function MessageItem({ message }: { message: DiscordMes
           {message.channel_name && <span className="message-channel">#{message.channel_name}</span>}
           {message.mode === 'voice' && (
             <span className="message-badge" title="Voice chat">
-              🎤 voice
+              <Icon name="mic" size={12} /> voice
             </span>
           )}
           {time && <span className="message-time">{time}</span>}
@@ -171,7 +172,7 @@ function ChatInterface() {
           <StatusBar />
         </div>
         <button type="button" className="chat-clear" onClick={handleClear} title="Clear messages">
-          🗑️ Clear
+          <Icon name="trash" size={15} /> Clear
         </button>
       </header>
 
@@ -200,7 +201,7 @@ function ChatInterface() {
               setHasNew(false);
             }}
           >
-            ↓ New messages
+            <Icon name="arrowDown" size={14} /> New messages
           </button>
         )}
       </div>

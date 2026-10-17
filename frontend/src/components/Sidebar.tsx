@@ -5,14 +5,16 @@ import { useEventSource } from '../hooks/useEventSource';
 import RagPanel from './RagPanel';
 import ToolsPanel from './ToolsPanel';
 import ChatContext from './ChatContext';
+import Icon from './Icon';
+import type { IconName } from './Icon';
 import './Sidebar.css';
 
 type Tab = 'rag' | 'tools' | 'context';
 
-const TABS: Array<{ id: Tab; label: string }> = [
-  { id: 'rag', label: '📚 Knowledge' },
-  { id: 'tools', label: '🛠️ Tools' },
-  { id: 'context', label: '💬 Context' },
+const TABS: Array<{ id: Tab; label: string; icon: IconName }> = [
+  { id: 'rag', label: 'Knowledge', icon: 'book' },
+  { id: 'tools', label: 'Tools', icon: 'wrench' },
+  { id: 'context', label: 'Context', icon: 'message' },
 ];
 
 const isRetrieval = (v: unknown): v is RagRetrieval =>
@@ -50,6 +52,7 @@ function Sidebar() {
             className={`sidebar-tab ${activeTab === tab.id ? 'active' : ''}`}
             onClick={() => setActiveTab(tab.id)}
           >
+            <Icon name={tab.icon} size={15} />
             {tab.label}
           </button>
         ))}
