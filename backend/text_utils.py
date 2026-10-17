@@ -36,6 +36,12 @@ class ThinkFilter:
 
     feed() returns only the text that is safe to show/speak. A partial tag at
     the end of a chunk is held back until the next chunk disambiguates it.
+
+    Limitation: text already returned can't be taken back, so reasoning that
+    starts *without* an opening tag and ends with a stray "</think>" in a later
+    chunk leaks. In practice the LLM service resolves the model's chat format,
+    and node-llama-cpp then routes reasoning into thought segments that never
+    reach the text stream; this filter is a safety net for tagged output.
     """
 
     _OPEN = "<think>"
