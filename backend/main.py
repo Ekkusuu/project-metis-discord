@@ -76,6 +76,8 @@ async def lifespan(app: FastAPI):
         print("Learning from the end of the conversation before shutting down...")
         await asyncio.wait([asyncio.wrap_future(f) for f in pending], timeout=90)
     discord_bot.stop()
+    from backend.people import get_people
+    get_people().save()  # flush batched "last seen" updates
 
 
 app = FastAPI(title="Project Metis Backend", lifespan=lifespan)

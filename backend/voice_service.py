@@ -17,19 +17,8 @@ import yaml
 
 from backend.config import PROJECT_ROOT, get_config, resolve_path
 
-try:
-    import nemo.collections.asr as nemo_asr
-    NEMO_AVAILABLE = True
-except ImportError:
-    NEMO_AVAILABLE = False
-    print("Warning: NeMo not available. Speech-to-text will not work.")
-
-try:
-    from kokoro import KPipeline
-    KOKORO_AVAILABLE = True
-except ImportError:
-    KOKORO_AVAILABLE = False
-    print("Warning: Kokoro not available. Text-to-speech will not work.")
+# NeMo and Kokoro are imported when voice is first used (>join), not at startup: importing them
+# costs ~5.6 s and ~270 MB of RAM, which is wasted whenever nobody uses voice chat.
 
 TTS_SAMPLE_RATE = 24000  # Kokoro output
 STT_SAMPLE_RATE = 16000  # Parakeet input
@@ -68,7 +57,10 @@ class VoiceService:
         print("✓ Voice service initialized")
 
     def _init_stt(self) -> None:
-        if not NEMO_AVAILABLE:
+        try:
+            import nemo.collections.asr as nemo_asr
+        except ImportError:
+            print("Warning: NeMo not installed; speech-to-text is unavailable.")
             return
         try:
             import torch
@@ -80,16 +72,27 @@ class VoiceService:
             else:
                 print(f"STT model not found at {path}, downloading nvidia/parakeet-tdt-0.6b-v2...")
                 self.stt_model = nemo_asr.models.ASRModel.from_pretrained(model_name="nvidia/parakeet-tdt-0.6b-v2")
+            precision = "fp32"
             if torch.cuda.is_available():
                 self.stt_model = self.stt_model.cuda()
+                # bfloat16 halves Parakeet's VRAM (~2.6 GB -> ~1.6 GB reserved) with identical transcripts
+                # in testing, for ~20 ms more per utterance. fp16 was slower, so it isn't offered.
+                if str(self.config.get("stt_precision", "auto")).lower() != "fp32" and torch.cuda.is_bf16_supported():
+                    self.stt_model = self.stt_model.to(torch.bfloat16)
+                    precision = "bf16"
             self.stt_model.eval()
-            print(f"✓ STT model loaded ({'cuda' if torch.cuda.is_available() else 'cpu'})")
+            print(f"✓ STT model loaded ({'cuda' if torch.cuda.is_available() else 'cpu'}, {precision})")
+            # The first transcription pays a one-time GPU warm-up (~0.3 s); do it now, not on a real speaker.
+            self._transcribe_sync(np.zeros(STT_SAMPLE_RATE, dtype=np.float32))
         except Exception as e:
             print(f"❌ Failed to initialize STT: {e}")
             self.stt_model = None
 
     def _init_tts(self) -> None:
-        if not KOKORO_AVAILABLE:
+        try:
+            from kokoro import KPipeline
+        except ImportError:
+            print("Warning: Kokoro not installed; text-to-speech is unavailable.")
             return
         try:
             import torch
@@ -104,6 +107,7 @@ class VoiceService:
                 device=device,
             )
             print(f"✓ TTS pipeline initialized (Kokoro-82M on {device})")
+            list(self.tts_pipeline("Hi.", voice=self.config.get("tts_voice", "af_heart")))  # warm-up
         except Exception as e:
             print(f"❌ Failed to initialize TTS: {e}")
             self.tts_pipeline = None

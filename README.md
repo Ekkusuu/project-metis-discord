@@ -127,6 +127,31 @@ Everything lives in `config.yaml` (prompts in `system_prompts.yaml`, see
 
 Adding a tool is a single file — see [TOOLS_GUIDE.md](TOOLS_GUIDE.md).
 
+## Performance
+
+Measured on an RTX 4070 Ti with Qwen 3.5 2B (warm, median of the text pipeline: judgment →
+tool decision + knowledge search → reply):
+
+| | |
+|---|---|
+| Text reply, end to end | ~0.5 s (web search adds ~1.5 s) |
+| First token after the request reaches the LLM | ~0.07 s |
+| VRAM, text only (LLM service + embeddings) | ~3.5 GB |
+| VRAM added by voice (Parakeet bf16 + Kokoro) | ~2 GB, loaded on first `>join` |
+| Voice: speech-to-text / text-to-speech per sentence | ~0.08 s / ~0.1 s |
+
+What keeps it there (all configurable in `config.yaml`):
+- `model.batch_size: 256` — ~550 MB less VRAM than the default batch, no measurable slowdown.
+- `rag.embedding_precision: auto` and `voice.stt_precision: auto` — bfloat16 on GPU, half the VRAM
+  of fp32 with identical results.
+- `tools.knowledge_search.expand_queries: false` — knowledge search runs on every message, so it
+  uses the message itself instead of an extra LLM call; it runs in parallel with the web decision.
+- Background learning yields to anything someone is waiting for (priority queue in the LLM service).
+- NeMo/Kokoro are imported only when voice is first used, and both voice models are warmed up on
+  load so the first speaker doesn't pay the GPU warm-up.
+- `rag.reranker_device: cpu` (~86 ms per message) — set `cuda` for ~9 ms at the cost of ~560 MB VRAM.
+- `voice.tts_device: cpu` frees Kokoro's VRAM (still ~6x faster than real time).
+
 ## Dashboard & API
 
 The dashboard is read-only: all conversation happens on Discord. Useful endpoints

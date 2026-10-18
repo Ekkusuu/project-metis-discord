@@ -74,8 +74,20 @@ class PeopleStore:
         except Exception as e:
             print(f"Warning: could not read {self.path.name}: {e}")
 
+    def save_soon(self, delay: float = 5.0) -> None:
+        """Coalesce frequent, low-value writes (last seen / message counts) into one save."""
+        with self._lock:
+            if getattr(self, "_save_timer", None) is None:
+                self._save_timer = threading.Timer(delay, self.save)
+                self._save_timer.daemon = True
+                self._save_timer.start()
+
     def save(self) -> None:
         with self._lock:
+            timer = getattr(self, "_save_timer", None)
+            if timer is not None:
+                timer.cancel()
+                self._save_timer = None
             self.path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.path.with_suffix(".tmp")
             tmp.write_text(json.dumps({"people": self.people, "notes": self.notes}, indent=2, ensure_ascii=False),
@@ -104,7 +116,7 @@ class PeopleStore:
                     person["aliases"].append(alias)
             person["last_seen"] = _now()
             person["message_count"] = person.get("message_count", 0) + 1
-            self.save()
+            self.save_soon()
         return person
 
     def _merge_pseudo(self, pid: str, names: List[str]) -> None:
