@@ -77,8 +77,9 @@ Set `discord.enabled: false` to run the backend and dashboard without the bot.
 
 ## Using Metis on Discord
 
-Metis reads every message in channels she can see and decides whether to join in.
-She always answers when you **@mention** her, **reply** to her, say **"Metis"**, or **DM** her.
+Metis reads every message in channels she can see, but she follows the same conversational
+rules people do (see [How Metis knows when to talk](#how-metis-knows-when-to-talk)).
+She always answers when you **@mention** her, **reply** to her, **address her by name**, or **DM** her.
 
 | Command | |
 |---|---|
@@ -100,6 +101,33 @@ She always answers when you **@mention** her, **reply** to her, say **"Metis"**,
 - When she writes `@Name`, it becomes a real Discord mention; in busy channels she replies to the
   message she's answering so it's clear who she's talking to.
 - Everyone in the voice channel is added to the speech recogniser's name list automatically.
+
+## How Metis knows when to talk
+
+Most of the decision comes from what Discord already tells us, checked by simple rules
+(`backend/turn_taking.py`), so it's fast and predictable:
+
+| Situation | Metis |
+|---|---|
+| DM, @mention, reply to her, or her name used to address her ("Metis, …", "… right metis?") | answers |
+| Follow-up in an exchange she's already having with you ("how long is it?") | answers |
+| "ok thanks", "lol", "brb dinner", "gn" | lets it go |
+| Someone replies to / @mentions / addresses another person by name | stays quiet |
+| Two or more people talking among themselves | stays quiet |
+| People talking *about* her ("metis was funny yesterday") | stays quiet, unless it's clearly to her |
+| "anyone know a good pizza place?" | waits ~8 s, answers only if no human does |
+| Anything still unclear | one constrained model call: who is this message for? |
+
+Timing etiquette:
+- **Text:** she waits a beat after a message (people often send several in a row) and while anyone
+  in the channel is still typing; a newer message cancels her pending reply.
+- **Voice:** she starts talking only after a short gap of silence from everyone, gives up her turn
+  if people keep talking or someone says something new, and **stops mid-sentence when someone talks
+  over her** (only the part people actually heard is remembered). Alone with one person, everything
+  they say is for her.
+
+Tune it under `chat.etiquette` / `voice.etiquette` in `config.yaml`: `engagement` (`reserved`,
+`balanced`, `chatty`, `always`), waiting times, and the barge-in sensitivity.
 
 ## How Metis learns
 

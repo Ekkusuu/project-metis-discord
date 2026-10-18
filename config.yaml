@@ -35,7 +35,7 @@ model:
 llm_service:
   host: "localhost"
   port: 3000
-  # Separate small context for judgment / tool selection / query generation / memory,
+  # Separate small context for addressee checks / tool selection / query generation / learning,
   # so the main chat context keeps its cache between turns. 0 = share the main context (less VRAM).
   aux_context_size: 4096
 
@@ -54,19 +54,18 @@ chat:
   top_p: 0.95
   max_tokens: 2024
 
-  # Text Chat Judgment Settings
-  judgment:
-    enabled: true
-    context_messages: 5
-    system_prompt: "@judgment.text"  # Judgment prompt (not affected by personality)
-    user_prompt: >
-      Previous messages:
-      {context}
-
-      Latest message:
-      {last_message}
-
-      Should Metis respond?
+  # Conversational etiquette (backend/turn_taking.py). Metis answers when a message is for her:
+  # DMs, @mentions, replies to her, her name used to address her, or follow-ups in an exchange
+  # she's already having. She stays quiet when people talk to each other (replies/@mentions/names
+  # of others, back-and-forth between people) and lets humans answer questions to the room first.
+  # Only genuinely unclear messages are decided by the model ("who is this meant for?").
+  etiquette:
+    engagement: "balanced"      # reserved | balanced | chatty | always (old behaviour: answer everything)
+    reply_delay: 1.0            # s to wait before replying: people often send several messages in a row
+    max_typing_wait: 12         # s to wait at most while someone in the channel is still typing
+    open_question_wait: 8       # s humans get to answer "anyone know...?" before Metis does
+    lone_question_wait: 3       # s to wait on a question when nobody else is around
+    continuation_window: 180    # s an exchange with Metis stays open for follow-ups without her name
 
 # ============================================================================
 # Voice Chat Settings (Discord voice channels)
@@ -90,23 +89,20 @@ voice:
   # Minimum RMS threshold for speech to be considered valid for transcription.
   # Values are linear (0.0 - 1.0). 0.01 is a good default; increase if noise triggers false positives.
   min_rms: 0.01
-  # If true, discard user speech that occurs while the AI is talking (prevents responding to old messages)
-  # If false, queue user speech and process after AI finishes speaking
+  # Only used when etiquette.barge_in is false: ignore speech while Metis is talking.
   discard_while_speaking: true
 
-  # Voice Chat Judgment Settings
-  judgment:
-    enabled: true
-    context_messages: 5
-    system_prompt: "@judgment.voice"  # Judgment prompt (not affected by personality)
-    user_prompt: >
-      Previous voice messages:
-      {context}
-
-      Latest voice input:
-      {last_message}
-
-      Should Metis respond? Reply with "positive" or "negative".
+  # Same etiquette as text chat, plus turn-taking for speech.
+  etiquette:
+    engagement: "balanced"      # reserved | balanced | chatty | always
+    open_question_wait: 3       # s humans get to answer a question to the room first
+    lone_question_wait: 1.5     # (alone in voice with Metis, everything is for her: no wait at all)
+    continuation_window: 30     # s an exchange with Metis stays open for follow-ups without her name
+    floor_gap: 0.5              # s of silence from everyone before Metis starts talking
+    max_floor_wait: 4           # s she waits for a gap; if people keep talking she lets it go
+    barge_in: true              # stop talking when someone talks over her
+    barge_in_seconds: 0.6       # how long someone must talk over her before she stops
+    barge_in_min_rms: 0.03      # loudness that counts as speech (raise if background noise stops her)
 
 
 # ============================================================================

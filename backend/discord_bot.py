@@ -1,8 +1,8 @@
 """
 Discord front-end for Metis.
 
-Text channels: every message goes through a "should Metis reply?" judgment
-(skipped when Metis is mentioned, replied to, or DM'd), then the reply is
+Text channels: conversational etiquette (backend/turn_taking.py) decides whether
+a message is for Metis; she waits for people to finish typing, then the reply is
 streamed from the backend's /chat/stream endpoint.
 
 Voice channels: per-user audio is buffered until the speaker pauses, transcribed,
@@ -43,6 +43,10 @@ from backend.text_utils import (
     split_message,
     strip_name_prefix,
     strip_thinking,
+)
+from backend.turn_taking import (
+    ADDRESSEE_CHOICES, ADDRESSEE_PROMPT, ASK, RESPOND, WAIT_OPEN, Settings, Turn, decide, transcript_for_model,
+    verdict_from_addressee,
 )
 from backend.voice_service import TTS_SAMPLE_RATE, get_voice_service
 
@@ -111,21 +115,40 @@ class Conversation:
         )
         return f"{base} ({user.name})" if clash and user.name.lower() != base.lower() else base
 
-    def add_user(self, user: discord.abc.User, text: str) -> Dict[str, Any]:
+    def add_user(self, user: discord.abc.User, text: str, mentions: Tuple[int, ...] = (),
+                 reply_to: Optional[int] = None) -> Dict[str, Any]:
         label = self.label_for(user)
         msg = {
             "role": "user",
             "content": f"[{label}]: {text}",
+            "text": text,
             "user_id": user.id,
             "name": label,
             "base_name": getattr(user, "display_name", None) or user.name,
+            "mentions": tuple(mentions),
+            "reply_to": reply_to,
+            "ts": time.time(),
             "learned": False,
         }
         self.messages.append(msg)
         return msg
 
-    def add_assistant(self, text: str) -> None:
-        self.messages.append({"role": "assistant", "content": text, "learned": False})
+    def add_assistant(self, text: str, to: Optional[int] = None) -> None:
+        self.messages.append({"role": "assistant", "content": text, "to": to, "ts": time.time(), "learned": False})
+
+    def turns(self, limit: int = 30) -> List[Turn]:
+        """The recent conversation in the form the etiquette logic understands."""
+        out = []
+        for m in self.messages[-limit:]:
+            if m["role"] == "assistant":
+                out.append(Turn(None, "Metis", m["content"], m.get("ts", 0.0), to=m.get("to")))
+            else:
+                out.append(Turn(m.get("user_id"), m.get("name", "?"), m.get("text", m["content"]), m.get("ts", 0.0),
+                                tuple(m.get("mentions", ())), m.get("reply_to")))
+        return out
+
+    def names_by_id(self) -> Dict[int, str]:
+        return {m["user_id"]: m["name"] for m in self.messages if m.get("user_id") is not None}
 
     def participants(self, limit: int = 30) -> List[Dict[str, str]]:
         """Distinct recent speakers, most recent first."""
@@ -248,32 +271,104 @@ def get_conversation(channel_id: int, mode: str = "text") -> Conversation:
 # ---------------------------------------------------------------------------
 # Backend calls
 # ---------------------------------------------------------------------------
-async def should_respond(conversation: Conversation, voice_mode: bool = False) -> bool:
-    """Ask the LLM whether Metis should join in. Errors default to responding."""
-    judgment_cfg = config.get("voice" if voice_mode else "chat", {}).get("judgment", {})
-    if not judgment_cfg.get("enabled", True):
-        return True
-    recent = conversation.messages[-int(judgment_cfg.get("context_messages", 5)):]
-    if not recent:
-        return True
+def etiquette(voice: bool) -> Dict[str, Any]:
+    return config.get("voice" if voice else "chat", {}).get("etiquette", {}) or {}
+
+
+def bot_names() -> List[str]:
+    names = {"Metis"}
+    if bot.user:
+        names.update({bot.user.name, bot.user.display_name})
+    names.update(config.get("chat", {}).get("bot_names", []) or [])
+    return [n for n in names if n]
+
+
+async def ask_addressee(conversation: Conversation) -> str:
+    """One constrained model call: who is the last message meant for? (ambiguous cases only)"""
     payload = {
-        "messages": recent,
-        "system_prompt": resolve_prompt(judgment_cfg.get("system_prompt", "@judgment.voice" if voice_mode else "@judgment.text")),
-        "user_prompt": judgment_cfg.get("user_prompt"),
+        "messages": [
+            {"role": "system", "content": ADDRESSEE_PROMPT},
+            {"role": "user", "content": "Chat:\n" + transcript_for_model(conversation.turns(), conversation.names_by_id())
+                                        + "\n\nWho is the LAST message meant for?"},
+        ],
+        "json_schema": {"enum": ADDRESSEE_CHOICES},
+        "temperature": 0,
+        "max_tokens": 16,
     }
     try:
-        async with http().post(f"{llm_service_url()}/judgment", json=payload,
+        async with http().post(f"{llm_service_url()}/chat/completion", json=payload,
                                timeout=aiohttp.ClientTimeout(total=30)) as response:
-            if response.status != 200:
-                print(f"Judgment request failed ({response.status}); responding anyway")
-                return True
-            judgment = (await response.json()).get("judgment", "").strip().lower()
+            content = (await response.json())["choices"][0]["message"]["content"]
+            return json.loads(content)
     except Exception as e:
-        print(f"Judgment error ({e}); responding anyway")
+        print(f"Addressee check failed ({e}); staying quiet")
+        return "nobody in particular"
+
+
+async def is_metis_turn(conversation: Conversation, *, is_dm: bool = False, voice: bool = False,
+                        alone_with_metis: bool = False) -> bool:
+    """
+    Conversational etiquette (backend/turn_taking.py): respond only when the message is for
+    Metis, or when nobody else picks up a question asked to the whole room.
+    """
+    cfg = etiquette(voice)
+    settings = Settings(
+        engagement=str(cfg.get("engagement", "balanced")),
+        continuation_window=float(cfg.get("continuation_window", 30 if voice else 180)),
+        voice=voice,
+    )
+    if settings.engagement == "always":
         return True
-    decision = not judgment.startswith("neg")
-    print(f"{'✅' if decision else '❌'} Judgment: {judgment}")
-    return decision
+    turns = conversation.turns()
+    decision = decide(turns, bot.user.id if bot.user else 0, bot_names(), conversation.names_by_id(),
+                      is_dm=is_dm, alone_with_metis=alone_with_metis, settings=settings)
+    if decision.verdict == ASK:
+        addressee = await ask_addressee(conversation)
+        decision = verdict_from_addressee(addressee, settings)
+    icon = {RESPOND: "✅", WAIT_OPEN: "⏳"}.get(decision.verdict, "🤐")
+    print(f"{icon} [{turns[-1].name}] {decision.verdict}: {decision.reason}")
+
+    if decision.verdict == WAIT_OPEN:
+        # A question to the room: give the humans a moment to answer it first.
+        asker, seen = turns[-1].speaker_id, len(conversation.messages)
+        if decision.signals.get("wait") == "lone":
+            wait = float(cfg.get("lone_question_wait", 1.5 if voice else 3))
+        else:
+            wait = float(cfg.get("open_question_wait", 3 if voice else 8))
+        await asyncio.sleep(wait)
+        if any(m.get("user_id") not in (None, asker) for m in conversation.messages[seen:]):
+            print("🤐 someone else picked up the question")
+            return False
+        return True
+    return decision.verdict == RESPOND
+
+
+# Typing indicators per channel: channel id -> {user id: last time they were seen typing}
+_typing: Dict[int, Dict[int, float]] = {}
+
+
+@bot.event
+async def on_typing(channel: discord.abc.Messageable, user: discord.abc.User, when: datetime) -> None:
+    if not user.bot:
+        _typing.setdefault(channel.id, {})[user.id] = time.monotonic()
+
+
+async def wait_until_quiet(channel_id: int, message_id: int, conversation: Conversation) -> bool:
+    """
+    Don't talk over people: wait a beat (people often send several messages in a row), then
+    while anyone in the channel is still typing. Returns False if a newer message arrived.
+    """
+    cfg = etiquette(False)
+    await asyncio.sleep(float(cfg.get("reply_delay", 1.0)))
+    deadline = time.monotonic() + float(cfg.get("max_typing_wait", 12))
+    while time.monotonic() < deadline:
+        if conversation.latest_id != message_id:
+            return False
+        typing = _typing.get(channel_id, {})
+        if not any(time.monotonic() - ts < 6 for ts in typing.values()):
+            break
+        await asyncio.sleep(0.5)
+    return conversation.latest_id == message_id
 
 
 async def stream_reply(payload: Dict[str, Any], stats: Dict[str, Any]) -> AsyncIterator[str]:
@@ -351,15 +446,12 @@ def describe_message(message: discord.Message) -> str:
     return " ".join([text, *extras]).strip()
 
 
-def is_addressed_to_bot(message: discord.Message) -> bool:
-    """DMs, @mentions, replies to Metis, or saying her name skip the judgment step."""
-    if message.guild is None or bot.user in message.mentions:
-        return True
+def reply_target(message: discord.Message) -> Optional[int]:
+    """Author id of the message this one replies to, if any."""
     ref = message.reference
-    if ref and isinstance(ref.resolved, discord.Message) and ref.resolved.author == bot.user:
-        return True
-    name = (bot.user.display_name if bot.user else "Metis").lower()
-    return re.search(rf"\b{re.escape(name)}\b", message.content.lower()) is not None
+    if ref and isinstance(ref.resolved, discord.Message):
+        return ref.resolved.author.id
+    return None
 
 
 @bot.event
@@ -391,8 +483,11 @@ async def on_message(message: discord.Message):
     conversation = get_conversation(message.channel.id, "text")
     channel_name = getattr(message.channel, "name", None) or "DM"
 
+    _typing.get(message.channel.id, {}).pop(message.author.id, None)  # they just finished typing
     async with conversation.lock:
-        entry = conversation.add_user(message.author, content)
+        entry = conversation.add_user(message.author, content,
+                                      mentions=tuple(u.id for u in message.mentions),
+                                      reply_to=reply_target(message))
         conversation.latest_id = message.id
     await asyncio.to_thread(remember_speaker, message.author)
     conversation.maybe_learn()
@@ -407,10 +502,10 @@ async def on_message(message: discord.Message):
         "mode": "text",
     }))
 
-    if not is_addressed_to_bot(message) and not await should_respond(conversation):
+    if not await is_metis_turn(conversation, is_dm=message.guild is None):
         return
-    if conversation.latest_id != message.id:
-        return  # a newer message arrived while judging; it will be answered instead
+    if not await wait_until_quiet(message.channel.id, message.id, conversation):
+        return  # a newer message arrived; it gets its own turn
 
     reply = ""
     stats: Dict[str, Any] = {}
@@ -440,7 +535,7 @@ async def on_message(message: discord.Message):
             sent = await message.channel.send(chunk, allowed_mentions=mentions)
 
     async with conversation.lock:
-        conversation.add_assistant(reply)
+        conversation.add_assistant(reply, to=message.author.id)
     await publish({
         "id": str(sent.id) if sent else f"ai-{message.id}",
         "text": reply,
@@ -493,8 +588,17 @@ class VoiceReceiver:
         self.silence_timeout = float(self.cfg.get("listen_timeout", 1.0))
         self.gain = float(self.cfg.get("input_gain", 1.0))
         self.discard_while_speaking = bool(self.cfg.get("discard_while_speaking", True))
+        ecfg = etiquette(True)
+        self.barge_in = bool(ecfg.get("barge_in", True))
+        self.barge_in_seconds = float(ecfg.get("barge_in_seconds", 0.6))
+        self.barge_in_rms = float(ecfg.get("barge_in_min_rms", 0.03)) * 32768
+        self.floor_gap = float(ecfg.get("floor_gap", 0.5))
+        self.max_floor_wait = float(ecfg.get("max_floor_wait", 4.0))
 
         self._utterances: Dict[int, _Utterance] = {}
+        # Voice activity per user: user id -> [start of current stretch of speech, last loud packet]
+        self._activity: Dict[int, List[float]] = {}
+        self._utterance_seq = 0  # bumps whenever someone finishes saying something
         self._buffer_lock = threading.Lock()
         self._respond_lock = asyncio.Lock()  # one spoken reply at a time
         self._speaking = False
@@ -504,11 +608,23 @@ class VoiceReceiver:
 
     # -- capture (runs on the voice-recv thread) --------------------------
     def buffer_audio(self, user, pcm: bytes) -> None:
-        if not self._active or (self.discard_while_speaking and self._speaking):
+        if not self._active:
             return
+        samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float32)
         if self.gain != 1.0:
-            samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) * self.gain
+            samples = samples * self.gain
             pcm = np.clip(samples, -32768, 32767).astype(np.int16).tobytes()
+        now = time.monotonic()
+        if samples.size and float(np.sqrt(np.mean(samples ** 2))) >= self.barge_in_rms:
+            with self._buffer_lock:
+                stretch = self._activity.get(user.id)
+                if stretch is None or now - stretch[1] > 0.3:
+                    self._activity[user.id] = [now, now]
+                else:
+                    stretch[1] = now
+        # While Metis talks, keep listening only if people may interrupt her.
+        if self._speaking and self.discard_while_speaking and not self.barge_in:
+            return
         with self._buffer_lock:
             utt = self._utterances.get(user.id)
             if utt is None:
@@ -519,6 +635,31 @@ class VoiceReceiver:
     def _discard_buffers(self) -> None:
         with self._buffer_lock:
             self._utterances.clear()
+
+    def someone_speaking(self, for_at_least: float = 0.0) -> bool:
+        """Is a person talking right now (and has been for `for_at_least` seconds)?"""
+        now = time.monotonic()
+        with self._buffer_lock:
+            return any(now - last < 0.3 and last - start >= for_at_least for start, last in self._activity.values())
+
+    async def wait_for_floor(self, my_seq: int) -> bool:
+        """
+        Wait for a natural gap before speaking. Gives up (returns False) if people keep
+        talking, or if someone said something new meanwhile (that gets its own turn).
+        """
+        deadline = time.monotonic() + self.max_floor_wait
+        quiet_since = None
+        while time.monotonic() < deadline:
+            if self._utterance_seq != my_seq:
+                return False
+            if self.someone_speaking():
+                quiet_since = None
+            else:
+                quiet_since = quiet_since or time.monotonic()
+                if time.monotonic() - quiet_since >= self.floor_gap:
+                    return True
+            await asyncio.sleep(0.05)
+        return False
 
     # -- lifecycle -------------------------------------------------------
     def start(self) -> None:
@@ -558,7 +699,8 @@ class VoiceReceiver:
             if not text:
                 return
             print(f"📝 [{utt.user.display_name}] {text}")
-            await self._respond(utt.user, text, t0, timings)
+            self._utterance_seq += 1
+            await self._respond(utt.user, text, t0, timings, self._utterance_seq)
         except Exception as e:
             import traceback
             print(f"Voice pipeline error: {e}")
@@ -574,7 +716,8 @@ class VoiceReceiver:
                 names.append(member.display_name)
         return names
 
-    async def _respond(self, user: discord.abc.User, text: str, t0: float, timings: Dict[str, float]) -> None:
+    async def _respond(self, user: discord.abc.User, text: str, t0: float, timings: Dict[str, float],
+                       seq: int) -> None:
         conversation = self.conversation
         async with conversation.lock:
             entry = conversation.add_user(user, text)
@@ -593,22 +736,26 @@ class VoiceReceiver:
         }))
 
         async with self._respond_lock:
-            if not self._active:
-                return
-            # Skip the judgment if someone said Metis' name.
-            name = (bot.user.display_name if bot.user else "Metis").lower()
+            if not self._active or self._utterance_seq != seq:
+                return  # someone already said something newer; that turn is handled instead
             t = time.perf_counter()
-            addressed = re.search(rf"\b{re.escape(name)}\b", text.lower()) is not None
-            if not addressed and not await should_respond(conversation, voice_mode=True):
+            alone = len(self.present_members()) <= 1
+            if not await is_metis_turn(conversation, voice=True, alone_with_metis=alone):
                 return
             timings["judgment"] = time.perf_counter() - t
 
-            reply, stats = await self._speak_streamed_reply(conversation, t0, timings)
+            reply, stats, outcome = await self._speak_streamed_reply(conversation, t0, timings, seq)
             reply = clean_reply(reply)
+            if outcome == "yielded":
+                print("🤐 gave up the turn: people kept talking or the conversation moved on")
+                return
             if not reply:
                 return
+            if outcome == "interrupted":
+                print("✋ interrupted; stopped talking")
+                reply += " —"
             async with conversation.lock:
-                conversation.add_assistant(reply)
+                conversation.add_assistant(reply, to=user.id)
 
         await publish({
             "id": f"voice-ai-{time.time_ns()}",
@@ -622,30 +769,49 @@ class VoiceReceiver:
         asyncio.create_task(conversation.compact())
         self._print_timings(timings, stats, time.perf_counter() - t0)
 
-    async def _speak_streamed_reply(self, conversation: Conversation, t0: float,
-                                    timings: Dict[str, float]) -> Tuple[str, Dict[str, Any]]:
-        """Stream the reply, synthesising and playing each sentence as soon as it is complete."""
+    async def _speak_streamed_reply(self, conversation: Conversation, t0: float, timings: Dict[str, float],
+                                    seq: int) -> Tuple[str, Dict[str, Any], str]:
+        """
+        Stream the reply, synthesising and playing each sentence as soon as it is complete.
+        Returns (what was actually said, stats, outcome) where outcome is "done", "yielded"
+        (never started: people kept talking / conversation moved on) or "interrupted".
+        """
         service = await get_voice_service()
         sentences: asyncio.Queue[Optional[str]] = asyncio.Queue()
-        audio: asyncio.Queue[Optional[bytes]] = asyncio.Queue()
+        audio: asyncio.Queue[Optional[Tuple[str, bytes]]] = asyncio.Queue()
         stats: Dict[str, Any] = {}
+        state = {"outcome": "done", "spoken": []}
+
+        def stopped() -> bool:
+            return state["outcome"] != "done"
 
         async def synthesize() -> None:
             while (sentence := await sentences.get()) is not None:
+                if stopped():
+                    continue
                 t = time.perf_counter()
                 pcm = await service.synthesize_speech(sentence)
                 timings["tts"] = timings.get("tts", 0.0) + time.perf_counter() - t
                 if pcm:
-                    await audio.put(pcm)
+                    await audio.put((sentence, pcm))
             await audio.put(None)
 
         async def play() -> None:
             first = True
-            while (pcm := await audio.get()) is not None:
+            while (item := await audio.get()) is not None:
+                if stopped():
+                    continue
+                sentence, pcm = item
                 if first:
+                    if not await self.wait_for_floor(seq):
+                        state["outcome"] = "yielded"
+                        continue
                     timings["first_audio"] = time.perf_counter() - t0
                     first = False
-                await self._play_pcm(pcm)
+                if not await self._play_pcm(pcm):
+                    state["outcome"] = "interrupted"
+                    continue
+                state["spoken"].append(sentence)
 
         synth_task = asyncio.create_task(synthesize())
         play_task = asyncio.create_task(play())
@@ -654,6 +820,8 @@ class VoiceReceiver:
         reply = ""
         try:
             async for delta in stream_reply(chat_payload(conversation, True, self.present_members()), stats):
+                if stopped():
+                    break  # closing the stream stops generation upstream
                 reply += delta
                 pending += think.feed(delta)
                 done, pending = pop_sentences(pending)
@@ -670,12 +838,17 @@ class VoiceReceiver:
         finally:
             await sentences.put(None)
             await asyncio.gather(synth_task, play_task, return_exceptions=True)
-        return reply, stats
+        if state["outcome"] == "interrupted":
+            reply = " ".join(state["spoken"])  # only what people actually heard
+        return reply, stats, state["outcome"]
 
-    async def _play_pcm(self, pcm24k_mono: bytes) -> None:
-        """Play Kokoro output directly (no temp files or FFmpeg process per sentence)."""
+    async def _play_pcm(self, pcm24k_mono: bytes) -> bool:
+        """
+        Play Kokoro output directly (no temp files or FFmpeg process per sentence).
+        Returns False if a person talked over Metis and she stopped (barge-in).
+        """
         if not self._active or not self.voice_client.is_connected():
-            return
+            return False
         from scipy.signal import resample_poly
 
         samples = np.frombuffer(pcm24k_mono, dtype=np.int16).astype(np.float32)
@@ -692,18 +865,28 @@ class VoiceReceiver:
             loop.call_soon_threadsafe(done.set)
 
         self._speaking = True
-        if self.discard_while_speaking:
+        if self.discard_while_speaking and not self.barge_in:
             self._discard_buffers()
+        interrupted = False
         try:
             self.voice_client.play(source, after=after)
-            duration = len(pcm24k_mono) / (TTS_SAMPLE_RATE * 2)
-            await asyncio.wait_for(done.wait(), timeout=duration + 5)
-        except asyncio.TimeoutError:
-            self.voice_client.stop()
+            deadline = time.monotonic() + len(pcm24k_mono) / (TTS_SAMPLE_RATE * 2) + 5
+            while not done.is_set() and time.monotonic() < deadline:
+                if self.barge_in and self.someone_speaking(for_at_least=self.barge_in_seconds):
+                    interrupted = True  # someone is talking over her: stop, like a person would
+                    self.voice_client.stop()
+                    break
+                try:
+                    await asyncio.wait_for(done.wait(), timeout=0.05)
+                except asyncio.TimeoutError:
+                    pass
+            if not done.is_set() and not interrupted:
+                self.voice_client.stop()
         except discord.ClientException as e:
             print(f"Playback skipped: {e}")
         finally:
             self._speaking = False
+        return not interrupted
 
     @staticmethod
     def _print_timings(timings: Dict[str, float], stats: Dict[str, Any], total: float) -> None:

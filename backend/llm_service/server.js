@@ -31,7 +31,7 @@ const MODEL_PATH = (() => {
   return isAbsolute(p) ? p : join(projectRoot, p);
 })();
 const CONTEXT_SIZE = modelCfg.n_ctx || 8192;
-// A second, smaller context for short "utility" prompts (judgment, tool selection,
+// A second, smaller context for short "utility" prompts (addressee checks, tool selection,
 // query generation, memory summaries). Keeping them off the main chat sequence
 // means the chat KV cache survives between turns, so only new tokens get evaluated.
 // Set to 0 to share the main context (saves VRAM).
@@ -49,7 +49,6 @@ const DEFAULTS = {
 let llama;
 let model;
 let chatWrapper;
-let judgmentGrammar = null;
 const schemaGrammars = new Map(); // JSON schema string -> LlamaJsonSchemaGrammar
 
 /** Grammar that forces output to match a JSON schema (cached per schema). */
@@ -81,7 +80,7 @@ class Lane {
 
   /**
    * Queue a task. "interactive" work (someone is waiting for a reply) always runs before
-   * "background" work (learning), so a learning pass never delays a judgment or tool decision.
+   * "background" work (learning), so a learning pass never delays an addressee check or tool decision.
    */
   run(task, priority = "interactive") {
     return new Promise((resolve, reject) => {
@@ -160,7 +159,6 @@ async function initModel() {
       }
     }
 
-    judgmentGrammar = await llama.createGrammar({ grammar: 'root ::= "positive" | "negative"' });
 
     await auxLane.run((chat) =>
       chat.generateResponse([{ type: "user", text: "Hello" }], { maxTokens: 4, temperature: 0 })
@@ -241,46 +239,6 @@ app.get("/health", (req, res) => {
     chat_wrapper: chatWrapper?.wrapperName ?? null,
     queue: { chat: chatLane?.pending ?? 0, aux: auxLane === chatLane ? 0 : auxLane?.pending ?? 0 },
   });
-});
-
-/**
- * Decide whether Metis should respond. Output is constrained by a grammar to
- * exactly "positive" or "negative", so it can't ramble or leak template tokens.
- */
-app.post("/judgment", async (req, res) => {
-  const { messages, system_prompt, user_prompt } = req.body;
-  if (!Array.isArray(messages) || messages.length === 0) {
-    return res.status(400).json({ error: "messages array required" });
-  }
-
-  const label = (m) => (m.role === "user" ? m.content : `[Metis]: ${m.content}`);
-  const context = messages.slice(0, -1).map(label).join("\n");
-  const lastMessage = label(messages[messages.length - 1]);
-  const template = user_prompt || "{context}\n\n{last_message}\n\nShould Metis respond?";
-  const prompt = template
-    .replaceAll("{context}", context || "(no previous messages)")
-    .replaceAll("{last_message}", lastMessage)
-    .replaceAll("{conversation}", messages.map(label).join("\n"));
-
-  const controller = abortOnDisconnect(req, res);
-  try {
-    const result = await auxLane.run((chat) =>
-      chat.generateResponse(
-        [
-          { type: "system", text: system_prompt || "Answer with positive or negative." },
-          { type: "user", text: prompt },
-        ],
-        { grammar: judgmentGrammar, temperature: 0, maxTokens: 4, signal: controller.signal }
-      )
-    );
-    const judgment = result.response.trim();
-    console.log(`Judgment: ${judgment}`);
-    res.json({ judgment });
-  } catch (error) {
-    if (controller.signal.aborted) return;
-    console.error("Judgment error:", error);
-    res.status(500).json({ error: error.message });
-  }
 });
 
 /**

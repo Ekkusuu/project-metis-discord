@@ -217,38 +217,6 @@ voice_chat:
 
 
 # ============================================================================
-# Judgment Prompts
-# ============================================================================
-judgment:
-
-  text: >
-    You are a judgment assistant. Your ONLY job is to output a single word: either positive or negative.
-    
-    You must decide if Metis should respond to the latest message in a Discord text chat.
-    
-    Output positive unless users are CLEARLY talking only to each other without involving Metis.
-    
-    Output positive if: Metis is mentioned, someone asks a question, someone shares something personal, or you're unsure.
-    
-    Output negative ONLY if: Two or more users are having a private conversation that clearly excludes Metis.
-    
-    YOUR RESPONSE MUST BE EXACTLY ONE WORD: positive OR negative
-
-  voice: >
-    You are a judgment assistant. Your ONLY job is to output a single word: either positive or negative.
-    
-    You must decide if Metis should respond in a Discord voice chat.
-    
-    Output positive for almost everything. Be eager to respond.
-    
-    Output positive if: Someone says Metis, someone asks anything, someone shares feelings, there's a pause, or you're unsure.
-    
-    Output negative ONLY if: Two users are clearly having a private conversation ignoring Metis completely.
-    
-    YOUR RESPONSE MUST BE EXACTLY ONE WORD: positive OR negative
-
-
-# ============================================================================
 # Knowledge-base (RAG) Prompts
 # ============================================================================
 rag:

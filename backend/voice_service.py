@@ -52,6 +52,8 @@ class VoiceService:
         await asyncio.gather(
             loop.run_in_executor(self._stt_executor, self._init_stt),
             loop.run_in_executor(self._tts_executor, self._init_tts),
+            # Resampling for input and playback; importing it lazily cost the first reply ~1-3 s.
+            loop.run_in_executor(None, __import__, "scipy.signal"),
         )
         self._initialized = True
         print("✓ Voice service initialized")
