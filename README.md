@@ -1,8 +1,9 @@
 # Project Metis
 
 Metis is a fully local AI companion for Discord. She chats in text channels, joins voice
-channels to talk out loud, remembers what people tell her, can look things up in your notes
-or on the web, and comes with a live dashboard that shows exactly what she's thinking with.
+channels to talk out loud, tells people apart, **learns about everyone she talks to** and brings
+it up naturally later, can look things up in your notes, search the web and read pages people
+share, and comes with a live dashboard that shows exactly what she's thinking with.
 
 Everything runs on your own machine: a GGUF model through `node-llama-cpp`, local embeddings
 and reranking for retrieval, NVIDIA Parakeet for speech-to-text and Kokoro for text-to-speech.
@@ -14,7 +15,8 @@ and reranking for retrieval, NVIDIA Parakeet for speech-to-text and Kokoro for t
    ▲  text: judgment → reply           │  /chat/stream: tools → prompt → stream     server.js
    │  voice: STT → judgment → TTS      │  ├─ knowledge_search ─► ChromaDB + reranker  node-llama-cpp
    └───────────── replies ◄────────────┘  ├─ web_search ───────► DuckDuckGo           (GPU)
-                                          ├─ memory: temp → summaries → long_term/*.md
+                                          ├─ fetch_webpage ────► any public URL
+                                          ├─ people memory: per-user facts, learned continuously
                                           └─ SSE feeds ─► dashboard (frontend/, Vite + React)
 ```
 
@@ -25,7 +27,8 @@ and reranking for retrieval, NVIDIA Parakeet for speech-to-text and Kokoro for t
 | `backend/routers/chat.py` | The reply pipeline: pick tools → run them concurrently → insert results before the latest message → stream the reply. |
 | `backend/discord_bot.py` | Text + voice front-end, commands, per-channel conversations that compact themselves into memory. |
 | `backend/rag_engine.py` | Indexing (incremental, size + mtime) and retrieval (vector search → distance filter → cross-encoder rerank). |
-| `backend/memory_manager.py` | Messages that leave the context window go to `memory/temp_memory.txt`; past a token limit they're summarized into `memory/long_term/` and indexed. |
+| `backend/people.py` | One profile per Discord user id (names, aliases, last seen, learned facts). Profiles of the people in a conversation go straight into the prompt. |
+| `backend/learning.py` | Every few messages, extracts lasting facts per speaker ("Sava \| works as a nurse") and files them under the right person. |
 | `frontend/` | Read-only dashboard: live Discord feed, retrieved knowledge, tool calls and the exact prompt sent to the model. |
 
 ## Setup (Windows)
@@ -76,10 +79,31 @@ She always answers when you **@mention** her, **reply** to her, say **"Metis"**,
 |---|---|
 | `>join` | Join your voice channel and start listening. Text replies pause while she's in voice. |
 | `>leave` | Leave voice (she also leaves by herself when everyone else does). |
-| `>reset` | Start the channel's conversation fresh; the old one is saved to memory first. |
+| `>reset` | Start the channel's conversation fresh (she learns from it first). |
 | `>status` | Personality, context usage, tools and voice state. |
 | `>personality [name]` | List personalities or switch (needs *Manage Server*; lasts until restart). |
 | `>help` | All commands. `!` works as a prefix too. |
+
+## How Metis knows who's who
+
+- Every message is attributed to a Discord **user id**, not just a name. In text the label is the
+  server display name; in voice, discord-ext-voice-recv gives each speaker their own audio stream,
+  so transcripts are attributed per person too.
+- If two people share a display name, the transcript disambiguates them (`Sava (sava_x)`).
+- The profiles of the people in the conversation (and, in voice, who is in the channel) are added
+  to the prompt, so Metis can address the right person and bring up what she knows about them.
+- When she writes `@Name`, it becomes a real Discord mention; in busy channels she replies to the
+  message she's answering so it's clear who she's talking to.
+- Everyone in the voice channel is added to the speech recogniser's name list automatically.
+
+## How Metis learns
+
+Every `memory.learn_every_messages` user messages (and on `>reset`, when old messages scroll out
+of the context window, and at shutdown) the new part of the conversation is read by the model,
+which writes down lasting facts per person: job, pets, plans, likes and dislikes, and so on.
+Duplicates are filtered, facts are stored in `memory/people.json` and mirrored to
+`memory/long_term/people/` so `knowledge_search` can find them even when that person isn't around.
+You can review and delete anything in the dashboard's **People** tab.
 
 ## Configuration highlights
 
@@ -92,7 +116,8 @@ Everything lives in `config.yaml` (prompts in `system_prompts.yaml`, see
 - `chat.judgment` / `voice.judgment` — turn the "should I reply?" step on or off.
 - `rag.*` — indexed folders, chunking, distance/rerank thresholds. `reranker_top_k` is how many chunks reach the prompt.
 - `tools.*` — enable tools individually; `knowledge_search.expand_queries` trades one extra LLM call for better recall in text chat.
-- `memory.*` — when temp memory is summarized and how large long-term files grow.
+- `memory.learn_every_messages` — how often Metis learns from the conversation.
+- `tools.web_search.read_top_result` / `tools.fetch_webpage` — reading full pages (private/local addresses are always refused).
 - `voice.*` — voice, pause length before replying, input gain, noise floor.
 
 Adding a tool is a single file — see [TOOLS_GUIDE.md](TOOLS_GUIDE.md).
@@ -107,7 +132,8 @@ The dashboard is read-only: all conversation happens on Discord. Useful endpoint
 - `GET /rag/stream` — SSE feed of the last retrieval and tool calls
 - `GET /chat/context` — the exact prompt last sent to the model
 - `POST /rag/reindex?clear_existing=false` — pick up changed notes without restarting
-- `POST /memory/summarize` — turn temp memory into long-term memory now
+- `GET /memory/people`, `DELETE /memory/people/{id}/facts/{fact}` — what Metis knows about people
+- `POST /memory/learn` — learn from the conversation so far right now
 
 ## Tests
 

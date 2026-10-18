@@ -53,6 +53,11 @@ class Message(BaseModel):
     content: str
 
 
+class Participant(BaseModel):
+    id: str
+    name: str
+
+
 class ChatRequest(BaseModel):
     messages: Optional[List[Message]] = Field(default=None, description="OpenAI-style chat messages")
     prompt: Optional[str] = Field(default=None, description="Simple prompt; used if messages not provided")
@@ -62,6 +67,10 @@ class ChatRequest(BaseModel):
     use_tools: Optional[bool] = Field(default=None, description="Override tools.enabled from config")
     max_tools: Optional[int] = Field(default=None, description="Maximum tools to select")
     voice_mode: bool = Field(default=False, description="Favour latency over recall (voice chat)")
+    participants: List[Participant] = Field(
+        default_factory=list, description="Recent speakers; what Metis knows about them is added to the prompt"
+    )
+    present: List[str] = Field(default_factory=list, description="People currently in the voice channel")
     # Legacy RAG options (used when the tool system is disabled)
     rag_query_count: Optional[int] = None
     rag_system_prompt: Optional[str] = None
@@ -186,22 +195,46 @@ async def gather_context(messages: List[Dict[str, str]], req: ChatRequest) -> Tu
     return "", tool_timings, rag_timings
 
 
-def build_prompt(messages: List[Dict[str, str]], context_text: str) -> List[Dict[str, str]]:
+def people_context(req: ChatRequest) -> str:
+    """What Metis knows about the people in this conversation, plus who is in the voice channel."""
+    from backend.people import get_people
+
+    parts = []
+    if req.participants:
+        parts.append(
+            "Each message starts with the speaker's name in brackets; different names are different people. "
+            "Keep track of who said what. You are Metis: reply only as yourself, never write lines for anyone "
+            "else, and don't start your reply with a name in brackets. To ping someone, write @ and their name."
+        )
+    if req.present:
+        parts.append("In the voice channel right now: " + ", ".join(req.present))
+    profiles = get_people().profile_block([p.id for p in req.participants])
+    if profiles:
+        parts.append(
+            "What you remember about the people in this conversation (use it naturally, like a friend would; "
+            "don't recite it):\n" + profiles
+        )
+    return "\n\n".join(parts)
+
+
+def build_prompt(messages: List[Dict[str, str]], context_text: str, people_text: str = "") -> List[Dict[str, str]]:
     """
-    Insert gathered information as a system message right before the latest user
-    message. Keeping the system prompt and earlier history byte-identical between
-    turns lets the LLM service reuse its KV cache instead of re-reading everything.
+    Insert people memory and gathered information as a system message right before
+    the latest user message. Keeping the system prompt and earlier history
+    byte-identical between turns lets the LLM service reuse its KV cache.
     """
-    if not context_text:
+    if not context_text and not people_text:
         return list(messages)
     now = datetime.datetime.now().strftime("%A, %d %B %Y, %H:%M")
-    block = (
-        f"Current date and time: {now}\n\n"
-        "Information retrieved for the next reply (from notes, memories, or the web). "
-        "Use it when it is relevant; do not mention that you looked it up.\n\n"
-        f"{context_text}"
-    )
-    return messages[:-1] + [{"role": "system", "content": block}, messages[-1]]
+    sections = [f"Current date and time: {now}"]
+    if people_text:
+        sections.append(people_text)
+    if context_text:
+        sections.append(
+            "Information retrieved for the next reply (from notes, memories, or the web). "
+            "Use it when it is relevant; do not mention that you looked it up.\n\n" + context_text
+        )
+    return messages[:-1] + [{"role": "system", "content": "\n\n".join(sections)}, messages[-1]]
 
 
 def _sampling(req: ChatRequest) -> Dict[str, Any]:
@@ -216,7 +249,7 @@ def _sampling(req: ChatRequest) -> Dict[str, Any]:
 async def _prepare(req: ChatRequest) -> Tuple[List[Dict[str, str]], Dict[str, Any]]:
     messages = _base_messages(req)
     context_text, tool_timings, rag_timings = await gather_context(messages, req)
-    final = trim_messages_to_context(build_prompt(messages, context_text))
+    final = trim_messages_to_context(build_prompt(messages, context_text, people_context(req)))
     stamp = datetime.datetime.now().isoformat()
     state.context = [{**m, "timestamp": stamp} for m in final]
     return final, {"tool_timings": tool_timings, "rag_timings": rag_timings}

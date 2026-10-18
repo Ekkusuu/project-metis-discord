@@ -163,6 +163,16 @@ class VoiceService:
             print(f"Warning: could not read voice_corrections.yaml: {e}")
             return []
 
+    def add_names(self, names: List[str]) -> None:
+        """Teach the name corrector more names (e.g. everyone in the voice channel)."""
+        known = {n.lower() for n in self._names}
+        for name in names:
+            # Only the first word of a display name is what people actually say ("Sava", not "Sava | 21").
+            spoken = re.split(r"[\s|_\-.\d]+", name.strip())[0]
+            if len(spoken) >= 3 and spoken.lower() not in known:
+                self._names.append(spoken)
+                known.add(spoken.lower())
+
     def _correct_names(self, text: str) -> str:
         """Snap capitalised words that sound like a known name onto the correct spelling."""
         if not self._names:

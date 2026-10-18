@@ -75,10 +75,16 @@ def http() -> aiohttp.ClientSession:
 # ---------------------------------------------------------------------------
 @dataclass
 class Conversation:
-    """History for one text channel or one voice session."""
+    """
+    History for one text channel or one voice session.
+
+    User messages carry the speaker's Discord id and label, so every line in the
+    prompt is attributable to a specific person and learning can file facts
+    under the right profile.
+    """
 
     mode: str  # "text" | "voice"
-    messages: List[Dict[str, str]] = field(default_factory=list)
+    messages: List[Dict[str, Any]] = field(default_factory=list)
     latest_id: int = 0  # id of the newest user message; older in-flight replies abort
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
@@ -89,41 +95,147 @@ class Conversation:
         return resolve_prompt(cfg.get("system_prompt", default))
 
     def prompt(self) -> List[Dict[str, str]]:
-        return [{"role": "system", "content": self.system_prompt}, *self.messages]
+        return [{"role": "system", "content": self.system_prompt},
+                *({"role": m["role"], "content": m["content"]} for m in self.messages)]
+
+    # -- speakers ---------------------------------------------------------
+    def label_for(self, user: discord.abc.User) -> str:
+        """
+        The name used for this person in the transcript: their server display name,
+        disambiguated with the username when someone else here goes by the same name.
+        """
+        base = getattr(user, "display_name", None) or user.name
+        clash = any(
+            m.get("user_id") not in (None, user.id) and m.get("base_name", "").lower() == base.lower()
+            for m in self.messages[-60:]
+        )
+        return f"{base} ({user.name})" if clash and user.name.lower() != base.lower() else base
+
+    def add_user(self, user: discord.abc.User, text: str) -> Dict[str, Any]:
+        label = self.label_for(user)
+        msg = {
+            "role": "user",
+            "content": f"[{label}]: {text}",
+            "user_id": user.id,
+            "name": label,
+            "base_name": getattr(user, "display_name", None) or user.name,
+            "learned": False,
+        }
+        self.messages.append(msg)
+        return msg
+
+    def add_assistant(self, text: str) -> None:
+        self.messages.append({"role": "assistant", "content": text, "learned": False})
+
+    def participants(self, limit: int = 30) -> List[Dict[str, str]]:
+        """Distinct recent speakers, most recent first."""
+        seen: Dict[int, str] = {}
+        for m in reversed(self.messages[-limit:]):
+            if m.get("user_id") is not None and m["user_id"] not in seen:
+                seen[m["user_id"]] = m["name"]
+        return [{"id": str(uid), "name": name} for uid, name in seen.items()]
+
+    def name_to_id(self) -> Dict[str, int]:
+        mapping: Dict[str, int] = {}
+        for m in self.messages:
+            if m.get("user_id") is not None:
+                mapping[m["name"]] = m["user_id"]
+                mapping.setdefault(m.get("base_name", m["name"]), m["user_id"])
+        return mapping
+
+    def distinct_recent_speakers(self, last: int = 6) -> int:
+        return len({m["user_id"] for m in self.messages[-last:] if m.get("user_id") is not None})
+
+    # -- learning ---------------------------------------------------------
+    def take_unlearned(self, context: int = 2) -> List[Dict[str, Any]]:
+        """Messages not yet learned from (plus a little prior context); marks them learned."""
+        first = next((i for i, m in enumerate(self.messages) if not m.get("learned")), None)
+        if first is None:
+            return []
+        batch = [dict(m) for m in self.messages[max(0, first - context):]]
+        for m in self.messages[first:]:
+            m["learned"] = True
+        return batch if any(m["role"] == "user" for m in batch) else []
+
+    def maybe_learn(self) -> None:
+        """Learn every `memory.learn_every_messages` user messages."""
+        every = int(config.get("memory", {}).get("learn_every_messages", 6))
+        unlearned = sum(1 for m in self.messages if m["role"] == "user" and not m.get("learned"))
+        if every > 0 and unlearned >= every:
+            from backend.memory_manager import learn_from
+            learn_from(self.take_unlearned())
 
     async def compact(self) -> None:
         """
-        When the history outgrows the context window, cut it back to ~70% of the
-        budget in one go and archive what was removed to memory (exactly once).
-        Cutting with headroom keeps the prompt prefix stable for many turns, which
-        is what lets the LLM service reuse its KV cache.
+        When the history outgrows the context window, learn from anything not yet
+        learned, then cut it back to ~70% of the budget in one go. Cutting with
+        headroom keeps the prompt prefix stable for many turns, which is what lets
+        the LLM service reuse its KV cache.
         """
         from backend.context_manager import context_budget, split_to_fit
-        from backend.memory_manager import archive_messages
+        from backend.memory_manager import learn_from
         from backend.token_utils import count_message_tokens
 
         async with self.lock:
             snapshot = self.prompt()
-            budget = context_budget() - 1024  # leave room for tool/RAG context
+            budget = context_budget() - 1536  # leave room for people memory + tool context
             if await asyncio.to_thread(count_message_tokens, snapshot) <= budget:
                 return
             _, removed = await asyncio.to_thread(split_to_fit, snapshot, int(budget * 0.7))
             if removed:
+                pending = self.take_unlearned()
+                if pending:
+                    learn_from(pending)
                 del self.messages[: len(removed)]
-                archive_messages(removed)
-                print(f"🗜️  Compacted {self.mode} conversation: archived {len(removed)} message(s) to memory")
+                print(f"🗜️  Compacted {self.mode} conversation: dropped {len(removed)} old message(s)")
 
     def reset(self) -> int:
-        from backend.memory_manager import archive_messages
+        from backend.memory_manager import learn_from
 
         count = len(self.messages)
-        if self.messages:
-            archive_messages(self.messages)
+        pending = self.take_unlearned()
+        if pending:
+            learn_from(pending)
         self.messages = []
         return count
 
 
 conversations: Dict[Tuple[str, int], Conversation] = {}
+
+
+def flush_learning() -> List[Any]:
+    """Queue learning for everything not learned yet in all conversations (callable from any thread)."""
+    async def collect() -> List[Any]:
+        from backend.memory_manager import learn_from
+        futures = []
+        for conversation in list(conversations.values()):
+            pending = conversation.take_unlearned()
+            if pending:
+                futures.append(learn_from(pending))
+        return futures
+
+    if _loop and _loop.is_running():
+        try:
+            return asyncio.run_coroutine_threadsafe(collect(), _loop).result(timeout=10)
+        except Exception as e:
+            print(f"Could not flush learning: {e}")
+    return []
+
+
+def remember_speaker(user: discord.abc.User) -> None:
+    """Update the person registry (names, last seen) for whoever just spoke."""
+    from backend.people import get_people
+
+    aliases = [n for n in (user.name, getattr(user, "global_name", None)) if n]
+    display = getattr(user, "display_name", None) or user.name
+    get_people().seen(user.id, display, aliases)
+
+
+def link_mentions(text: str, conversation: Conversation) -> str:
+    """Turn '@Name' for people in this conversation into real Discord mentions."""
+    for name, uid in sorted(conversation.name_to_id().items(), key=lambda kv: -len(kv[0])):
+        text = re.sub(rf"@{re.escape(name)}(?!\w)", f"<@{uid}>", text, flags=re.IGNORECASE)
+    return text
 
 
 def get_conversation(channel_id: int, mode: str = "text") -> Conversation:
@@ -186,11 +298,13 @@ async def stream_reply(payload: Dict[str, Any], stats: Dict[str, Any]) -> AsyncI
                 return
 
 
-def chat_payload(conversation: Conversation, voice_mode: bool) -> Dict[str, Any]:
+def chat_payload(conversation: Conversation, voice_mode: bool, present: Optional[List[str]] = None) -> Dict[str, Any]:
     chat_cfg = config.get("chat", {})
     voice_cfg = config.get("voice", {})
     payload: Dict[str, Any] = {
         "messages": conversation.prompt(),
+        "participants": conversation.participants(),
+        "present": present or [],
         "temperature": chat_cfg.get("temperature", 0.7),
         "top_p": chat_cfg.get("top_p", 0.95),
         "max_tokens": (voice_cfg if voice_mode else chat_cfg).get("max_tokens", chat_cfg.get("max_tokens", 512)),
@@ -219,6 +333,8 @@ async def publish(entry: Dict[str, Any]) -> None:
 
 def clean_reply(text: str) -> str:
     text = strip_name_prefix(strip_thinking(text)).strip()
+    # Small models sometimes echo the transcript format ("[sava] ...") at the start.
+    text = re.sub(r"^\[[^\]\n]{1,40}\]:?\s*", "", text)
     if "```" not in text:
         text = re.sub(r"\n{2,}", "\n", text)  # keep Discord replies compact
     return text
@@ -227,10 +343,6 @@ def clean_reply(text: str) -> str:
 # ---------------------------------------------------------------------------
 # Text chat
 # ---------------------------------------------------------------------------
-def author_label(user: discord.abc.User) -> str:
-    return user.name if getattr(user, "discriminator", "0") in ("0", None) else f"{user.name}#{user.discriminator}"
-
-
 def describe_message(message: discord.Message) -> str:
     """Message text as the model should see it: mentions resolved, attachments noted."""
     text = message.clean_content.strip()
@@ -277,19 +389,20 @@ async def on_message(message: discord.Message):
         return
 
     conversation = get_conversation(message.channel.id, "text")
-    user = author_label(message.author)
-    user_content = f"[{user}]: {content}"
     channel_name = getattr(message.channel, "name", None) or "DM"
 
     async with conversation.lock:
-        conversation.messages.append({"role": "user", "content": user_content})
+        entry = conversation.add_user(message.author, content)
         conversation.latest_id = message.id
+    await asyncio.to_thread(remember_speaker, message.author)
+    conversation.maybe_learn()
     asyncio.create_task(publish({
         "id": str(message.id),
-        "text": user_content,
+        "text": entry["content"],
         "sender": "user",
         "timestamp": message.created_at.isoformat(),
-        "discord_user": user,
+        "discord_user": entry["name"],
+        "user_id": str(message.author.id),
         "channel_name": channel_name,
         "mode": "text",
     }))
@@ -317,11 +430,17 @@ async def on_message(message: discord.Message):
     if not reply:
         return
     sent: Optional[discord.Message] = None
-    for chunk in split_message(reply):
-        sent = await message.channel.send(chunk, allowed_mentions=discord.AllowedMentions(users=True, everyone=False, roles=False))
+    mentions = discord.AllowedMentions(users=True, everyone=False, roles=False, replied_user=False)
+    # In a busy channel, reply to the message so it's clear who Metis is answering.
+    threaded = conversation.distinct_recent_speakers() > 1
+    for i, chunk in enumerate(split_message(link_mentions(reply, conversation))):
+        if i == 0 and threaded:
+            sent = await message.reply(chunk, allowed_mentions=mentions)
+        else:
+            sent = await message.channel.send(chunk, allowed_mentions=mentions)
 
     async with conversation.lock:
-        conversation.messages.append({"role": "assistant", "content": reply})
+        conversation.add_assistant(reply)
     await publish({
         "id": str(sent.id) if sent else f"ai-{message.id}",
         "text": reply,
@@ -438,26 +557,37 @@ class VoiceReceiver:
             timings["transcription"] = time.perf_counter() - t0
             if not text:
                 return
-            username = utt.user.display_name
-            print(f"📝 [{username}] {text}")
-            await self._respond(username, utt.user.id, text, t0, timings)
+            print(f"📝 [{utt.user.display_name}] {text}")
+            await self._respond(utt.user, text, t0, timings)
         except Exception as e:
             import traceback
             print(f"Voice pipeline error: {e}")
             traceback.print_exc()
 
-    async def _respond(self, username: str, user_id: int, text: str, t0: float, timings: Dict[str, float]) -> None:
+    def present_members(self) -> List[str]:
+        """Display names of the people (not bots) currently in the voice channel."""
+        channel = self.voice_client.channel
+        names = []
+        for uid in channel.voice_states:
+            member = channel.guild.get_member(uid)
+            if member and not member.bot:
+                names.append(member.display_name)
+        return names
+
+    async def _respond(self, user: discord.abc.User, text: str, t0: float, timings: Dict[str, float]) -> None:
         conversation = self.conversation
-        user_content = f"[{username}] {text}"
         async with conversation.lock:
-            conversation.messages.append({"role": "user", "content": user_content})
+            entry = conversation.add_user(user, text)
+        await asyncio.to_thread(remember_speaker, user)
+        conversation.maybe_learn()
         channel_label = self.voice_client.channel.name  # the dashboard shows a voice badge
         asyncio.create_task(publish({
-            "id": f"voice-{user_id}-{time.time_ns()}",
-            "text": user_content,
+            "id": f"voice-{user.id}-{time.time_ns()}",
+            "text": entry["content"],
             "sender": "user",
             "timestamp": datetime.now().astimezone().isoformat(),
-            "discord_user": username,
+            "discord_user": entry["name"],
+            "user_id": str(user.id),
             "channel_name": channel_label,
             "mode": "voice",
         }))
@@ -478,7 +608,7 @@ class VoiceReceiver:
             if not reply:
                 return
             async with conversation.lock:
-                conversation.messages.append({"role": "assistant", "content": reply})
+                conversation.add_assistant(reply)
 
         await publish({
             "id": f"voice-ai-{time.time_ns()}",
@@ -523,7 +653,7 @@ class VoiceReceiver:
         pending = ""
         reply = ""
         try:
-            async for delta in stream_reply(chat_payload(conversation, voice_mode=True), stats):
+            async for delta in stream_reply(chat_payload(conversation, True, self.present_members()), stats):
                 reply += delta
                 pending += think.feed(delta)
                 done, pending = pop_sentences(pending)
@@ -619,6 +749,8 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
             receiver.stop()
         return
     vc = guild.voice_client
+    if vc and after.channel == vc.channel and before.channel != vc.channel and not member.bot:
+        (await get_voice_service()).add_names([member.display_name])
     if vc and before.channel == vc.channel and after.channel != vc.channel:
         # voice_states works without the privileged members intent (unlike channel.members).
         if not any(uid != bot.user.id for uid in vc.channel.voice_states):
@@ -633,9 +765,9 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
 # ---------------------------------------------------------------------------
 @bot.command(name="reset")
 async def reset_context(ctx: commands.Context):
-    """Forget this channel's conversation (it's saved to long-term memory first)."""
+    """Start this channel's conversation fresh (Metis learns from it first)."""
     count = get_conversation(ctx.channel.id, "text").reset()
-    await ctx.send(f"🔄 Fresh start! {count} message(s) were saved to memory.")
+    await ctx.send(f"🔄 Fresh start! I'll remember what mattered from the last {count} message(s).")
 
 
 @bot.command(name="status")
@@ -698,6 +830,7 @@ async def join_voice(ctx: commands.Context):
         voice_client = await target.connect(cls=voice_recv.VoiceRecvClient, self_deaf=False)
         receiver = VoiceReceiver(voice_client, ctx.channel)
         receiver.start()
+        (await get_voice_service()).add_names(receiver.present_members())
         voice_receivers[ctx.guild.id] = receiver
         await notice.edit(content=(
             f"🔊 Joined **{target.name}** — just talk, I'm listening.\n"
