@@ -49,6 +49,17 @@ let llama;
 let model;
 let chatWrapper;
 let judgmentGrammar = null;
+const schemaGrammars = new Map(); // JSON schema string -> LlamaJsonSchemaGrammar
+
+/** Grammar that forces output to match a JSON schema (cached per schema). */
+async function grammarForSchema(schema) {
+  const key = JSON.stringify(schema);
+  if (!schemaGrammars.has(key)) {
+    if (schemaGrammars.size > 32) schemaGrammars.clear();
+    schemaGrammars.set(key, await llama.createGrammarForJsonSchema(schema));
+  }
+  return schemaGrammars.get(key);
+}
 
 /**
  * A "lane" owns one context sequence plus a LlamaChat bound to it.
@@ -236,17 +247,28 @@ app.post("/judgment", async (req, res) => {
   }
 });
 
-/** Non-streaming completion — used for utility prompts (tools, queries, memory). */
+/**
+ * Non-streaming completion — used for utility prompts (tools, queries, memory).
+ * Pass `json_schema` to constrain the output to valid JSON matching that schema.
+ */
 app.post("/chat/completion", async (req, res) => {
-  const { messages } = req.body;
+  const { messages, json_schema } = req.body;
   const problem = validateHistory(messages);
   if (problem) return res.status(400).json({ error: problem });
+
+  let grammar;
+  try {
+    grammar = json_schema ? await grammarForSchema(json_schema) : undefined;
+  } catch (error) {
+    return res.status(400).json({ error: `Invalid json_schema: ${error.message}` });
+  }
 
   const controller = abortOnDisconnect(req, res);
   try {
     const result = await auxLane.run((chat) =>
       chat.generateResponse(toChatHistory(messages), {
         ...samplingOptions(req.body),
+        ...(grammar ? { grammar, repeatPenalty: false } : {}),
         signal: controller.signal,
       })
     );
