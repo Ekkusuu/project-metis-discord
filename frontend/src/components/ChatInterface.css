@@ -251,7 +251,7 @@
 
 @keyframes live-pulse {
   50% {
-    box-shadow: 0 0 0 5px rgba(122, 245, 198, 0.04);
+    box-shadow: 0 0 0 5px rgba(168, 230, 207, 0.04);
   }
 }
 

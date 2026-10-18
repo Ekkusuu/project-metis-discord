@@ -4,16 +4,18 @@ import type { RagRetrieval, RagStreamPayload, ToolExecution } from '../api';
 import { useEventSource } from '../hooks/useEventSource';
 import RagPanel from './RagPanel';
 import ToolsPanel from './ToolsPanel';
+import PeoplePanel from './PeoplePanel';
 import ChatContext from './ChatContext';
 import Icon from './Icon';
 import type { IconName } from './Icon';
 import './Sidebar.css';
 
-type Tab = 'rag' | 'tools' | 'context';
+type Tab = 'rag' | 'tools' | 'people' | 'context';
 
 const TABS: Array<{ id: Tab; label: string; icon: IconName }> = [
   { id: 'rag', label: 'Knowledge', icon: 'book' },
   { id: 'tools', label: 'Tools', icon: 'wrench' },
+  { id: 'people', label: 'People', icon: 'users' },
   { id: 'context', label: 'Context', icon: 'message' },
 ];
 
@@ -50,10 +52,11 @@ function Sidebar() {
             role="tab"
             aria-selected={activeTab === tab.id}
             className={`sidebar-tab ${activeTab === tab.id ? 'active' : ''}`}
+            title={tab.label}
             onClick={() => setActiveTab(tab.id)}
           >
             <Icon name={tab.icon} size={15} />
-            {tab.label}
+            <span className="sidebar-tab-label">{tab.label}</span>
           </button>
         ))}
       </div>
@@ -61,6 +64,7 @@ function Sidebar() {
       <div className="sidebar-content">
         {activeTab === 'rag' && <RagPanel retrieval={retrieval} />}
         {activeTab === 'tools' && <ToolsPanel tools={tools} />}
+        {activeTab === 'people' && <PeoplePanel />}
         {activeTab === 'context' && <ChatContext />}
       </div>
     </aside>

@@ -86,6 +86,31 @@ const paths = {
       <path d="M16 18v4" />
     </>
   ),
+  users: (
+    <>
+      <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
+      <circle cx="9" cy="7" r="4" />
+      <path d="M22 21v-2a4 4 0 0 0-3-3.87" />
+      <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+    </>
+  ),
+  search: (
+    <>
+      <circle cx="11" cy="11" r="8" />
+      <path d="m21 21-4.3-4.3" />
+    </>
+  ),
+  sparkles: (
+    <>
+      <path d="M9.94 14.06 8.5 18l-1.44-3.94L3 12.5l4.06-1.56L8.5 7l1.44 3.94L14 12.5z" />
+      <path d="M18 3v4" />
+      <path d="M20 5h-4" />
+      <path d="M19 15v4" />
+      <path d="M21 17h-4" />
+    </>
+  ),
+  chevronDown: <path d="m6 9 6 6 6-6" />,
+  chevronUp: <path d="m18 15-6-6-6 6" />,
   spinner: <path d="M21 12a9 9 0 1 1-6.22-8.56" />,
 } as const;
 

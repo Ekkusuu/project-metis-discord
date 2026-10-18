@@ -23,6 +23,7 @@ export interface BackendStatus {
   rag_enabled: boolean;
   tools_enabled: boolean;
   voice_channels: string[];
+  people_known?: number;
 }
 
 export interface RagStats {
@@ -79,6 +80,22 @@ export interface ContextMessage {
   timestamp?: string;
 }
 
+export interface Fact {
+  id: string;
+  text: string;
+  added: string;
+}
+
+export interface Person {
+  id: string;
+  name: string;
+  aliases: string[];
+  first_seen: string;
+  last_seen: string;
+  message_count: number;
+  facts: Fact[];
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_URL}${path}`, init);
   if (!response.ok) {
@@ -106,3 +123,21 @@ export const reindexRag = (clearExisting: boolean) =>
 export const clearRag = () =>
   request<{ status: string; deleted_count: number }>('/rag/clear', { method: 'POST' });
 export const getChatContext = () => request<{ messages: ContextMessage[] }>('/chat/context');
+
+export const getPeople = () => request<{ people: Person[] }>('/memory/people');
+export const getNotes = () => request<{ notes: Fact[] }>('/memory/notes');
+export const deletePersonFact = (personId: string, factId: string) =>
+  request<{ status: string }>(
+    `/memory/people/${encodeURIComponent(personId)}/facts/${encodeURIComponent(factId)}`,
+    { method: 'DELETE' },
+  );
+export const forgetPerson = (personId: string) =>
+  request<{ status: string }>(`/memory/people/${encodeURIComponent(personId)}`, {
+    method: 'DELETE',
+  });
+export const deleteNote = (factId: string) =>
+  request<{ status: string }>(`/memory/notes/${encodeURIComponent(factId)}`, {
+    method: 'DELETE',
+  });
+export const learnNow = () =>
+  request<{ status: string; learned: number }>('/memory/learn', { method: 'POST' });

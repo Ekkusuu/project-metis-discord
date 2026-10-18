@@ -1,0 +1,228 @@
+.people-ghost-button {
+  padding: 5px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  font-weight: 500;
+}
+
+.people-ghost-button:hover:not(:disabled) {
+  border-color: var(--mint-line);
+  background: var(--surface-2);
+  color: var(--mint);
+}
+
+.people-ghost-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.people-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  font-size: 0.8125rem;
+  overflow-wrap: anywhere;
+}
+
+.people-notice .icon {
+  margin-top: 2px;
+}
+
+.people-notice.success {
+  background: var(--mint-soft);
+  color: var(--mint);
+}
+
+.people-notice.error {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.people-search {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 0 var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
+  color: var(--text-faint);
+  transition: border-color 0.15s var(--ease);
+}
+
+.people-search:focus-within {
+  border-color: var(--mint-line);
+  color: var(--mint);
+}
+
+.people-search input {
+  flex: 1;
+  min-width: 0;
+  padding: 9px 0;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 0.8125rem;
+}
+
+.people-search input:focus-visible {
+  outline: none;
+}
+
+.people-search input::placeholder {
+  color: var(--text-faint);
+}
+
+.people-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.people-card {
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
+}
+
+.people-card-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.people-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--mint-soft);
+  color: var(--mint);
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+
+.people-card-id {
+  flex: 1;
+  min-width: 0;
+}
+
+.people-name {
+  overflow: hidden;
+  font-size: 0.875rem;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.people-aliases {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  overflow-wrap: anywhere;
+}
+
+.people-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 var(--space-3);
+  color: var(--text-faint);
+  font-size: 0.6875rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.people-card-actions {
+  display: flex;
+  flex-shrink: 0;
+  gap: 2px;
+}
+
+.people-icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-faint);
+}
+
+.people-icon-button:hover {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.people-icon-button[aria-expanded]:hover {
+  background: var(--surface-3);
+  color: var(--text);
+}
+
+.people-facts {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: var(--space-3) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.people-card-head + .people-facts,
+.people-card > .people-facts:first-child {
+  margin-top: 0;
+}
+
+.people-fact {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: 4px 4px 4px 10px;
+  border-left: 2px solid var(--border-strong);
+  color: var(--text-muted);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+}
+
+.people-fact:hover {
+  border-left-color: var(--mint-line);
+  color: var(--text);
+}
+
+.people-fact-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.people-nothing {
+  margin-top: var(--space-3);
+  color: var(--text-faint);
+  font-size: 0.75rem;
+  font-style: italic;
+}
+
+.people-link-button {
+  margin-top: var(--space-2);
+  padding: 2px 0;
+  border: none;
+  background: transparent;
+  color: var(--lavender);
+  font-size: 0.75rem;
+  font-weight: 500;
+}
+
+.people-link-button:hover {
+  color: var(--text);
+}

@@ -10,10 +10,10 @@
   --text-muted: #8b9b93;
   --text-faint: #5d6b64;
 
-  --mint: #7af5c6;
-  --mint-strong: #3fe0a2;
-  --mint-soft: rgba(122, 245, 198, 0.1);
-  --mint-line: rgba(122, 245, 198, 0.28);
+  --mint: #a8e6cf;
+  --mint-strong: #8dd3b5;
+  --mint-soft: rgba(168, 230, 207, 0.1);
+  --mint-line: rgba(168, 230, 207, 0.28);
   --on-mint: #02140c;
   --lavender: #b8a9ff;
   --lavender-soft: rgba(184, 169, 255, 0.12);
@@ -26,7 +26,7 @@
   --accent: var(--mint);
   --accent-strong: var(--mint-strong);
   --success: var(--mint);
-  --user-bubble: #0a1914;
+  --user-bubble: #0b1512;
   --user-border: var(--mint-line);
   --ai-bubble: var(--surface-2);
 
@@ -98,7 +98,7 @@ button {
 }
 
 ::selection {
-  background: rgba(122, 245, 198, 0.3);
+  background: rgba(168, 230, 207, 0.3);
   color: var(--text);
 }
 
