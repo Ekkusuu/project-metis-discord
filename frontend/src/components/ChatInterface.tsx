@@ -53,7 +53,7 @@ const MessageItem = memo(function MessageItem({ message }: { message: DiscordMes
 
   return (
     <div className={`message ${isAi ? 'ai' : 'user'}`}>
-      {isAi && <img className="message-avatar" src="/metis.svg" alt="" />}
+      {isAi && <img className="message-avatar" src="/metis-avatar.png" alt="" />}
       <div className="message-bubble">
         <div className="message-meta">
           <span className="message-author">{author}</span>
@@ -166,7 +166,7 @@ function ChatInterface() {
   return (
     <main className="chat">
       <header className="chat-header">
-        <img className="chat-logo" src="/metis.svg" alt="" />
+        <img className="chat-logo" src="/metis-avatar.png" alt="" />
         <div className="chat-title">
           <h1>Metis</h1>
           <StatusBar />
