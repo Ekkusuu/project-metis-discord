@@ -52,10 +52,10 @@ chat:
     user_prompt: >
       Previous messages:
       {context}
-      
+
       Latest message:
       {last_message}
-      
+
       Should Metis respond?
 
 # ============================================================================
@@ -80,7 +80,7 @@ voice:
   # If true, discard user speech that occurs while the AI is talking (prevents responding to old messages)
   # If false, queue user speech and process after AI finishes speaking
   discard_while_speaking: true
-  
+
   # Voice Chat Judgment Settings
   judgment:
     enabled: true
@@ -89,16 +89,22 @@ voice:
     user_prompt: >
       Previous voice messages:
       {context}
-      
+
       Latest voice input:
       {last_message}
-      
+
       Should Metis respond? Reply with "positive" or "negative".
 
 
+# ============================================================================
+# Memory (continuous learning about people)
+# ============================================================================
 memory:
-  temp_memory_token_limit: 1000  # Tokens before auto-summarization to long_term 
-  long_term_memory_token_limit: 1000  # Token limit per long-term memory file before creating a new one 
+  # Learn from the conversation every N user messages (also on >reset, when old
+  # messages are dropped, and on shutdown). Facts are stored per Discord user in
+  # memory/people.json and mirrored to memory/long_term/people/ for the knowledge base.
+  learn_every_messages: 6
+  max_facts_per_person: 80
 
 rag:
   enabled: true
@@ -107,21 +113,21 @@ rag:
     - "memory\\long_term"
   # Optional: add more folders as needed
   collection_name: "metis_knowledge"
-  chunk_size: 750  # Chunk size for RAG splitting 
-  chunk_overlap: 75  # Overlap between chunks when splitting 
+  chunk_size: 750  # Chunk size for RAG splitting
+  chunk_overlap: 75  # Overlap between chunks when splitting
   top_k: 6  # Number of relevant chunks to retrieve from vector DB
   max_distance: 1.5  # Maximum distance threshold - contexts farther than this are considered irrelevant (-1 = no threshold)
   embedding_model: "rag-models/embeddinggemma-300m"  # Local folder path relative to project root
   persist_directory: ".chromadb"
   query_context_messages: 3  # Number of previous messages to use for contextual query generation (0 = use last message only)
-  
+
   # Reranker settings
   use_reranker: true  # Enable/disable reranking
   reranker_model: "rag-models/bge-reranker-base"  # Local folder path to reranker model
   reranker_top_k: 2  # Number of top chunks to keep after reranking (must be <= top_k)
   reranker_min_score: 0.1  # Minimum rerank score threshold - contexts with lower scores are filtered out (-1 = no threshold)
   reranker_device: "cpu"  # cpu | cuda | auto (cpu keeps VRAM free for the LLM)
-  
+
   # Query generation (used by knowledge_search in text chat, and by the plain RAG fallback)
   query_generation_count: 3
   query_generation_system_prompt: "@rag.query_generation_system"
@@ -133,27 +139,29 @@ rag:
 tools:
   # Enable/disable the tool system (if disabled, falls back to legacy RAG)
   enabled: true
-  
+
   # Number of previous messages to use for tool selection context
   context_messages: 3
-  
+
   # Maximum tools that can be selected per request (voice chat always uses 1)
   max_tools: 3
-  
+
   # Individual tool settings
   knowledge_search:
     enabled: true
     # Expand the selector's query into rag.query_generation_count extra queries with the LLM
     # (better recall, one extra LLM call). Always skipped in voice chat for latency.
     expand_queries: true
-  
+
   # Web search using DuckDuckGo (no server or Docker needed)
   web_search:
     enabled: true
+    read_top_result: true          # also read the best result's page (text chat)
+    read_top_result_voice: false   # skipped in voice chat for latency
+    top_result_chars: 2500
 
-# ============================================================================
-# Memory System Settings
-# ============================================================================
-prompts:
-  memory_summarization_system: "@memory.summarization_system"
-  memory_summarization_user: "@memory.summarization_user"
+  # Reads web pages (links people share are opened automatically). Private/local
+  # addresses are always refused.
+  fetch_webpage:
+    enabled: true
+    max_chars: 4000

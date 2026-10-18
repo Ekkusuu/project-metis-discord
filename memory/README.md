@@ -3,30 +3,31 @@
 This folder is Metis' memory. Its contents are git-ignored (they're about real people);
 only this README and `.gitkeep` are tracked.
 
-| File | What it is |
+| Path | What it is |
 |---|---|
-| `chat_history.jsonl` | Append-only log of the current session's Discord messages. On the next startup it is moved into `temp_memory.txt` and deleted. |
-| `temp_memory.txt` | Raw conversation that has left the context window (or was `>reset`), waiting to be summarized. |
-| `long_term/memory_*.md` | Facts the model extracted from temp memory, one bullet per fact, prefixed with `user personal information:` so retrieval can target them. |
+| `people.json` | One profile per Discord user id: current name, aliases, first/last seen, message count and learned facts. Also general notes. |
+| `long_term/people/*.md` | The same profiles as Markdown, indexed by the knowledge base so `knowledge_search` finds facts about people who aren't in the conversation. |
+| `long_term/learned_notes.md` | General things Metis learned that aren't about one person. |
+| `long_term/memory_*.md` | Summaries written by the previous memory system (still indexed). |
+| `chat_history.jsonl` | Transcript of the current session; moved to `sessions/` on the next start. |
+| `sessions/` | Past session transcripts, plus legacy files that were migrated once. |
 
-## Flow
+## How learning works
 
 ```
-Discord conversation (per channel / voice session, kept by the bot)
-        │  history outgrows the context window → oldest ~30% is cut once
-        │  >reset → whole conversation
-        ▼
-temp_memory.txt ──(≥ memory.temp_memory_token_limit tokens)──► LLM fact extraction
-                                                                    │
-                                   long_term/memory_*.md ◄──────────┘
-                                   (new file once memory.long_term_memory_token_limit is reached)
-                                        │  indexed immediately if the folder is in rag.folders_to_index
-                                        ▼
-                                knowledge_search tool ─► injected into future replies
+Discord message (text or voice)
+   └─ attributed to the speaker's Discord user id ─► people.json (names, last seen)
+every 6 user messages / >reset / old messages dropped / shutdown
+   └─ model reads the new part of the conversation and writes "Name | fact" lines
+        └─ only names that actually spoke are accepted, duplicates are skipped
+             └─ people.json + long_term/people/<name>-<id>.md (re-indexed immediately)
+next reply
+   └─ profiles of the people in the conversation are added to the prompt
 ```
 
-- All memory writes and summaries run on a single background worker, so replies never wait for them.
-- Summarization prompts: `memory.summarization_system` / `memory.summarization_user` in `system_prompts.yaml`.
-- Force a summary now: `POST http://localhost:8000/memory/summarize`. Check status: `GET /memory/status`.
-- To make Metis forget something, edit or delete the relevant `long_term/*.md` file and run
-  `POST /rag/reindex` (or restart).
+- Settings: `memory.learn_every_messages`, `memory.max_facts_per_person` in `config.yaml`.
+- Review or delete facts in the dashboard's **People** tab, or via the API:
+  `GET /memory/people`, `DELETE /memory/people/{id}/facts/{fact_id}`, `DELETE /memory/people/{id}`.
+- `POST /memory/learn` learns from everything said so far without waiting.
+- People only known by name (e.g. from old transcripts) get a temporary profile that is merged
+  into their real one the first time they talk to Metis on Discord.

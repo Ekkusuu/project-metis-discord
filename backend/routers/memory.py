@@ -1,44 +1,80 @@
 """
-Memory management endpoints.
+Memory endpoints: who Metis knows and what she has learned.
 """
 import asyncio
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
 
-from backend.config import get_config
-from backend.memory_manager import (
-    get_temp_memory_content,
-    get_temp_memory_token_count,
-    summarize_and_archive_temp_memory,
-)
+from backend.people import get_people
 
 router = APIRouter(prefix="/memory", tags=["memory"])
 
 
-class MemoryStatus(BaseModel):
-    temp_memory_tokens: int
-    temp_memory_content_preview: str
-    threshold: int
+@router.get("/people")
+async def list_people():
+    return {"people": get_people().all()}
 
 
-@router.get("/status", response_model=MemoryStatus)
-async def get_memory_status():
-    threshold = int(get_config().get("memory", {}).get("temp_memory_token_limit", 1000))
-    content = get_temp_memory_content()
-    tokens = await asyncio.to_thread(get_temp_memory_token_count)
-    preview = content[:500] + "..." if len(content) > 500 else content
-    return MemoryStatus(temp_memory_tokens=tokens, temp_memory_content_preview=preview, threshold=threshold)
+@router.get("/people/{person_id}")
+async def get_person(person_id: str):
+    person = get_people().get(person_id)
+    if not person:
+        raise HTTPException(status_code=404, detail="Unknown person")
+    return person
 
 
-@router.post("/summarize")
-async def trigger_summarization():
-    """Summarize temp memory into long-term memory now, regardless of the token limit."""
-    tokens = await asyncio.to_thread(get_temp_memory_token_count)
-    if tokens == 0:
-        return {"status": "skipped", "message": "Temp memory is empty, nothing to summarize"}
-    try:
-        written = await asyncio.to_thread(summarize_and_archive_temp_memory)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to summarize: {e}")
-    return {"status": "success", "message": f"Summarized {tokens} tokens into {written}"}
+@router.delete("/people/{person_id}/facts/{fact_id}")
+async def delete_fact(person_id: str, fact_id: str):
+    people = get_people()
+    if not people.remove_fact(person_id, fact_id):
+        raise HTTPException(status_code=404, detail="Fact not found")
+    await asyncio.to_thread(people.export_markdown, [person_id])
+    return {"status": "ok"}
+
+
+@router.delete("/people/{person_id}")
+async def forget_person(person_id: str):
+    if not get_people().forget(person_id):
+        raise HTTPException(status_code=404, detail="Unknown person")
+    return {"status": "ok"}
+
+
+@router.get("/notes")
+async def list_notes():
+    return {"notes": get_people().notes}
+
+
+@router.delete("/notes/{note_id}")
+async def delete_note(note_id: str):
+    people = get_people()
+    if not people.remove_note(note_id):
+        raise HTTPException(status_code=404, detail="Note not found")
+    await asyncio.to_thread(people.export_markdown, [])
+    return {"status": "ok"}
+
+
+@router.post("/learn")
+async def learn_now():
+    """Learn from everything said since the last learning pass, and wait for it to finish."""
+    from backend import discord_bot
+
+    futures = await asyncio.to_thread(discord_bot.flush_learning)
+    learned = 0
+    for future in futures:
+        result = await asyncio.wrap_future(future)
+        if result:
+            learned += result["facts"] + result["notes"]
+    return {"status": "ok", "learned": learned}
+
+
+@router.get("/stats")
+async def memory_stats():
+    from backend.memory_manager import stats
+
+    people = get_people()
+    return {
+        **stats,
+        "people_known": len(people.people),
+        "facts_total": sum(len(p["facts"]) for p in people.people.values()),
+        "notes_total": len(people.notes),
+    }

@@ -1,25 +1,29 @@
 """
-Append-only log of the current session's Discord conversation (memory/chat_history.jsonl).
+Append-only transcript of the current session's Discord conversation
+(memory/chat_history.jsonl). On startup the previous session's transcript is
+moved to memory/sessions/ — learning already happened while it was live.
 
-On the next startup the previous session's log is moved into temp memory so
-nothing said to Metis is lost between restarts.
+A legacy memory/chat_history.json (from before continuous learning existed)
+is learned from once and then moved to memory/sessions/ for safekeeping.
 """
 from __future__ import annotations
 
 import json
 import threading
-from typing import Any, Dict, List
+from datetime import datetime
+from typing import Any, Dict, List, Optional
 
 from backend.config import MEMORY_DIR
 
 CHAT_LOG_FILE = MEMORY_DIR / "chat_history.jsonl"
+SESSIONS_DIR = MEMORY_DIR / "sessions"
 LEGACY_CHAT_HISTORY_FILE = MEMORY_DIR / "chat_history.json"
 
 _lock = threading.Lock()
 
 
 def append(entry: Dict[str, Any]) -> None:
-    """Append one message (thread-safe, O(1) — the old JSON file was rewritten on every message)."""
+    """Append one message (thread-safe, O(1))."""
     line = json.dumps(entry, ensure_ascii=False)
     with _lock:
         MEMORY_DIR.mkdir(exist_ok=True)
@@ -27,43 +31,42 @@ def append(entry: Dict[str, Any]) -> None:
             f.write(line + "\n")
 
 
-def _read_entries() -> List[Dict[str, Any]]:
-    entries: List[Dict[str, Any]] = []
-    if LEGACY_CHAT_HISTORY_FILE.exists():
-        try:
-            data = json.loads(LEGACY_CHAT_HISTORY_FILE.read_text(encoding="utf-8"))
-            entries.extend(data.get("messages", []))
-        except Exception as e:
-            print(f"Warning: could not read {LEGACY_CHAT_HISTORY_FILE.name}: {e}")
-    if CHAT_LOG_FILE.exists():
-        for line in CHAT_LOG_FILE.read_text(encoding="utf-8").splitlines():
-            try:
-                entries.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
-    return entries
+def _legacy_messages() -> List[Dict[str, Any]]:
+    try:
+        data = json.loads(LEGACY_CHAT_HISTORY_FILE.read_text(encoding="utf-8"))
+    except Exception as e:
+        print(f"Warning: could not read {LEGACY_CHAT_HISTORY_FILE.name}: {e}")
+        return []
+    messages = []
+    for entry in data.get("messages", []):
+        text = (entry.get("text") or "").strip()
+        if not text or text == "Hello! How can I assist you today?":
+            continue
+        role = "user" if entry.get("sender") == "user" else "assistant"
+        if role == "user" and not text.startswith("["):
+            text = f"[{entry.get('discord_user') or 'User'}]: {text}"
+        messages.append({"role": role, "content": text})
+    return messages
 
 
-def _to_memory_message(entry: Dict[str, Any]) -> Dict[str, str] | None:
-    text = (entry.get("text") or entry.get("content") or "").strip()
-    if not text:
-        return None
-    role = entry.get("role") or ("user" if entry.get("sender") == "user" else "assistant")
-    if role == "user" and not text.startswith("["):
-        text = f"[{entry.get('discord_user') or entry.get('username') or 'User'}]: {text}"
-    return {"role": role, "content": text}
-
-
-def migrate_previous_session() -> int:
-    """Move the previous session's log into temp memory. Returns the number of messages moved."""
-    from backend.memory_manager import append_to_temp_memory
-
+def rotate_previous_session() -> None:
+    """Move last session's transcript to memory/sessions/."""
     with _lock:
-        entries = _read_entries()
-        messages = [m for m in (_to_memory_message(e) for e in entries) if m]
-        if messages:
-            # Summarization (an LLM call) is deferred; the LLM service may not be up yet.
-            append_to_temp_memory(messages, summarize=False)
-        CHAT_LOG_FILE.unlink(missing_ok=True)
-        LEGACY_CHAT_HISTORY_FILE.unlink(missing_ok=True)
+        if CHAT_LOG_FILE.exists() and CHAT_LOG_FILE.stat().st_size > 0:
+            SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.fromtimestamp(CHAT_LOG_FILE.stat().st_mtime).strftime("%Y%m%d_%H%M%S")
+            CHAT_LOG_FILE.replace(SESSIONS_DIR / f"session_{stamp}.jsonl")
+
+
+def learn_from_legacy_history() -> Optional[int]:
+    """Learn once from a pre-learning chat_history.json (needs the LLM). Returns messages queued."""
+    with _lock:
+        if not LEGACY_CHAT_HISTORY_FILE.exists():
+            return None
+        messages = _legacy_messages()
+        SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+        LEGACY_CHAT_HISTORY_FILE.replace(SESSIONS_DIR / "legacy_chat_history.json")
+    if messages:
+        from backend.memory_manager import learn_from
+        learn_from(messages)
     return len(messages)

@@ -249,34 +249,8 @@ judgment:
 
 
 # ============================================================================
-# Memory & RAG Prompts
+# Knowledge-base (RAG) Prompts
 # ============================================================================
-memory:
-  summarization_system: >
-    You are a memory extraction assistant. Extract ONLY explicitly stated facts about the USER from conversations.
-    
-    CRITICAL RULES:
-    - Only include information the user DIRECTLY stated
-    - DO NOT infer, assume, or elaborate beyond what was said
-    - DO NOT add interpretations or explanations
-    - Skip any section that has no explicit information by writing nothing
-    - Be extremely literal and conservative
-    - Always use the keywords USER and the users names in brakets [username].
-    - Aleways use the users names.
-    Format as brief bullet points under relevant headings. Only create headings if you have actual facts.
-
-  summarization_user: >
-    Extract ONLY the explicitly stated facts about the user from this conversation. Do not infer or elaborate:
-    
-    ```
-    {content}
-    ```
-    
-    List only what the user directly said about themselves, personal information. Be brief and literal and use the keywords USER.
-    Use bullet points for each fact, for example: 
-    - User ekkusu_x likes cats.
-    - User jeffrey23 struggles with anxiety.
-
 rag:
   query_generation_system: >
     You are a query optimization assistant. Generate a concise search query based on conversation context.

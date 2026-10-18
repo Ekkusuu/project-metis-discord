@@ -32,15 +32,17 @@ def _banner(title: str) -> None:
 async def _startup() -> None:
     config = get_config()
 
-    from backend.chat_log import migrate_previous_session
-    moved = await asyncio.to_thread(migrate_previous_session)
-    if moved:
-        print(f"Moved {moved} message(s) from the previous session into temp memory")
+    from backend.chat_log import learn_from_legacy_history, rotate_previous_session
+    await asyncio.to_thread(rotate_previous_session)
 
     _banner("Checking LLM service...")
     from backend.llama_engine import get_llm_service_url, get_model
     if await asyncio.to_thread(get_model):
         print(f"✓ LLM service ready at {get_llm_service_url()}")
+        # One-time: learn from conversation stored by the old memory system.
+        from backend.memory_manager import migrate_legacy_memory
+        await asyncio.to_thread(migrate_legacy_memory)
+        await asyncio.to_thread(learn_from_legacy_history)
     else:
         print(f"⚠ LLM service not reachable at {get_llm_service_url()}")
         print("  Start it with: cd backend/llm_service && npm install && npm start")
@@ -56,9 +58,8 @@ async def _startup() -> None:
         except Exception as e:
             print(f"✗ RAG indexing failed: {e}")
 
-    # Summarize leftovers from last session in the background if they're over the limit.
-    from backend.memory_manager import _safe, _worker, check_and_summarize_temp_memory
-    _worker.submit(_safe, check_and_summarize_temp_memory)
+    from backend.people import get_people
+    print(f"✓ Knows {len(get_people().people)} people")
 
     from backend import discord_bot
     discord_bot.start_in_background()
@@ -69,6 +70,11 @@ async def lifespan(app: FastAPI):
     await _startup()
     yield
     from backend import discord_bot
+    # Learn from whatever was said since the last pass before going down.
+    pending = await asyncio.to_thread(discord_bot.flush_learning)
+    if pending:
+        print("Learning from the end of the conversation before shutting down...")
+        await asyncio.wait([asyncio.wrap_future(f) for f in pending], timeout=90)
     discord_bot.stop()
 
 
@@ -112,6 +118,7 @@ async def status():
         _llm_status["checked"] = time.monotonic()
 
     from backend import discord_bot
+    from backend.people import get_people
     bot = discord_bot.status()
     return {
         "llm_ready": _llm_status["ready"],
@@ -121,6 +128,7 @@ async def status():
         "rag_enabled": bool(config.get("rag", {}).get("enabled", False)),
         "tools_enabled": bool(config.get("tools", {}).get("enabled", False)),
         "voice_channels": bot["voice_channels"],
+        "people_known": len(get_people().people),
     }
 
 
