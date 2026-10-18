@@ -8,7 +8,7 @@ import json
 
 import pytest
 
-from backend.tool_manager import ToolResult, format_tool_results_for_context, parse_tool_calls
+from backend.tool_manager import ToolResult, format_tool_results_for_context
 
 VALID_TOOLS = ["knowledge_search", "web_search"]
 FALLBACK = "fallback query"
@@ -16,96 +16,6 @@ FALLBACK = "fallback query"
 
 def _parse(response: str, valid_tools=None):
     return parse_tool_calls(response, FALLBACK, valid_tools or VALID_TOOLS)
-
-
-def test_parse_clean_json_array():
-    response = '[{"tool": "knowledge_search", "arguments": {"query": "favorite games"}}]'
-    calls = _parse(response)
-    assert len(calls) == 1
-    assert calls[0].tool_name == "knowledge_search"
-    assert calls[0].arguments == {"query": "favorite games"}
-    assert calls[0].raw_output == response
-
-
-def test_parse_single_object():
-    calls = _parse('{"tool": "web_search", "arguments": {"query": "weather berlin"}}')
-    assert [c.tool_name for c in calls] == ["web_search"]
-    assert calls[0].arguments == {"query": "weather berlin"}
-
-
-def test_parse_markdown_fenced_json():
-    response = '```json\n[{"tool": "knowledge_search", "arguments": {"query": "hello world"}}]\n```'
-    calls = _parse(response)
-    assert len(calls) == 1
-    assert calls[0].tool_name == "knowledge_search"
-
-
-def test_parse_json_preceded_by_prose():
-    response = 'Sure, here is my pick: [{"tool": "knowledge_search", "arguments": {"query": "dark souls lore"}}]'
-    calls = _parse(response)
-    assert [c.tool_name for c in calls] == ["knowledge_search"]
-    assert calls[0].arguments == {"query": "dark souls lore"}
-
-
-def test_parse_empty_array():
-    assert _parse("[]") == []
-
-
-def test_parse_truncated_json_recovers_tool_name_with_fallback_query():
-    response = '[{"tool": "knowledge_search", "arguments": {"query": "sava fav'
-    calls = _parse(response)
-    assert [c.tool_name for c in calls] == ["knowledge_search"]
-    assert calls[0].arguments == {"query": FALLBACK}
-
-
-def test_parse_truncated_json_recovers_query_when_present():
-    response = '[{"tool": "knowledge_search", "query": "dark souls lore", "arguments": {"qu'
-    calls = _parse(response)
-    assert [c.tool_name for c in calls] == ["knowledge_search"]
-    assert calls[0].arguments == {"query": "dark souls lore"}
-
-
-def test_parse_unknown_tool_is_filtered_out():
-    response = '[{"tool": "delete_everything", "arguments": {"query": "all the things"}}]'
-    assert _parse(response) == []
-
-
-def test_parse_duplicate_calls_are_deduplicated():
-    response = (
-        '[{"tool": "knowledge_search", "arguments": {"query": "same query"}},'
-        ' {"tool": "knowledge_search", "arguments": {"query": "same query"}}]'
-    )
-    calls = _parse(response)
-    assert len(calls) == 1
-
-
-def test_parse_keeps_same_tool_with_different_arguments():
-    response = (
-        '[{"tool": "knowledge_search", "arguments": {"query": "first topic"}},'
-        ' {"tool": "knowledge_search", "arguments": {"query": "second topic"}}]'
-    )
-    calls = _parse(response)
-    assert [c.arguments["query"] for c in calls] == ["first topic", "second topic"]
-
-
-def test_parse_missing_query_is_replaced_with_fallback():
-    calls = _parse('[{"tool": "knowledge_search", "arguments": {}}]')
-    assert calls[0].arguments == {"query": FALLBACK}
-
-
-def test_parse_blank_query_is_replaced_with_fallback():
-    calls = _parse('[{"tool": "web_search", "arguments": {"query": "   "}}]')
-    assert calls[0].arguments == {"query": FALLBACK}
-
-
-def test_parse_non_dict_arguments_become_fallback_query():
-    calls = _parse('[{"tool": "knowledge_search", "arguments": "not a dict"}]')
-    assert calls[0].arguments == {"query": FALLBACK}
-
-
-def test_parse_accepts_params_alias():
-    calls = _parse('[{"tool": "knowledge_search", "params": {"query": "alias works"}}]')
-    assert calls[0].arguments == {"query": "alias works"}
 
 
 def test_format_tool_results_string_result():
@@ -137,3 +47,50 @@ def test_format_tool_results_joins_multiple_and_skips_empty():
 
 def test_format_tool_results_empty_list():
     assert format_tool_results_for_context([]) == ""
+
+
+# --- select_tools (model calls mocked) -------------------------------------------------------
+@pytest.fixture
+def fake_model(monkeypatch):
+    import backend.tool_manager as tm
+
+    calls = {"decide": [], "query": []}
+    state = {"choice": "none", "query": "f1 race winner"}
+
+    def fake_json(messages, schema, *args, **kwargs):
+        calls["decide"].append(schema)
+        return state["choice"]
+
+    def fake_chat(messages, *args, **kwargs):
+        calls["query"].append(messages)
+        return state["query"]
+
+    monkeypatch.setattr(tm, "json_completion", fake_json)
+    monkeypatch.setattr(tm, "chat_completion", fake_chat)
+    return state, calls
+
+
+async def test_small_talk_runs_only_knowledge_search(fake_model):
+    from backend.tool_manager import select_tools
+
+    state, calls = fake_model
+    result = await select_tools([], "[Sava]: lol nice", 2)
+    assert [(c.tool_name, c.arguments) for c in result] == [("knowledge_search", {"query": "lol nice"})]
+    assert calls["decide"][0] == {"enum": ["none", "web_search"]}
+    assert calls["query"] == []
+
+
+async def test_web_search_choice_gets_a_generated_query(fake_model):
+    from backend.tool_manager import select_tools
+
+    state, _ = fake_model
+    state["choice"] = "web_search"
+    result = await select_tools([], "[Sava]: who won the f1 race yesterday?", 2)
+    assert ("web_search", {"query": "f1 race winner"}) in [(c.tool_name, c.arguments) for c in result]
+
+
+async def test_links_are_always_fetched(fake_model):
+    from backend.tool_manager import select_tools
+
+    result = await select_tools([], "[Sava]: summarize https://example.com/post please", 2)
+    assert ("fetch_webpage", {"url": "https://example.com/post"}) in [(c.tool_name, c.arguments) for c in result]

@@ -212,7 +212,8 @@ def people_context(req: ChatRequest) -> str:
     if profiles:
         parts.append(
             "What you remember about the people in this conversation (use it naturally, like a friend would; "
-            "don't recite it):\n" + profiles
+            "don't recite it). These are your friends on Discord, not celebrities or historical figures with the "
+            "same name: when asked about them, use only this, and say so if you don't know something:\n" + profiles
         )
     return "\n\n".join(parts)
 

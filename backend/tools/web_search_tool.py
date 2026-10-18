@@ -24,7 +24,7 @@ class WebSearchTool(BaseTool):
     def definition(self) -> ToolDefinition:
         return ToolDefinition(
             name="web_search",
-            description="Search the web for current information. Use this for recent events, news, facts not in the knowledge base, or when the user asks about something that requires up-to-date information from the internet.",
+            description="current events, news, sports results, weather, prices, product releases, or facts that change over time",
             parameters=[
                 ToolParameter(
                     name="query",

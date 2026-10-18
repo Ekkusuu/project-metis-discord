@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from backend.learning import _clean_fact, _speakers, parse_facts, parse_legacy_transcript
+from backend.learning import _clean_fact, _speakers, extract_facts, is_grounded, parse_legacy_transcript, person_view
 from backend.people import PeopleStore, is_duplicate
 from backend.tools.web_page_tool import UnsafeURLError, _check_public, find_urls
 
@@ -82,20 +82,38 @@ def test_is_duplicate():
     assert not is_duplicate("has a dog", ["has a cat named Pixel"])
 
 
-def test_parse_facts_assigns_lines_to_speakers():
-    speakers = {"Sava": "1", "Ekkusu (ekk)": "2"}
-    response = "\n".join([
-        "Sava | works as a nurse",
-        "- Ekkusu | is learning Japanese",  # prefix match for a disambiguated label
-        "[Sava] | Sava has a cat named Pixel",
-        "Stranger | should be dropped",
-        "NOTE | movie night on Friday",
-        "random line without a pipe",
-        "NONE",
-    ])
-    facts, notes = parse_facts(response, speakers)
-    assert facts == {"Sava": ["works as a nurse", "has a cat named Pixel"], "Ekkusu (ekk)": ["is learning Japanese"]}
-    assert notes == ["movie night on Friday"]
+CONVO = [
+    {"role": "user", "content": "[Sava]: night shifts as a nurse are brutal, at least Pixel my cat was waiting", "user_id": 1, "name": "Sava"},
+    {"role": "user", "content": "[Ekkusu]: pixel is the best cat lol. i hate horror games btw", "user_id": 2, "name": "Ekkusu"},
+    {"role": "assistant", "content": "Haha noted!"},
+    {"role": "user", "content": "[Sava]: also i'm moving to Berlin next month", "user_id": 1, "name": "Sava"},
+]
+
+
+def test_person_view_shows_only_their_messages_with_context():
+    view, own = person_view(CONVO, "Sava")
+    assert view.splitlines() == [
+        "Sava: night shifts as a nurse are brutal, at least Pixel my cat was waiting",
+        "(context) Metis: Haha noted!",
+        "Sava: also i'm moving to Berlin next month",
+    ]
+    assert "horror" not in own
+
+
+def test_is_grounded_rejects_invented_and_misattributed_facts():
+    _, own = person_view(CONVO, "Sava")
+    assert is_grounded("works as a nurse", own)
+    assert is_grounded("is moving to Berlin next month", own)
+    assert not is_grounded("works as a teacher", own)        # invented
+    assert not is_grounded("dislikes horror games", own)     # someone else's fact
+
+
+def test_extract_facts_filters_ungrounded_and_transient(monkeypatch):
+    import backend.learning as learning
+
+    monkeypatch.setattr(learning, "chat_completion", lambda *a, **k: (
+        "works as a nurse\n- has a cat named Pixel\nhates horror games\nis tired\nworks as a teacher\nNONE"))
+    assert extract_facts(CONVO, "Sava") == ["works as a nurse", "has a cat named Pixel"]
 
 
 def test_clean_fact_strips_name():
@@ -127,18 +145,3 @@ def test_find_urls():
 def test_private_urls_are_refused(url):
     with pytest.raises(UnsafeURLError):
         _check_public(url)
-
-
-def test_selection_schema_only_allows_enabled_tools():
-    from backend.tool_manager import ToolRegistry, _selection_schema
-    from backend.tools.web_page_tool import WebPageTool
-    from backend.tools.web_search_tool import WebSearchTool
-
-    registry = ToolRegistry()
-    registry.register(WebSearchTool())
-    registry.register(WebPageTool(), enabled=False)
-    schema = _selection_schema(registry, 2)
-    variants = schema["items"]["oneOf"]
-    assert schema["maxItems"] == 2
-    assert [v["properties"]["tool"]["const"] for v in variants] == ["web_search"]
-    assert variants[0]["properties"]["arguments"]["properties"] == {"query": {"type": "string"}}
