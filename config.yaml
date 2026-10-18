@@ -25,6 +25,12 @@ model:
   chat_wrapper: "auto"
   # Let reasoning models think before answering (slower replies). Off for a snappy companion.
   thinking: false
+  # Prompt batch size. 256 saves ~550 MB of VRAM vs the default with no measurable slowdown
+  # (Qwen's large vocabulary makes the per-batch compute buffer big). Don't go below 256.
+  batch_size: 256
+  # KV cache precision: f16 (default) or q8_0. q8_0 halves the cache, but Qwen 3.5 has few
+  # attention layers so its cache is already small and q8_0 doesn't help there.
+  kv_cache_type: "f16"
 
 llm_service:
   host: "localhost"
@@ -68,6 +74,7 @@ chat:
 voice:
   # Audio Processing
   stt_model_path: "model/parakeet-tdt-0.6b-v2.nemo"
+  stt_precision: "auto"  # auto = bfloat16 on GPU (~1 GB less VRAM, same transcripts) | fp32
   tts_voice: "af_heart"  # Options: af_heart, af_sarah, etc.
   tts_lang_code: "a"  # 'a' = American English
   tts_model: "hexgrad/Kokoro-82M"
@@ -132,7 +139,8 @@ rag:
   reranker_model: "rag-models/bge-reranker-base"  # Local folder path to reranker model
   reranker_top_k: 2  # Number of top chunks to keep after reranking (must be <= top_k)
   reranker_min_score: 0.1  # Minimum rerank score threshold - contexts with lower scores are filtered out (-1 = no threshold)
-  reranker_device: "cpu"  # cpu | cuda | auto (cpu keeps VRAM free for the LLM)
+  reranker_device: "cpu"  # cpu (~86 ms per message, no VRAM) | cuda / auto (~9 ms, ~560 MB VRAM)
+  embedding_precision: "auto"  # auto = bfloat16 on GPU (half the VRAM of fp32) | fp32
 
   # Query generation (used by knowledge_search in text chat, and by the plain RAG fallback)
   query_generation_count: 3
@@ -155,9 +163,10 @@ tools:
   # Individual tool settings
   knowledge_search:
     enabled: true
-    # Expand the selector's query into rag.query_generation_count extra queries with the LLM
-    # (better recall, one extra LLM call). Always skipped in voice chat for latency.
-    expand_queries: true
+    # Expand the query into rag.query_generation_count extra queries with the LLM. Off by default:
+    # knowledge_search runs on every message, and expansion added an LLM call plus extra retrievals
+    # (median tool time 0.47 s -> see README benchmarks). Always skipped in voice chat.
+    expand_queries: false
 
   # Web search using DuckDuckGo (no server or Docker needed)
   web_search:

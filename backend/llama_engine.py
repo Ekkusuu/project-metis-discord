@@ -60,11 +60,14 @@ def chat_completion(
     max_tokens: int = 512,
     timeout: float = 180,
     json_schema: Optional[Dict[str, Any]] = None,
+    priority: str = "interactive",
 ) -> str:
     """Run a non-streaming completion and return the reply text (reasoning removed)."""
     payload: Dict[str, Any] = {"messages": messages, "temperature": temperature, "top_p": top_p, "max_tokens": max_tokens}
     if json_schema is not None:
         payload["json_schema"] = json_schema
+    if priority != "interactive":
+        payload["priority"] = priority  # "background" work yields to anyone waiting for a reply
     try:
         response = get_http_session().post(f"{get_llm_service_url()}/chat/completion", json=payload, timeout=timeout)
         response.raise_for_status()

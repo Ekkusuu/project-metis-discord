@@ -71,16 +71,37 @@ class Lane {
   constructor(name, sequence) {
     this.name = name;
     this.chat = new LlamaChat({ contextSequence: sequence, chatWrapper, autoDisposeSequence: false });
-    this._tail = Promise.resolve();
-    this.pending = 0;
+    this._queues = { interactive: [], background: [] };
+    this._busy = false;
   }
 
-  run(task) {
-    this.pending++;
-    const result = this._tail.then(() => task(this.chat));
-    // Keep the chain alive regardless of task failures.
-    this._tail = result.catch(() => {}).finally(() => this.pending--);
-    return result;
+  get pending() {
+    return this._queues.interactive.length + this._queues.background.length + (this._busy ? 1 : 0);
+  }
+
+  /**
+   * Queue a task. "interactive" work (someone is waiting for a reply) always runs before
+   * "background" work (learning), so a learning pass never delays a judgment or tool decision.
+   */
+  run(task, priority = "interactive") {
+    return new Promise((resolve, reject) => {
+      this._queues[priority === "background" ? "background" : "interactive"].push({ task, resolve, reject });
+      this._next();
+    });
+  }
+
+  _next() {
+    if (this._busy) return;
+    const job = this._queues.interactive.shift() ?? this._queues.background.shift();
+    if (!job) return;
+    this._busy = true;
+    Promise.resolve()
+      .then(() => job.task(this.chat))
+      .then(job.resolve, job.reject)
+      .finally(() => {
+        this._busy = false;
+        this._next();
+      });
   }
 }
 
@@ -116,14 +137,22 @@ async function initModel() {
     console.log(`✓ Chat format: ${chatWrapper.wrapperName}`);
 
     const threads = modelCfg.n_threads || undefined;
-    const mainContext = await model.createContext({ contextSize: CONTEXT_SIZE, threads });
+    // KV cache quantization (q8_0 halves cache memory with negligible quality loss) and batch size
+    // (the compute buffer grows with it; large vocabularies like Qwen's make that buffer big).
+    const kvType = modelCfg.kv_cache_type || "f16";
+    const contextOptions = {
+      threads,
+      ...(modelCfg.batch_size ? { batchSize: modelCfg.batch_size } : {}),
+      ...(kvType !== "f16" ? { experimentalKvCacheKeyType: kvType, experimentalKvCacheValueType: kvType } : {}),
+    };
+    const mainContext = await model.createContext({ contextSize: CONTEXT_SIZE, ...contextOptions });
     chatLane = new Lane("chat", mainContext.getSequence());
     console.log(`✓ Chat context created (size: ${CONTEXT_SIZE})`);
 
     auxLane = chatLane;
     if (AUX_CONTEXT_SIZE > 0) {
       try {
-        const auxContext = await model.createContext({ contextSize: AUX_CONTEXT_SIZE, threads });
+        const auxContext = await model.createContext({ contextSize: AUX_CONTEXT_SIZE, ...contextOptions });
         auxLane = new Lane("aux", auxContext.getSequence());
         console.log(`✓ Utility context created (size: ${AUX_CONTEXT_SIZE})`);
       } catch (err) {
@@ -272,12 +301,14 @@ app.post("/chat/completion", async (req, res) => {
 
   const controller = abortOnDisconnect(req, res);
   try {
-    const result = await auxLane.run((chat) =>
-      chat.generateResponse(toChatHistory(messages), {
-        ...samplingOptions(req.body),
-        ...(grammar ? { grammar, repeatPenalty: false } : {}),
-        signal: controller.signal,
-      })
+    const result = await auxLane.run(
+      (chat) =>
+        chat.generateResponse(toChatHistory(messages), {
+          ...samplingOptions(req.body),
+          ...(grammar ? { grammar, repeatPenalty: false } : {}),
+          signal: controller.signal,
+        }),
+      req.body.priority
     );
     res.json({ choices: [{ message: { role: "assistant", content: result.response } }] });
   } catch (error) {

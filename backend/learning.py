@@ -128,6 +128,7 @@ def extract_facts(messages: List[Dict[str, Any]], name: str) -> List[str]:
         temperature=0.1,
         top_p=0.9,
         max_tokens=220,
+        priority="background",
     )
     facts = []
     for line in response.splitlines():
