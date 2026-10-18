@@ -49,6 +49,9 @@ from backend.turn_taking import (
     verdict_from_addressee,
 )
 from backend.voice_service import TTS_SAMPLE_RATE, get_voice_service
+from backend import voice_compat
+
+voice_compat.apply()  # survive frames that DAVE (E2EE voice) leaves undecodable
 
 load_dotenv(PROJECT_ROOT / ".env")
 
