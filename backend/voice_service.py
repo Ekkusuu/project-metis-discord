@@ -92,8 +92,18 @@ class VoiceService:
         if not KOKORO_AVAILABLE:
             return
         try:
-            self.tts_pipeline = KPipeline(lang_code=self.config.get("tts_lang_code", "a"))
-            print("✓ TTS pipeline initialized")
+            import torch
+
+            # Kokoro-82M is small enough to run in real time on a CPU; "cpu" keeps VRAM for the LLM.
+            device = str(self.config.get("tts_device", "auto")).lower()
+            if device not in ("cpu", "cuda"):
+                device = "cuda" if torch.cuda.is_available() else "cpu"
+            self.tts_pipeline = KPipeline(
+                lang_code=self.config.get("tts_lang_code", "a"),
+                repo_id=self.config.get("tts_model", "hexgrad/Kokoro-82M"),
+                device=device,
+            )
+            print(f"✓ TTS pipeline initialized (Kokoro-82M on {device})")
         except Exception as e:
             print(f"❌ Failed to initialize TTS: {e}")
             self.tts_pipeline = None

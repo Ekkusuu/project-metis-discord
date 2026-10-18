@@ -11,7 +11,9 @@ personality: "flirty"
 # LLM Model Settings
 # ============================================================================
 model:
-  path: "model/psychologistv2-8.0B-Q4_0.gguf"
+  # Qwen 3.5 2B (unsloth/Qwen3.5-2B-GGUF, Q6_K): ~1.6 GB, fast enough for real-time voice.
+  # Previous model: model/psychologistv2-8.0B-Q4_0.gguf (Llama 3.1 8B, ~4.7 GB).
+  path: "model/Qwen3.5-2B-Q6_K.gguf"
   tokenizer_path: "rag-models/embeddinggemma-300m"
   n_ctx: 8192  # Context window size (in tokens)
   n_gpu_layers: -1  # -1 = auto-offload all layers to GPU if available
@@ -21,6 +23,8 @@ model:
   # Prompt format. "auto" reads it from the GGUF file (recommended).
   # Override with e.g. "llama3.1", "chatML", "mistral", "gemma" if a model's metadata is wrong.
   chat_wrapper: "auto"
+  # Let reasoning models think before answering (slower replies). Off for a snappy companion.
+  thinking: false
 
 llm_service:
   host: "localhost"
@@ -66,6 +70,8 @@ voice:
   stt_model_path: "model/parakeet-tdt-0.6b-v2.nemo"
   tts_voice: "af_heart"  # Options: af_heart, af_sarah, etc.
   tts_lang_code: "a"  # 'a' = American English
+  tts_model: "hexgrad/Kokoro-82M"
+  tts_device: "auto"  # auto | cuda | cpu  (Kokoro-82M runs in real time on CPU; "cpu" frees VRAM)
   sample_rate: 24000
   listen_timeout: 1  # Seconds of silence before stopping recording
   chunk_duration: 0.25  # How often (seconds) to check whether a speaker has paused

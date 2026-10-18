@@ -9,10 +9,10 @@
     "dev": "node --watch server.js"
   },
   "dependencies": {
-    "node-llama-cpp": "^3.1.1",
-    "express": "^4.21.2",
     "cors": "^2.8.5",
-    "js-yaml": "^4.1.0"
+    "express": "^4.21.2",
+    "js-yaml": "^4.1.0",
+    "node-llama-cpp": "^3.22.2"
   },
   "engines": {
     "node": ">=18.0.0"

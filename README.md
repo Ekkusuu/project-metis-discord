@@ -6,7 +6,9 @@ it up naturally later, can look things up in your notes, search the web and read
 share, and comes with a live dashboard that shows exactly what she's thinking with.
 
 Everything runs on your own machine: a GGUF model through `node-llama-cpp`, local embeddings
-and reranking for retrieval, NVIDIA Parakeet for speech-to-text and Kokoro for text-to-speech.
+and reranking for retrieval, NVIDIA Parakeet for speech-to-text and Kokoro-82M for text-to-speech.
+The default chat model is **Qwen 3.5 2B** (~2.9 GB VRAM including its contexts, ~130 tokens/s on an RTX 4070 Ti),
+so the whole stack fits comfortably next to games or other apps.
 
 ## How it fits together
 
@@ -43,10 +45,13 @@ Requirements: Python 3.10+, Node.js 18+, an NVIDIA GPU is strongly recommended.
    pip install -r requirements.txt
    ```
 2. **Models** (paths are configured in `config.yaml`)
-   - Chat model: any instruct GGUF in `model/` (e.g. a Llama 3.1 8B Q4 build) → `model.path`
+   - Chat model: `model/Qwen3.5-2B-Q6_K.gguf` from [unsloth/Qwen3.5-2B-GGUF](https://huggingface.co/unsloth/Qwen3.5-2B-GGUF)
+     (any instruct GGUF works → `model.path`; the prompt format is read from the file, and
+     `model.thinking: false` keeps reasoning models like Qwen from thinking before every reply)
    - Embeddings: [`google/embeddinggemma-300m`](https://huggingface.co/google/embeddinggemma-300m) in `rag-models/embeddinggemma-300m`
    - Reranker: [`BAAI/bge-reranker-base`](https://huggingface.co/BAAI/bge-reranker-base) in `rag-models/bge-reranker-base`
-   - Voice (optional): Parakeet downloads itself on first `>join`; Kokoro needs
+   - Voice (optional): Parakeet downloads itself on first `>join`; Kokoro-82M (`hexgrad/Kokoro-82M`) downloads
+     on first use and runs ~6x real time even on CPU (`voice.tts_device: cpu` frees VRAM). It needs
      [espeak-ng](https://github.com/espeak-ng/espeak-ng/releases) installed.
 3. **Discord bot**: create an application at <https://discord.com/developers/applications>,
    add a bot, enable the **Message Content** intent, invite it with *Send Messages*,

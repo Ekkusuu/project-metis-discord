@@ -14,7 +14,8 @@ const projectRoot = join(__dirname, "..", "..");
 // ---------------------------------------------------------------------------
 let config = {};
 try {
-  config = yaml.load(readFileSync(join(projectRoot, "config.yaml"), "utf8")) || {};
+  // METIS_CONFIG points at another config file (same variable the Python backend uses).
+  config = yaml.load(readFileSync(process.env.METIS_CONFIG || join(projectRoot, "config.yaml"), "utf8")) || {};
 } catch (err) {
   console.error("Failed to load config.yaml, using defaults:", err.message);
 }
@@ -105,7 +106,13 @@ async function initModel() {
     model = await llama.loadModel(loadOptions);
     console.log("✓ Model loaded");
 
-    chatWrapper = resolveChatWrapper(model, { type: modelCfg.chat_wrapper || "auto" });
+    // Reasoning models (Qwen 3.x, DeepSeek R1, ...) think before answering. That costs seconds per
+    // reply, which a chat/voice companion can't afford, so it's off unless model.thinking is true.
+    const thoughts = modelCfg.thinking ? "auto" : "discourage";
+    chatWrapper = resolveChatWrapper(model, {
+      type: modelCfg.chat_wrapper || "auto",
+      customWrapperSettings: { qwen: { thoughts } },
+    });
     console.log(`✓ Chat format: ${chatWrapper.wrapperName}`);
 
     const threads = modelCfg.n_threads || undefined;
