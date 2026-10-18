@@ -37,6 +37,9 @@ def get_tokenizer() -> Any:
             kwargs["cache_dir"] = cache_dir
 
         _tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, use_fast=True, **kwargs)
+        # Only used for counting and chunking, never to run a model, so long texts are fine.
+        # (Silences "Token indices sequence length is longer than the specified maximum".)
+        _tokenizer.model_max_length = 10**9
         return _tokenizer
     except Exception as e:
         print(f"Warning: Could not load tokenizer from local path '{tokenizer_path}': {e}")

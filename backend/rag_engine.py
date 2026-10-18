@@ -96,7 +96,7 @@ class LocalEmbeddingFunction:
         precision = str(get_config().get("rag", {}).get("embedding_precision", "auto")).lower()
         kwargs = {}
         if device == "cuda" and precision != "fp32" and torch.cuda.is_bf16_supported():
-            kwargs["model_kwargs"] = {"torch_dtype": torch.bfloat16}
+            kwargs["model_kwargs"] = {"dtype": torch.bfloat16}
         self.model = SentenceTransformer(str(model_path), device=device, **kwargs)
         self._dtype = "bf16" if kwargs else "fp32"
         self._model_path = model_path
@@ -207,7 +207,7 @@ def get_reranker_model():
             pref = str(rag_cfg.get("reranker_device", "cpu")).lower()
             device = "cuda" if pref in ("cuda", "auto") and torch.cuda.is_available() else "cpu"
             # On GPU, fp16 is ~9x faster than CPU (9 ms vs 86 ms for 6 chunks) at ~560 MB of VRAM.
-            kwargs = {"model_kwargs": {"torch_dtype": torch.float16}} if device == "cuda" else {}
+            kwargs = {"model_kwargs": {"dtype": torch.float16}} if device == "cuda" else {}
             _reranker_model = CrossEncoder(str(model_path), device=device, **kwargs)
             print(f"✓ Reranker loaded on {device}")
         except Exception as e:

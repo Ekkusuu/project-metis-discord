@@ -1,6 +1,7 @@
 import { fileURLToPath } from "url";
 import { dirname, join, isAbsolute } from "path";
 import { readFileSync } from "fs";
+import net from "net";
 import { getLlama, LlamaChat, resolveChatWrapper } from "node-llama-cpp";
 import express from "express";
 import cors from "cors";
@@ -24,8 +25,10 @@ const modelCfg = config.model || {};
 const chatCfg = config.chat || {};
 const serviceCfg = config.llm_service || {};
 
-const HOST = serviceCfg.host || "localhost";
-const PORT = Number(process.env.LLM_SERVICE_PORT) || serviceCfg.port || 3000;
+// "localhost" can resolve to the IPv6 address on Windows, where another program may hold
+// 127.0.0.1 on the same port; always use the IPv4 loopback so checks and clients agree.
+const HOST = !serviceCfg.host || serviceCfg.host === "localhost" ? "127.0.0.1" : serviceCfg.host;
+const PORT = Number(process.env.LLM_SERVICE_PORT) || serviceCfg.port || 3730;
 const MODEL_PATH = (() => {
   const p = modelCfg.path || "model/model.gguf";
   return isAbsolute(p) ? p : join(projectRoot, p);
@@ -324,12 +327,37 @@ app.post("/chat/stream", async (req, res) => {
   }
 });
 
+/** Resolve true if HOST:PORT is free, so a clash is reported before spending time loading the model. */
+function portIsFree() {
+  return new Promise((resolve) => {
+    const probe = net.createServer();
+    probe.once("error", () => resolve(false));
+    probe.once("listening", () => probe.close(() => resolve(true)));
+    probe.listen(PORT, HOST);
+  });
+}
+
+if (!(await portIsFree())) {
+  console.error(`✗ Port ${PORT} is already in use by another program (or another copy of Metis).`);
+  console.error("  Close it, or pick a free port under llm_service.port in config.yaml.");
+  process.exit(1);
+}
+
 initModel().then((ok) => {
   if (!ok) {
     console.error("Failed to initialize model. Server not started.");
     process.exit(1);
   }
-  app.listen(PORT, HOST, () => {
+  const server = app.listen(PORT, HOST, () => {
     console.log(`🚀 LLM Service running on http://${HOST}:${PORT}`);
+  });
+  server.on("error", (error) => {
+    if (error.code === "EADDRINUSE") {
+      console.error(`✗ Port ${PORT} is already in use by another program (or another copy of Metis).`);
+      console.error("  Close it, or pick a free port under llm_service.port in config.yaml.");
+    } else {
+      console.error("✗ LLM service failed to start:", error.message);
+    }
+    process.exit(1);
   });
 });

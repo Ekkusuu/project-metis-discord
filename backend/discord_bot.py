@@ -1077,6 +1077,8 @@ def start_in_background() -> Optional[threading.Thread]:
         asyncio.set_event_loop(_loop)
         try:
             _loop.run_until_complete(_run())
+        except asyncio.CancelledError:
+            pass  # the backend is shutting down (e.g. it failed to start): nothing to report
         except discord.LoginFailure:
             print("✗ Discord rejected the bot token (DISCORD_BOT_TOKEN).")
         except Exception as e:

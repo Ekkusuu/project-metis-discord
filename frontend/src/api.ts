@@ -1,4 +1,5 @@
-export const API_URL: string = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+// start.bat sets VITE_API_URL from backend.port in config.yaml; this is only the fallback.
+export const API_URL: string = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8730';
 
 /** Window event dispatched whenever an AI message arrives on the Discord stream. */
 export const AI_MESSAGE_EVENT = 'metis:ai-message';

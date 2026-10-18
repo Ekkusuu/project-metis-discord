@@ -135,7 +135,7 @@ async def status():
 
 
 if __name__ == "__main__":
-    import uvicorn
+    # `python -m backend` is the launcher (it checks the port before loading anything heavy).
+    from backend.__main__ import main
 
-    backend_cfg = get_config()["backend"]
-    uvicorn.run("backend.main:app", host=backend_cfg.get("host", "127.0.0.1"), port=int(backend_cfg.get("port", 8000)))
+    main()

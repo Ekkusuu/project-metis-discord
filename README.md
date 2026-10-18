@@ -67,11 +67,12 @@ Running the pieces by hand, each in its own terminal:
 
 ```cmd
 cd backend\llm_service && npm start
-venv\Scripts\python -m uvicorn backend.main:app --port 8000
+venv\Scripts\python -m backend
 cd frontend && npm run dev
 ```
 
-(LLM service on :3000, backend + bot on :8000, dashboard on :5173.)
+(LLM service on :3730, backend + bot on :8730, dashboard on :5173 — ports are set in `config.yaml`;
+when running the dashboard by hand, set `VITE_API_URL` if you change `backend.port`.)
 
 Set `discord.enabled: false` to run the backend and dashboard without the bot.
 
@@ -183,7 +184,7 @@ What keeps it there (all configurable in `config.yaml`):
 ## Dashboard & API
 
 The dashboard is read-only: all conversation happens on Discord. Useful endpoints
-(full list at <http://localhost:8000/docs>):
+(full list at <http://localhost:8730/docs>):
 
 - `GET /status` — LLM / Discord / voice status
 - `GET /discord/stream` — SSE feed of messages (resumable via `Last-Event-ID`)

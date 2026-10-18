@@ -32,16 +32,18 @@ model:
   # attention layers so its cache is already small and q8_0 doesn't help there.
   kv_cache_type: "f16"
 
+# Ports are deliberately uncommon: 3000 and 8000 are taken by many dev tools (e.g. the Godot AI
+# MCP server uses 8000). start.bat, the bot and the dashboard all read these values.
 llm_service:
-  host: "localhost"
-  port: 3000
+  host: "127.0.0.1"
+  port: 3730
   # Separate small context for addressee checks / tool selection / query generation / learning,
   # so the main chat context keeps its cache between turns. 0 = share the main context (less VRAM).
   aux_context_size: 4096
 
 backend:
   host: "127.0.0.1"
-  port: 8000
+  port: 8730
 
 discord:
   enabled: true  # false = run backend + dashboard without connecting the bot

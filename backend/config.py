@@ -28,12 +28,12 @@ _DEFAULTS: Dict[str, Any] = {
         "n_gpu_layers": -1,
     },
     "llm_service": {
-        "host": "localhost",
-        "port": 3000,
+        "host": "127.0.0.1",
+        "port": 3730,
     },
     "backend": {
         "host": "127.0.0.1",
-        "port": 8000,
+        "port": 8730,
     },
     "chat": {
         "temperature": 0.7,
@@ -84,8 +84,18 @@ def resolve_path(path: str | os.PathLike) -> Path:
 
 def llm_service_url() -> str:
     cfg = get_config()["llm_service"]
-    port = os.getenv("LLM_SERVICE_PORT") or cfg.get("port", 3000)
+    port = os.getenv("LLM_SERVICE_PORT") or cfg.get("port", 3730)
     return f"http://{cfg.get('host', 'localhost')}:{port}"
+
+
+def port_in_use(host: str, port: int) -> bool:
+    """True if something is already listening on host:port."""
+    import socket
+
+    host = "127.0.0.1" if host in ("0.0.0.0", "localhost", "") else host
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(0.5)
+        return sock.connect_ex((host, int(port))) == 0
 
 
 def backend_url() -> str:
@@ -93,5 +103,5 @@ def backend_url() -> str:
     host = cfg.get("host", "127.0.0.1")
     if host in ("0.0.0.0", "::"):
         host = "127.0.0.1"
-    port = os.getenv("BACKEND_PORT") or cfg.get("port", 8000)
+    port = os.getenv("BACKEND_PORT") or cfg.get("port", 8730)
     return f"http://{host}:{port}"
