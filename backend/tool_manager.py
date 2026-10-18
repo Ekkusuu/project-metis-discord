@@ -180,24 +180,42 @@ async def select_tools(
     max_tools: int = 3,
 ) -> List[ToolCall]:
     """Decide which tools to run for the latest message (see the notes above)."""
-    registry = get_tool_registry()
-    enabled = registry.get_all_enabled()
-    tools_cfg = get_config().get("tools", {})
+    calls = immediate_calls(last_user_message) + await decide_tools(messages, last_user_message, max_tools)
+    print(f"Tool selection: {[c.tool_name for c in calls] or 'none'}")
+    return calls
+
+
+def _knowledge_always() -> bool:
+    return (get_config().get("tools", {}).get("knowledge_search") or {}).get("always", True)
+
+
+def immediate_calls(last_user_message: str) -> List[ToolCall]:
+    """Calls that need no model decision (links, always-on knowledge search). Can start right away."""
+    enabled = get_tool_registry().get_all_enabled()
     text = _message_text(last_user_message)
     calls: List[ToolCall] = []
-
     if "fetch_webpage" in enabled:
         from backend.tools.web_page_tool import find_urls
         for url in find_urls(text)[:2]:
             calls.append(ToolCall("fetch_webpage", {"url": url}, "link in message"))
-
-    knowledge_always = (tools_cfg.get("knowledge_search") or {}).get("always", True)
-    if "knowledge_search" in enabled and knowledge_always and len(text) > 2:
+    if "knowledge_search" in enabled and _knowledge_always() and len(text) > 2:
         calls.append(ToolCall("knowledge_search", {"query": text}, "always"))
+    return calls
 
+
+async def decide_tools(
+    messages: List[Dict[str, str]],
+    last_user_message: str,
+    max_tools: int = 3,
+) -> List[ToolCall]:
+    """Tools the model chooses for this message (one constrained choice, then a query)."""
+    enabled = get_tool_registry().get_all_enabled()
+    tools_cfg = get_config().get("tools", {})
+    text = _message_text(last_user_message)
+    calls: List[ToolCall] = []
     decidable = {
         name: tool for name, tool in enabled.items()
-        if name != "fetch_webpage" and not (name == "knowledge_search" and knowledge_always)
+        if name != "fetch_webpage" and not (name == "knowledge_search" and _knowledge_always())
         and _first_string_param(tool)
     }
     if not decidable or max_tools <= 0 or len(text) < 3:
@@ -229,8 +247,6 @@ async def select_tools(
             calls.append(ToolCall(choice, {_first_string_param(decidable[choice]): query or text}, f"chose {choice}"))
     except Exception as e:
         print(f"Tool decision failed: {e}")
-
-    print(f"Tool selection: {[c.tool_name for c in calls] or 'none'}")
     return calls
 
 

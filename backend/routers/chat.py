@@ -108,14 +108,23 @@ def _conversation_text(messages: List[Dict[str, str]], count: int) -> str:
 
 
 async def _run_tools(messages: List[Dict[str, str]], req: ChatRequest, timings: Dict[str, float]) -> str:
-    from backend.tool_manager import execute_tools, format_tool_results_for_context, select_tools
+    from backend.tool_manager import decide_tools, execute_tools, format_tool_results_for_context, immediate_calls
 
     tools_cfg = get_config().get("tools", {})
     last_user = messages[-1]["content"]
+    extra = {
+        "conversation_context": _conversation_text(messages, int(tools_cfg.get("context_messages", 3))),
+        "voice_mode": req.voice_mode,
+    }
 
+    # Calls that need no decision (knowledge search, links) run while the model decides about the web.
     t0 = time.perf_counter()
-    calls = await select_tools(messages, last_user, max_tools=req.max_tools or int(tools_cfg.get("max_tools", 3)))
+    immediate = immediate_calls(last_user)
+    immediate_task = asyncio.create_task(execute_tools(immediate, extra)) if immediate else None
+    decided = await decide_tools(messages, last_user, max_tools=req.max_tools or int(tools_cfg.get("max_tools", 3)))
     timings["tool_selection"] = round(time.perf_counter() - t0, 3)
+    calls = immediate + decided
+    print(f"Tool selection: {[c.tool_name for c in calls] or 'none'}")
 
     if not calls:
         state.update(
@@ -124,12 +133,10 @@ async def _run_tools(messages: List[Dict[str, str]], req: ChatRequest, timings: 
         )
         return ""
 
-    t0 = time.perf_counter()
-    results = await execute_tools(calls, {
-        "conversation_context": _conversation_text(messages, int(tools_cfg.get("context_messages", 3))),
-        "voice_mode": req.voice_mode,
-    })
-    timings["tool_execution"] = round(time.perf_counter() - t0, 3)
+    t1 = time.perf_counter()
+    decided_results = await execute_tools(decided, extra) if decided else []
+    results = (await immediate_task if immediate_task else []) + decided_results
+    timings["tool_execution"] = round(time.perf_counter() - t1, 3)
 
     rag_view: Optional[Dict[str, Any]] = None
     for r in results:

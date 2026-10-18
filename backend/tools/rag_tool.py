@@ -55,7 +55,7 @@ class RAGTool(BaseTool):
         tool_cfg = get_config().get("tools", {}).get("knowledge_search") or {}
         # The selector already wrote a focused query. In voice mode latency matters more
         # than recall, so skip the extra LLM round-trip for query expansion.
-        if voice_mode or not tool_cfg.get("expand_queries", True):
+        if voice_mode or not tool_cfg.get("expand_queries", False):
             return [query]
         from backend.rag_engine import generate_optimized_queries
 

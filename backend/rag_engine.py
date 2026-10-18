@@ -91,11 +91,18 @@ class LocalEmbeddingFunction:
         from sentence_transformers import SentenceTransformer
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.model = SentenceTransformer(str(model_path), device=device)
+        # bfloat16 halves VRAM (~1.2 GB -> ~0.6 GB for EmbeddingGemma) with embeddings that are
+        # identical in practice (cosine 0.9999 vs fp32). fp16 is not used: Gemma activations overflow.
+        precision = str(get_config().get("rag", {}).get("embedding_precision", "auto")).lower()
+        kwargs = {}
+        if device == "cuda" and precision != "fp32" and torch.cuda.is_bf16_supported():
+            kwargs["model_kwargs"] = {"torch_dtype": torch.bfloat16}
+        self.model = SentenceTransformer(str(model_path), device=device, **kwargs)
+        self._dtype = "bf16" if kwargs else "fp32"
         self._model_path = model_path
         prompts = getattr(self.model, "prompts", {}) or {}
         self._has_prompts = "query" in prompts and "document" in prompts
-        print(f"✓ Embedding model loaded on {device}" + (" (query/document prompts)" if self._has_prompts else ""))
+        print(f"✓ Embedding model loaded on {device} ({self._dtype})" + (" with query/document prompts" if self._has_prompts else ""))
 
     def __call__(self, input: List[str]) -> List[List[float]]:
         if self._has_prompts:
@@ -199,7 +206,9 @@ def get_reranker_model():
 
             pref = str(rag_cfg.get("reranker_device", "cpu")).lower()
             device = "cuda" if pref in ("cuda", "auto") and torch.cuda.is_available() else "cpu"
-            _reranker_model = CrossEncoder(str(model_path), device=device)
+            # On GPU, fp16 is ~9x faster than CPU (9 ms vs 86 ms for 6 chunks) at ~560 MB of VRAM.
+            kwargs = {"model_kwargs": {"torch_dtype": torch.float16}} if device == "cuda" else {}
+            _reranker_model = CrossEncoder(str(model_path), device=device, **kwargs)
             print(f"✓ Reranker loaded on {device}")
         except Exception as e:
             print(f"Error loading reranker model: {e}")
