@@ -12,13 +12,14 @@ backend/
 └── tools/
     ├── __init__.py      # Tool registration
     ├── rag_tool.py      # knowledge_search: notes + long-term memories
-    ├── web_search_tool.py  # web_search: DuckDuckGo, no API key
+    ├── web_search_tool.py  # web_search: DuckDuckGo, also reads the top result's page
+    ├── web_page_tool.py    # fetch_webpage: reads any public URL (links in messages are opened automatically)
     └── (future tools)   # Add new tools here
 ```
 
 ## How It Works
 
-1. **Tool Selection**: the LLM sees each enabled tool's name and description and answers with a JSON array of calls (or `[]`). Malformed/truncated JSON is recovered where possible; unknown tools are dropped.
+1. **Tool Selection**: the LLM sees each enabled tool's name and description and answers with a JSON array of calls (or `[]`). The output is grammar-constrained by the LLM service to a JSON schema built from the enabled tools and their required parameters, so it can't name a tool that doesn't exist or produce broken JSON. URLs in the message always trigger `fetch_webpage`.
 2. **Tool Execution**: selected tools run **concurrently**. `execute()` must not block the event loop — wrap blocking work in `asyncio.to_thread`.
 3. **Context Injection**: results are inserted as a system message *just before the latest user message* (with the current date/time). The system prompt and earlier history stay byte-identical between turns, which lets the LLM service reuse its KV cache.
 4. **Response Generation**: the reply is streamed back to Discord.

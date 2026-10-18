@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Dict, List
 
+from backend.config import get_config
 from backend.tool_manager import BaseTool, ToolDefinition, ToolParameter
 
 
@@ -95,11 +96,33 @@ class WebSearchTool(BaseTool):
         
         return results
     
+    async def _read_top_result(self, results: List[Dict[str, Any]], voice_mode: bool) -> str:
+        cfg = get_config().get("tools", {}).get("web_search") or {}
+        enabled = cfg.get("read_top_result_voice", False) if voice_mode else cfg.get("read_top_result", True)
+        if not enabled:
+            return ""
+        from backend.tools.web_page_tool import fetch_page_text
+
+        for r in results[:3]:
+            url = r.get("url")
+            if not url:
+                continue
+            try:
+                page = await asyncio.wait_for(
+                    asyncio.to_thread(fetch_page_text, url, int(cfg.get("top_result_chars", 2500))), timeout=8
+                )
+            except Exception:
+                continue  # paywalls, bot walls, timeouts: try the next result
+            if len(page["text"]) > 200:
+                return f"({page['url']})\n{page['text']}"
+        return ""
+
     async def execute(
         self, 
         query: str, 
         num_results: int = 5,
         search_type: str = "text",
+        voice_mode: bool = False,
         **kwargs
     ) -> Dict[str, Any]:
         """
@@ -160,6 +183,11 @@ class WebSearchTool(BaseTool):
             
             search_label = "News" if search_type == "news" else "Web"
             formatted_text = f"{search_label} search results for: {query}\n\n" + "\n\n".join(formatted_results)
+
+            # Snippets are often too thin to answer from; read the best result's page too.
+            page_text = await self._read_top_result(results, voice_mode)
+            if page_text:
+                formatted_text += f"\n\nContent of the top result:\n{page_text}"
             
             return {
                 "success": True,

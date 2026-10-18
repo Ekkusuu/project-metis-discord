@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from backend.config import get_config
-from backend.llama_engine import chat_completion
+from backend.llama_engine import chat_completion, json_completion
 
 
 @dataclass
@@ -147,13 +147,30 @@ Rules:
 - Greetings, small talk and simple reactions need NO tools: reply with [].
 - Use knowledge_search when a user talks about themselves, other people, their past, or anything that may be
   in stored notes or memories of earlier conversations.
-- Use web_search only for current events, live facts, or things that need the internet.
+- Use web_search for current events, news, prices, weather, sports, releases, or facts you are unsure about.
+- Use fetch_webpage only with a full URL the user gave.
 - Queries must be short keyword phrases (2-6 words).
 
-Respond with ONLY a JSON array, for example:
+Respond with a JSON array of tool calls, for example:
 [{{"tool":"knowledge_search","arguments":{{"query":"sava favorite games"}}}}]
 [{{"tool":"web_search","arguments":{{"query":"weather Berlin today"}}}}]
 []"""
+
+
+def _selection_schema(registry: "ToolRegistry", max_tools: int) -> Dict[str, Any]:
+    """JSON schema that only admits calls to enabled tools with their required arguments."""
+    variants = []
+    for tool in registry.get_all_enabled().values():
+        props = {
+            p.name: {"type": "number" if p.type == "number" else "string"}
+            for p in tool.definition.parameters
+            if p.required and p.type in ("string", "number")
+        }
+        variants.append({
+            "type": "object",
+            "properties": {"tool": {"const": tool.definition.name}, "arguments": {"type": "object", "properties": props}},
+        })
+    return {"type": "array", "maxItems": max(1, max_tools), "items": {"oneOf": variants}}
 
 
 def _extract_json_array(text: str) -> Optional[List[Any]]:
@@ -214,7 +231,10 @@ def parse_tool_calls(response: str, fallback_query: str, valid_tools: List[str])
         if call.tool_name not in valid_tools:
             print(f"Warning: LLM selected unknown tool '{call.tool_name}'")
             continue
-        if not str(call.arguments.get("query", "")).strip():
+        if call.tool_name == "fetch_webpage":
+            if not str(call.arguments.get("url", "")).lower().startswith(("http://", "https://")):
+                continue  # the model invented a non-URL; nothing to open
+        elif not str(call.arguments.get("query", "")).strip():
             call.arguments["query"] = fallback_query
         key = (call.tool_name, json.dumps(call.arguments, sort_keys=True))
         if key not in seen:
@@ -245,13 +265,33 @@ async def select_tools(
         {"role": "user", "content": user_content},
     ]
 
-    try:
-        response = await asyncio.to_thread(chat_completion, llm_messages, 0.1, 0.9, 200)
-    except Exception as e:
-        print(f"Error selecting tools: {e}")
-        return []
+    enabled = list(registry.get_all_enabled())
+    calls: List[ToolCall] = []
 
-    calls = parse_tool_calls(response, last_user_message, list(registry.get_all_enabled()))[:max_tools]
+    # A shared link is always read; no need to ask the model.
+    if "fetch_webpage" in enabled:
+        from backend.tools.web_page_tool import find_urls
+        for url in find_urls(last_user_message)[:2]:
+            calls.append(ToolCall("fetch_webpage", {"url": url}, "url in message"))
+
+    try:
+        selected = await asyncio.to_thread(
+            json_completion, llm_messages, _selection_schema(registry, max_tools), 0.1, 300
+        )
+        response = json.dumps(selected)
+    except Exception as e:
+        print(f"Grammar-constrained tool selection failed ({e}); falling back to free text")
+        try:
+            response = await asyncio.to_thread(chat_completion, llm_messages, 0.1, 0.9, 200)
+        except Exception as e2:
+            print(f"Error selecting tools: {e2}")
+            return calls
+
+    for call in parse_tool_calls(response, last_user_message, enabled):
+        if call.tool_name == "fetch_webpage" and any(c.tool_name == "fetch_webpage" for c in calls):
+            continue
+        calls.append(call)
+    calls = calls[:max(max_tools, len([c for c in calls if c.raw_output == "url in message"]))]
     print(f"Tool selection: {[c.tool_name for c in calls] or 'none'}")
     return calls
 
