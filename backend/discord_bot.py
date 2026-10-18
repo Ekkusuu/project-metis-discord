@@ -999,6 +999,8 @@ async def join_voice(ctx: commands.Context):
         await ctx.send("❌ Join a voice channel first!")
         return
     target = ctx.author.voice.channel
+    if ctx.voice_client and not ctx.voice_client.is_connected():
+        await _disconnect(ctx.guild)  # leftover from a failed attempt; start clean
     if ctx.voice_client:
         if ctx.voice_client.channel == target:
             await ctx.send("✅ Already here!")
@@ -1020,7 +1022,14 @@ async def join_voice(ctx: commands.Context):
             "💬 Text replies are paused while I'm in voice. Use `>leave` when you're done."
         ))
     except Exception as e:
-        await ctx.send(f"❌ Failed to join voice channel: {e}")
+        # Don't leave a half-open connection behind: discord.py would keep retrying it, which shows
+        # up as Metis joining and leaving the channel over and over.
+        await _disconnect(ctx.guild)
+        hint = ""
+        if "4017" in str(e) or "not connected to voice" in str(e).lower():
+            hint = ("\n(Discord voice needs discord.py 2.7+ with `davey` for its end-to-end encryption"
+                    " - see requirements.txt.)")
+        await ctx.send(f"❌ Failed to join voice channel: {e}{hint}")
         import traceback
         traceback.print_exc()
 
