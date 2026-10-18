@@ -3,7 +3,6 @@ import ReactMarkdown from 'react-markdown';
 import rehypeHighlight from 'rehype-highlight';
 import remarkBreaks from 'remark-breaks';
 import remarkGfm from 'remark-gfm';
-import 'highlight.js/styles/github-dark.css';
 import './MessageText.css';
 
 type Part = { type: 'text' | 'think'; content: string };

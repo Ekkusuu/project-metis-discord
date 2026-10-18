@@ -2,24 +2,24 @@
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: var(--space-2) var(--space-4);
-  font-size: 0.8125rem;
+  gap: var(--space-1) var(--space-3);
+  font-size: 0.75rem;
   color: var(--text-muted);
 }
 
 .status-bar.muted {
-  font-style: italic;
+  color: var(--text-faint);
 }
 
 .status-bot {
-  color: var(--text);
-  font-weight: 600;
+  color: var(--text-muted);
+  font-weight: 500;
 }
 
 .status-item {
   display: inline-flex;
   align-items: center;
-  gap: var(--space-2);
+  gap: 6px;
 }
 
 .status-item.offline {
@@ -28,32 +28,33 @@
 }
 
 .status-dot {
-  width: 8px;
-  height: 8px;
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
-  background: var(--text-muted);
+  background: var(--text-faint);
 }
 
 .status-dot.ok {
-  background: var(--success);
-  box-shadow: 0 0 6px var(--success);
+  background: var(--mint);
+  box-shadow: 0 0 0 3px var(--mint-soft);
 }
 
 .status-dot.bad {
   background: var(--danger);
+  box-shadow: 0 0 0 3px var(--danger-soft);
 }
 
 .status-pill {
-  padding: 1px var(--space-3);
-  border: 1px solid var(--border);
+  padding: 1px var(--space-2);
   border-radius: 999px;
-  background: var(--surface-2);
-  color: var(--text);
-  font-size: 0.75rem;
+  background: var(--lavender-soft);
+  color: var(--lavender);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
 }
 
 .status-pill.voice {
-  border-color: var(--accent-strong);
-  background: rgba(31, 111, 235, 0.15);
-  color: var(--accent);
+  background: var(--mint-soft);
+  color: var(--mint);
 }

@@ -1,24 +1,39 @@
 :root {
-  /* Colors — near-black neutrals with bright text for high contrast */
+  /* Palette: black + mint, with lavender as a quiet secondary and coral for errors */
   --bg: #000000;
-  --surface: #0a0a0a;
-  --surface-2: #141414;
-  --border: #262626;
-  --text: #f5f5f5;
-  --text-muted: #a3a3a3;
-  --accent: #6cb6ff;
-  --accent-strong: #2f81f7;
-  --success: #4ade80;
-  --warning: #facc15;
-  --danger: #ff6b6b;
-  --user-bubble: #0c2647;
-  --user-border: #1e4f8f;
-  --ai-bubble: #121212;
+  --surface: #060807;
+  --surface-2: #0c100e;
+  --surface-3: #131915;
+  --border: #18201c;
+  --border-strong: #26302b;
+  --text: #ecf6f1;
+  --text-muted: #8b9b93;
+  --text-faint: #5d6b64;
+
+  --mint: #7af5c6;
+  --mint-strong: #3fe0a2;
+  --mint-soft: rgba(122, 245, 198, 0.1);
+  --mint-line: rgba(122, 245, 198, 0.28);
+  --on-mint: #02140c;
+  --lavender: #b8a9ff;
+  --lavender-soft: rgba(184, 169, 255, 0.12);
+  --danger: #ff7b86;
+  --danger-soft: rgba(255, 123, 134, 0.1);
+  --warning: #f3c76b;
+  --warning-soft: rgba(243, 199, 107, 0.12);
+
+  /* Semantic aliases used by the components */
+  --accent: var(--mint);
+  --accent-strong: var(--mint-strong);
+  --success: var(--mint);
+  --user-bubble: #0a1914;
+  --user-border: var(--mint-line);
+  --ai-bubble: var(--surface-2);
 
   /* Radii */
-  --radius-sm: 4px;
-  --radius-md: 8px;
-  --radius-lg: 14px;
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 16px;
 
   /* Spacing */
   --space-1: 4px;
@@ -28,13 +43,17 @@
   --space-5: 24px;
 
   /* Typography */
-  --font-sans: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
-  --font-mono: ui-monospace, 'Cascadia Code', 'Courier New', monospace;
+  --font-sans: 'Inter', 'Segoe UI Variable Text', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Cascadia Code', ui-monospace, Consolas, monospace;
+
+  /* Motion */
+  --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
 
   font-family: var(--font-sans);
   line-height: 1.5;
   font-weight: 400;
   font-size: 16px;
+  letter-spacing: -0.005em;
 
   color-scheme: dark;
   color: var(--text);
@@ -66,11 +85,21 @@ body {
 button {
   font: inherit;
   cursor: pointer;
+  transition:
+    background-color 0.15s var(--ease),
+    border-color 0.15s var(--ease),
+    color 0.15s var(--ease),
+    opacity 0.15s var(--ease);
 }
 
-button:focus-visible {
-  outline: 2px solid var(--accent);
+:focus-visible {
+  outline: 2px solid var(--mint);
   outline-offset: 2px;
+}
+
+::selection {
+  background: rgba(122, 245, 198, 0.3);
+  color: var(--text);
 }
 
 ::-webkit-scrollbar {
@@ -83,12 +112,18 @@ button:focus-visible {
 }
 
 ::-webkit-scrollbar-thumb {
-  border-radius: 4px;
-  background: #3d444d;
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: var(--border-strong) padding-box;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #545d68;
+  background: var(--text-faint) padding-box;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
 }
 
 /* Inline SVG icons (components/Icon.tsx) */

@@ -1,21 +1,20 @@
 .tool-card {
   padding: var(--space-3);
   border: 1px solid var(--border);
-  border-left-width: 3px;
   border-radius: var(--radius-md);
   background: var(--surface-2);
 }
 
 .tool-card.success {
-  border-left-color: var(--success);
+  border-color: var(--mint-line);
 }
 
 .tool-card.failure {
-  border-left-color: var(--danger);
+  border-color: rgba(255, 123, 134, 0.35);
 }
 
 .tool-card.pending {
-  border-left-color: var(--warning);
+  border-color: rgba(243, 199, 107, 0.35);
 }
 
 .tool-head {
@@ -26,9 +25,14 @@
 }
 
 .tool-name {
+  color: var(--text);
   font-family: var(--font-mono);
-  font-size: 0.875rem;
-  font-weight: 700;
+  font-size: 0.8125rem;
+  font-weight: 600;
+}
+
+.tool-head .badge {
+  gap: 4px;
 }
 
 .tool-pending {
@@ -37,7 +41,13 @@
 }
 
 .tool-args {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
   margin: var(--space-2) 0 0;
+  padding: var(--space-2) 10px;
+  border-radius: var(--radius-sm);
+  background: var(--bg);
   font-family: var(--font-mono);
   font-size: 0.75rem;
 }
@@ -49,42 +59,44 @@
 
 .tool-arg dt {
   flex-shrink: 0;
-  color: var(--text-muted);
+  color: var(--text-faint);
 }
 
 .tool-arg dd {
   margin: 0;
-  color: var(--accent);
+  color: var(--lavender);
   overflow-wrap: anywhere;
 }
 
 .tool-time {
   margin-top: var(--space-2);
-  color: var(--text-muted);
+  color: var(--text-faint);
   font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
 }
 
 .tool-error {
   margin-top: var(--space-2);
   padding: var(--space-2);
   border-radius: var(--radius-sm);
-  background: rgba(248, 81, 73, 0.12);
+  background: var(--danger-soft);
   color: var(--danger);
   font-size: 0.75rem;
   overflow-wrap: anywhere;
 }
 
 .tool-message {
-  color: var(--text-muted);
+  color: var(--text-faint);
   font-size: 0.8125rem;
-  font-style: italic;
 }
 
 .tool-timings {
-  margin: 0;
   display: flex;
   flex-direction: column;
-  gap: var(--space-1);
+  margin: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
   font-size: 0.8125rem;
 }
 
@@ -92,16 +104,23 @@
   display: flex;
   justify-content: space-between;
   gap: var(--space-3);
-  padding: var(--space-1) var(--space-3);
-  border-radius: var(--radius-sm);
+  padding: var(--space-2) var(--space-3);
   background: var(--surface-2);
+}
+
+.tool-timing + .tool-timing {
+  border-top: 1px solid var(--border);
 }
 
 .tool-timing dt {
   color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
 }
 
 .tool-timing dd {
   margin: 0;
+  color: var(--mint);
   font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
 }

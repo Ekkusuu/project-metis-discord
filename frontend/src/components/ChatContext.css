@@ -1,17 +1,18 @@
 .ctx-refresh,
 .ctx-toggle {
-  padding: 2px var(--space-3);
-  border: 1px solid var(--border);
+  padding: 4px 10px;
+  border: 1px solid var(--border-strong);
   border-radius: var(--radius-sm);
-  background: var(--surface-2);
+  background: transparent;
   color: var(--text-muted);
   font-size: 0.75rem;
+  font-weight: 500;
 }
 
 .ctx-refresh:hover:not(:disabled),
 .ctx-toggle:hover {
-  border-color: var(--accent);
-  color: var(--text);
+  border-color: var(--mint-line);
+  color: var(--mint);
 }
 
 .ctx-refresh:disabled {
@@ -20,62 +21,73 @@
 }
 
 .ctx-count {
-  margin-top: calc(-1 * var(--space-2));
-  color: var(--text-muted);
+  margin-top: calc(-1 * var(--space-3));
+  color: var(--text-faint);
   font-size: 0.75rem;
 }
 
 .ctx-error {
   padding: var(--space-2) var(--space-3);
   border-radius: var(--radius-md);
-  background: rgba(248, 81, 73, 0.12);
+  background: var(--danger-soft);
   color: var(--danger);
   font-size: 0.8125rem;
 }
 
 .ctx-message {
-  padding: var(--space-2) var(--space-3);
+  padding: var(--space-3);
   border: 1px solid var(--border);
-  border-left-width: 3px;
   border-radius: var(--radius-md);
   background: var(--surface-2);
-}
-
-.ctx-message.system {
-  border-left-color: var(--warning);
-}
-
-.ctx-message.user {
-  border-left-color: var(--accent);
-}
-
-.ctx-message.assistant {
-  border-left-color: var(--success);
 }
 
 .ctx-head {
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  margin-bottom: var(--space-1);
+  margin-bottom: var(--space-2);
 }
 
 .ctx-role {
-  font-size: 0.75rem;
-  font-weight: 700;
+  gap: 6px;
+  padding: 1px 8px 1px 6px;
+  border-radius: 999px;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.ctx-message.system .ctx-role {
+  background: var(--lavender-soft);
+  color: var(--lavender);
+}
+
+.ctx-message.user .ctx-role {
+  background: var(--surface-3);
+  color: var(--text);
+}
+
+.ctx-message.assistant .ctx-role {
+  background: var(--mint-soft);
+  color: var(--mint);
 }
 
 .ctx-time {
-  color: var(--text-muted);
+  color: var(--text-faint);
   font-size: 0.6875rem;
+  font-variant-numeric: tabular-nums;
 }
 
 .ctx-toggle {
   margin-left: auto;
+  padding: 2px 8px;
+  font-size: 0.6875rem;
 }
 
 .ctx-content {
+  color: var(--text);
   font-size: 0.8125rem;
+  line-height: 1.55;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
 }

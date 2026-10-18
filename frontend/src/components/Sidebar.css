@@ -8,34 +8,38 @@
   background: var(--surface);
 }
 
+/* Segmented control */
 .sidebar-tabs {
   display: flex;
-  border-bottom: 1px solid var(--border);
-  background: var(--surface-2);
+  gap: var(--space-1);
+  margin: var(--space-3) var(--space-4) 0;
+  padding: var(--space-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg);
 }
 
 .sidebar-tab {
   flex: 1;
   justify-content: center;
-  padding: var(--space-3) var(--space-2);
+  padding: 7px var(--space-2);
   border: none;
-  border-bottom: 2px solid transparent;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-muted);
   font-size: 0.8125rem;
-  font-weight: 600;
+  font-weight: 500;
   white-space: nowrap;
 }
 
 .sidebar-tab:hover {
-  background: rgba(255, 255, 255, 0.06);
   color: var(--text);
 }
 
 .sidebar-tab.active {
-  border-bottom-color: var(--accent-strong);
-  background: var(--surface);
-  color: var(--text);
+  background: var(--surface-3);
+  color: var(--mint);
+  box-shadow: inset 0 0 0 1px var(--border-strong);
 }
 
 .sidebar-content {
@@ -62,39 +66,44 @@
 
 .panel-header h2 {
   margin: 0;
-  font-size: 1rem;
+  font-size: 0.9375rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
 }
 
 .panel-section-title {
-  margin: 0;
-  color: var(--text-muted);
-  font-size: 0.75rem;
+  margin: var(--space-2) 0 calc(-1 * var(--space-2));
+  color: var(--text-faint);
+  font-size: 0.6875rem;
   font-weight: 600;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
 }
 
 .panel-empty {
   padding: var(--space-5) var(--space-3);
-  color: var(--text-muted);
-  font-size: 0.875rem;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-md);
+  color: var(--text-faint);
+  font-size: 0.8125rem;
   text-align: center;
 }
 
 .badge {
-  padding: 1px var(--space-3);
+  padding: 2px var(--space-2);
   border-radius: 999px;
   font-size: 0.6875rem;
   font-weight: 600;
+  letter-spacing: 0.01em;
 }
 
 .badge.ok {
-  background: rgba(63, 185, 80, 0.15);
-  color: var(--success);
+  background: var(--mint-soft);
+  color: var(--mint);
 }
 
 .badge.bad {
-  background: rgba(248, 81, 73, 0.15);
+  background: var(--danger-soft);
   color: var(--danger);
 }
 
