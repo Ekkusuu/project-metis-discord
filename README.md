@@ -72,7 +72,10 @@ Requirements: Python 3.10+, Node.js 18+, an NVIDIA GPU is strongly recommended.
 
    Options: `start.bat --open` opens the dashboard in your browser, `--verbose` shows every log
    line, `--dev` adds the live-reloading dashboard dev server at <http://localhost:5173> for UI work.
-   Full logs are kept in `logs/` (`llm.log`, `backend.log`).
+   **Logs for troubleshooting**: every run writes `logs/metis_<date>_<time>.log` with everything
+   that happened: each line from the model service, the bot and the launcher, timestamped and
+   tagged, with the versions, GPU and settings in use at the top. The last 20 runs are kept.
+   They include what was said in chat and voice, so think before sharing them.
 
 Running the pieces by hand, each in its own terminal:
 

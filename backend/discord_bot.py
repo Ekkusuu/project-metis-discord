@@ -1112,6 +1112,8 @@ async def on_command_error(ctx: commands.Context, error: commands.CommandError):
         await ctx.send(f"❌ {error}")
         return
     print(f"Command error in {ctx.command}: {error}")
+    import traceback
+    traceback.print_exception(type(error), error, error.__traceback__)
     await ctx.send(f"⚠️ Something went wrong: {str(error)[:200]}")
 
 
@@ -1150,7 +1152,9 @@ def start_in_background() -> Optional[threading.Thread]:
         except discord.LoginFailure:
             print("✗ Discord rejected the bot token (DISCORD_BOT_TOKEN).")
         except Exception as e:
+            import traceback
             print(f"✗ Discord bot stopped: {e}")
+            traceback.print_exc()
         finally:
             _loop.close()
 

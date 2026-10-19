@@ -8,7 +8,9 @@ down cleanly on Ctrl+C (or when the window is closed).
     python metis.py --verbose   show every log line, not just the important ones
     python metis.py --stop      stop a Metis that was left running (e.g. after a crash)
 
-Full logs are written to logs/llm.log and logs/backend.log (logs/dashboard.log with --dev).
+Everything that happens is written to one log per run, logs/metis_<date>_<time>.log: every line
+from every part of Metis, timestamped and tagged ([llm], [metis], [ui], [launcher]), plus a header
+with the versions and settings in use. The last 20 runs are kept.
 """
 from __future__ import annotations
 
@@ -30,6 +32,7 @@ from typing import Callable, Deque, List, Optional
 
 ROOT = Path(__file__).resolve().parent
 LOGS = ROOT / "logs"
+KEEP_RUN_LOGS = 20
 WINDOWS = os.name == "nt"
 
 # --------------------------------------------------------------------------- console output
@@ -48,11 +51,53 @@ def _c(code: str, text: str) -> str:
 
 MINT, DIM, BOLD, RED, YELLOW, LAVENDER = "38;2;168;230;207", "2", "1", "38;2;255;123;134", "38;2;243;199;107", "38;2;184;169;255"
 _print_lock = threading.Lock()
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 
-def say(text: str = "") -> None:
+class RunLog:
+    """One file per run with every line from every service, timestamped and tagged by source."""
+
+    def __init__(self) -> None:
+        self.path: Optional[Path] = None
+        self._file = None
+        self._lock = threading.Lock()
+
+    def open(self) -> None:
+        LOGS.mkdir(exist_ok=True)
+        old = sorted(LOGS.glob("metis_*.log"))
+        for stale in old[: max(0, len(old) - (KEEP_RUN_LOGS - 1))]:
+            try:
+                stale.unlink()
+            except OSError:
+                pass
+        self.path = LOGS / f"metis_{time.strftime('%Y-%m-%d_%H-%M-%S')}.log"
+        self._file = open(self.path, "a", encoding="utf-8", buffering=1)
+
+    def write(self, source: str, line: str) -> None:
+        if not self._file:
+            return
+        stamp = time.strftime("%H:%M:%S") + f".{int(time.time() * 1000) % 1000:03d}"
+        with self._lock:
+            try:
+                self._file.write(f"{stamp} [{source}] {_ANSI.sub('', line)}\n")
+            except ValueError:
+                pass  # closed during shutdown
+
+    def close(self) -> None:
+        with self._lock:
+            if self._file:
+                self._file.close()
+                self._file = None
+
+
+run_log = RunLog()
+
+
+def say(text: str = "", log: bool = True) -> None:
     with _print_lock:
         print(text, flush=True)
+    if log and text.strip():
+        run_log.write("launcher", text.strip())
 
 
 def step(text: str) -> None:
@@ -110,7 +155,7 @@ def http_json(url: str, timeout: float = 2.0) -> Optional[dict]:
 
 # --------------------------------------------------------------------------- services
 class Service:
-    """A child process whose output goes to logs/<name>.log and (filtered) to this window."""
+    """A child process whose output goes to the run log and (filtered) to this window."""
 
     def __init__(self, name: str, label: str, colour: str, cmd: List[str], cwd: Path, env: dict, verbose: bool):
         self.name, self.label, self.colour = name, label, colour
@@ -118,10 +163,10 @@ class Service:
         self.proc: Optional[subprocess.Popen] = None
         self.tail: Deque[str] = collections.deque(maxlen=40)
         self.show_output = False  # quiet while starting; errors are shown from the tail if it fails
-        self.log_path = LOGS / f"{name}.log"
+        self.stopping = False
 
     def start(self) -> None:
-        LOGS.mkdir(exist_ok=True)
+        run_log.write("launcher", f"starting {self.name}: {' '.join(self.cmd)} (in {self.cwd})")
         flags = subprocess.CREATE_NEW_PROCESS_GROUP if WINDOWS else 0
         self.proc = subprocess.Popen(
             self.cmd, cwd=self.cwd, env=self.env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -131,15 +176,16 @@ class Service:
 
     def _pump(self) -> None:
         assert self.proc and self.proc.stdout
-        with open(self.log_path, "a", encoding="utf-8") as log:
-            log.write(f"\n===== {time.strftime('%Y-%m-%d %H:%M:%S')} =====\n")
-            for raw in self.proc.stdout:
-                line = raw.decode("utf-8", errors="replace").rstrip()
-                log.write(line + "\n")
-                log.flush()
-                self.tail.append(line)
-                if self.show_output and line and (self.verbose or not is_noise(line)):
-                    say(f"  {_c(self.colour, self.label)} {line}")
+        for raw in self.proc.stdout:
+            line = raw.decode("utf-8", errors="replace").rstrip()
+            run_log.write(self.label.strip(), line)
+            self.tail.append(line)
+            if self.show_output and line and (self.verbose or not is_noise(line)):
+                say(f"  {_c(self.colour, self.label)} {line}", log=False)
+        code = self.proc.wait()
+        # 0xC000013A / 3 / 130: the process ended because of the Ctrl+C/Ctrl+Break it was sent - a normal stop.
+        note = " (stopped by Ctrl+Break)" if self.stopping and code in (3221225786, 3, 130, -2) else ""
+        run_log.write("launcher", f"{self.name} exited with code {code}{note}")
 
     @property
     def running(self) -> bool:
@@ -149,6 +195,7 @@ class Service:
         """Ask nicely (Ctrl+Break = graceful shutdown), then force the whole process tree."""
         if not self.running:
             return
+        self.stopping = True
         try:
             self.proc.send_signal(signal.CTRL_BREAK_EVENT if WINDOWS else signal.SIGINT)
             self.proc.wait(timeout=timeout)
@@ -156,9 +203,9 @@ class Service:
             kill_tree(self.proc.pid)
 
     def show_tail(self, lines: int = 15) -> None:
-        say(_c(DIM, f"    last lines of {self.log_path.relative_to(ROOT)}:"))
+        say(_c(DIM, f"    last lines from {self.name} (full log: {log_name()}):"), log=False)
         for line in list(self.tail)[-lines:]:
-            say(_c(DIM, f"    {line}"))
+            say(_c(DIM, f"    {line}"), log=False)
 
 
 def kill_tree(pid: int) -> None:
@@ -179,19 +226,55 @@ def find(exe: str) -> Optional[str]:
     return shutil.which(exe) or shutil.which(exe + ".cmd")
 
 
-def run_quiet(cmd: List[str], cwd: Path, log_name: str, env: Optional[dict] = None) -> bool:
-    LOGS.mkdir(exist_ok=True)
-    with open(LOGS / log_name, "w", encoding="utf-8") as log:
-        result = subprocess.run(cmd, cwd=cwd, stdout=log, stderr=subprocess.STDOUT, env=env)
-    return result.returncode == 0
+def log_name() -> str:
+    return str(run_log.path.relative_to(ROOT)) if run_log.path else "logs" + os.sep
+
+
+def run_quiet(cmd: List[str], cwd: Path, source: str) -> bool:
+    """Run a setup command; its output goes to the run log only."""
+    run_log.write("launcher", f"running: {' '.join(cmd)} (in {cwd})")
+    proc = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
+    assert proc.stdout
+    for raw in proc.stdout:
+        run_log.write(source, raw.decode("utf-8", errors="replace").rstrip())
+    return proc.wait() == 0
+
+
+def log_environment(cfg: dict, args: argparse.Namespace) -> None:
+    """Versions and settings at the top of the log, so a problem can be matched to its setup."""
+    import platform
+
+    def output(cmd: List[str]) -> str:
+        try:
+            return subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, timeout=10).stdout.strip()
+        except Exception:
+            return "?"
+
+    w = lambda text: run_log.write("env", text)  # noqa: E731
+    w(f"Metis run started {time.strftime('%Y-%m-%d %H:%M:%S %z')}, options: {' '.join(sys.argv[1:]) or '(none)'}")
+    w(f"git: {output(['git', 'rev-parse', '--abbrev-ref', 'HEAD'])} @ {output(['git', 'log', '-1', '--format=%h %s'])}"
+      + (" (with uncommitted changes)" if output(["git", "status", "--porcelain", "--untracked-files=no"]) else ""))
+    w(f"os: {platform.platform()}; python {platform.python_version()} ({sys.executable})")
+    node = find("node")
+    w(f"node: {output([node, '--version']) if node else 'not found'}")
+    gpu = output(["nvidia-smi", "--query-gpu=name,driver_version,memory.used,memory.total", "--format=csv,noheader"])
+    w(f"gpu: {gpu or 'none found'}")
+    voice = cfg.get("voice", {})
+    w(f"config: model={cfg['model']['path']} personality={cfg.get('personality')} "
+      f"llm_port={cfg['llm_service']['port']} backend_port={cfg['backend']['port']} "
+      f"discord={'on' if cfg.get('discord', {}).get('enabled', True) else 'off'} "
+      f"rag={'on' if cfg.get('rag', {}).get('enabled') else 'off'} "
+      f"tools={'on' if cfg.get('tools', {}).get('enabled') else 'off'} "
+      f"tts={voice.get('tts_voice')}/{voice.get('tts_device', 'auto')} stt={voice.get('stt_model_path')}")
+    w(f".env present: {(ROOT / '.env').exists()}; config file: {os.getenv('METIS_CONFIG') or 'config.yaml'}")
 
 
 def ensure_node_modules(npm: str) -> bool:
     for folder in (ROOT / "backend" / "llm_service", ROOT / "frontend"):
         if not (folder / "node_modules").exists():
             step(f"Installing dependencies in {folder.relative_to(ROOT)} (first run)...")
-            if not run_quiet([npm, "install"], folder, f"npm-install-{folder.name}.log"):
-                fail(f"npm install failed - see logs/npm-install-{folder.name}.log")
+            if not run_quiet([npm, "install"], folder, "npm"):
+                fail(f"npm install failed - see {log_name()}")
                 return False
     return True
 
@@ -266,6 +349,8 @@ def main() -> int:
     if args.stop:
         return stop_running(cfg)
 
+    run_log.open()
+    log_environment(cfg, args)
     llm_port, backend_port = int(cfg["llm_service"]["port"]), int(cfg["backend"]["port"])
     model_name = Path(cfg["model"]["path"]).stem
     say()
@@ -291,12 +376,14 @@ def main() -> int:
     if not args.dev:
         if dashboard_is_stale():
             step("Building the dashboard...")
-            if not run_quiet([npm, "run", "build"], ROOT / "frontend", "dashboard-build.log"):
-                warn("Dashboard build failed (see logs/dashboard-build.log); Metis will run without it.")
+            if not run_quiet([npm, "run", "build"], ROOT / "frontend", "build"):
+                warn(f"Dashboard build failed (see {log_name()}); Metis will run without it.")
             else:
                 ok("Dashboard built")
 
-    env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1", "FORCE_COLOR": "0"}
+    # PYTHONFAULTHANDLER: if a native library (CUDA, audio) crashes the backend, the log shows where.
+    env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1", "FORCE_COLOR": "0",
+           "PYTHONFAULTHANDLER": "1"}
     llm = Service("llm", "llm    ", LAVENDER, [node, "server.js"], ROOT / "backend" / "llm_service", env, args.verbose)
     backend = Service("backend", "metis  ", MINT, [sys.executable, "-m", "backend"], ROOT, env, args.verbose)
     services: List[Service] = [llm, backend]
@@ -369,7 +456,7 @@ def main() -> int:
 
         bot_line = _c(DIM, "disabled in config.yaml")
         if cfg.get("discord", {}).get("enabled", True):
-            bot_line = _c(YELLOW, "not connected yet - check logs/backend.log")
+            bot_line = _c(YELLOW, f"not connected yet - check {log_name()}")
             for _ in range(60):
                 status = http_json(f"http://127.0.0.1:{backend_port}/status") or {}
                 if status.get("discord_connected"):
@@ -385,7 +472,7 @@ def main() -> int:
         say(f"    Dashboard   {_c(BOLD, url)}")
         say(f"    Discord     {bot_line}")
         say(f"    Model       {model_name}")
-        say(f"    Logs        {_c(DIM, str(LOGS.relative_to(ROOT)) + os.sep)}")
+        say(f"    Log         {_c(DIM, log_name())}")
         say()
         say(_c(DIM, "  Press Ctrl+C to stop. Activity:"))
         say()
@@ -410,7 +497,17 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    code = main()
+    try:
+        code = main()
+    except Exception:
+        import traceback
+
+        for line in traceback.format_exc().splitlines():
+            run_log.write("launcher", line)
+        traceback.print_exc()
+        code = 1
+    run_log.write("launcher", f"run ended (exit code {code})")
+    run_log.close()
     if code != 0 and WINDOWS and sys.stdin and sys.stdin.isatty():
         try:
             input("\n  Press Enter to close this window...")
