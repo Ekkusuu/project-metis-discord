@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import datetime
 import json
+import re
 import time
 from typing import Any, Dict, List, Literal, Optional, Tuple
 
@@ -225,13 +226,35 @@ def people_context(req: ChatRequest) -> str:
     return "\n\n".join(parts)
 
 
-def build_prompt(messages: List[Dict[str, str]], context_text: str, people_text: str = "") -> List[Dict[str, str]]:
+def reply_guidance(messages: List[Dict[str, str]], voice: bool, has_context: bool) -> str:
     """
-    Insert people memory and gathered information as a system message right before
-    the latest user message. Keeping the system prompt and earlier history
+    A short reminder placed right before the latest message. Small models follow the most recent
+    instructions far more than a long persona prompt at the top, so without this the personality
+    takes over and questions go unanswered. It works with any persona and doesn't change it.
+    """
+    match = re.match(r"^\[([^\]]+)\]", messages[-1]["content"])
+    who = match.group(1) if match else "the person"
+    rules = [
+        f"Reply to {who}'s last message. If they asked a question or asked you to do something, "
+        "answer or do exactly that in your first sentence.",
+        "Your personality is flavour, never a replacement for answering.",
+        ("Facts, dates and numbers must come from the information above; if it isn't there, say you don't know "
+         "instead of guessing." if has_context else
+         "Never invent facts, dates or numbers; if you don't know, say so."),
+    ]
+    if voice:
+        rules.append("This is spoken aloud: one or two short sentences, no emoji, no lists.")
+    return "How to reply:\n- " + "\n- ".join(rules)
+
+
+def build_prompt(messages: List[Dict[str, str]], context_text: str, people_text: str = "",
+                 guidance: str = "") -> List[Dict[str, str]]:
+    """
+    Insert people memory, gathered information and reply guidance as a system message right
+    before the latest user message. Keeping the system prompt and earlier history
     byte-identical between turns lets the LLM service reuse its KV cache.
     """
-    if not context_text and not people_text:
+    if not context_text and not people_text and not guidance:
         return list(messages)
     now = datetime.datetime.now().strftime("%A, %d %B %Y, %H:%M")
     sections = [f"Current date and time: {now}"]
@@ -242,6 +265,8 @@ def build_prompt(messages: List[Dict[str, str]], context_text: str, people_text:
             "Information retrieved for the next reply (from notes, memories, or the web). "
             "Use it when it is relevant; do not mention that you looked it up.\n\n" + context_text
         )
+    if guidance:
+        sections.append(guidance)
     return messages[:-1] + [{"role": "system", "content": "\n\n".join(sections)}, messages[-1]]
 
 
@@ -257,7 +282,8 @@ def _sampling(req: ChatRequest) -> Dict[str, Any]:
 async def _prepare(req: ChatRequest) -> Tuple[List[Dict[str, str]], Dict[str, Any]]:
     messages = _base_messages(req)
     context_text, tool_timings, rag_timings = await gather_context(messages, req)
-    final = trim_messages_to_context(build_prompt(messages, context_text, people_context(req)))
+    guidance = reply_guidance(messages, req.voice_mode, bool(context_text))
+    final = trim_messages_to_context(build_prompt(messages, context_text, people_context(req), guidance))
     stamp = datetime.datetime.now().isoformat()
     state.context = [{**m, "timestamp": stamp} for m in final]
     return final, {"tool_timings": tool_timings, "rag_timings": rag_timings}

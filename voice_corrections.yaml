@@ -5,5 +5,8 @@ entities:
   - Sava
   - Kindred
   - Aatrox
- 
 
+# How the speech recogniser tends to mishear names -> the correct spelling.
+# (Fuzzy matching against 'entities' catches close misspellings; these cover the ones it can't.)
+aliases:
+  Metis: [Matthis, Mattis, Matis, Mathis, Metas, Medis, Meadis, Metiss, Meetis]

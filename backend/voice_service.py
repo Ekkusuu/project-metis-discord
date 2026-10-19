@@ -10,7 +10,7 @@ import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import yaml
@@ -43,6 +43,7 @@ class VoiceService:
         self._stt_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="STT")
         self._tts_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="TTS")
         self._names: List[str] = self._load_names()
+        self._aliases: Dict[str, str] = self._load_aliases()
 
     async def initialize(self) -> None:
         if self._initialized:
@@ -189,8 +190,24 @@ class VoiceService:
                 self._names.append(spoken)
                 known.add(spoken.lower())
 
+    @staticmethod
+    def _load_aliases() -> Dict[str, str]:
+        """voice_corrections.yaml 'aliases': {Name: [how the transcriber mishears it, ...]} -> {misheard: Name}."""
+        path = PROJECT_ROOT / "voice_corrections.yaml"
+        try:
+            data = yaml.safe_load(path.read_text(encoding="utf-8")) or {} if path.exists() else {}
+        except Exception:
+            return {}
+        out: Dict[str, str] = {}
+        for name, variants in (data.get("aliases") or {}).items():
+            for variant in variants or []:
+                out[str(variant).strip().lower()] = str(name)
+        return out
+
     def _correct_names(self, text: str) -> str:
         """Snap capitalised words that sound like a known name onto the correct spelling."""
+        for misheard, name in self._aliases.items():
+            text = re.sub(rf"(?<![\w']){re.escape(misheard)}(?![\w'])", name, text, flags=re.IGNORECASE)
         if not self._names:
             return text
         threshold = float(self.config.get("name_correction_threshold", 0.8))

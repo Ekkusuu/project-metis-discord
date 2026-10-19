@@ -157,9 +157,22 @@ _QUERY_PROMPT = "Write a short web search query (2-6 keywords) for what the mess
 # "none" (it missed e.g. "who won the f1 race yesterday?").
 _FRESH_INFO = re.compile(
     r"\b(today|tonight|yesterday|tomorrow|right now|currently|latest|newest|recent(ly)?|this (week|month|year)|"
-    r"news|score|scores|won|winner|results?|price|prices|stock|weather|forecast|release date|came out)\b",
+    r"news|score|scores|won|winner|results?|price|prices|cost|costs|stock|weather|forecast|"
+    r"release(d|s)?|release date|launch(ed|es)?|came out|come out|announced|when (was|is|did|does|will)|"
+    r"what (year|date|day)|exact date|how (much|many))\b",
     re.IGNORECASE,
 )
+# Someone explicitly asking Metis to look something up.
+_SEARCH_REQUEST = re.compile(
+    r"\b(search|google|look (it |that |this )?up|look for|check online|find out|browse)\b", re.IGNORECASE
+)
+_QUESTION_WORDS = re.compile(r"^\W*(who|what|when|where|which|why|how|is|are|was|were|did|does|do|can|could|tell me|give me)\b",
+                             re.IGNORECASE)
+
+
+def is_question_like(text: str) -> bool:
+    """Questions, including spoken ones that the transcriber didn't end with '?'."""
+    return "?" in text or bool(_QUESTION_WORDS.search(text)) or bool(re.search(r"\b(tell|give) me\b", text, re.IGNORECASE))
 
 
 def _message_text(message: str) -> str:
@@ -235,7 +248,8 @@ async def decide_tools(
             0.0,
             12,
         )
-        if choice == "none" and "web_search" in decidable and "?" in text and _FRESH_INFO.search(text):
+        if choice == "none" and "web_search" in decidable and (
+                _SEARCH_REQUEST.search(text) or (is_question_like(text) and _FRESH_INFO.search(text))):
             choice = "web_search"
         if choice in decidable:
             query = await asyncio.to_thread(
