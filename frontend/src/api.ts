@@ -1,5 +1,7 @@
-// start.bat sets VITE_API_URL from backend.port in config.yaml; this is only the fallback.
-export const API_URL: string = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8730';
+// The built dashboard is served by the backend itself, so it talks to its own origin. The Vite dev
+// server (`python metis.py --dev`) runs elsewhere and gets VITE_API_URL from the launcher.
+export const API_URL: string =
+  import.meta.env.VITE_API_URL || (import.meta.env.DEV ? 'http://127.0.0.1:8730' : '');
 
 /** Window event dispatched whenever an AI message arrives on the Discord stream. */
 export const AI_MESSAGE_EVENT = 'metis:ai-message';

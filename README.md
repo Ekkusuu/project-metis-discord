@@ -60,8 +60,19 @@ Requirements: Python 3.10+, Node.js 18+, an NVIDIA GPU is strongly recommended.
    copy .env.example .env
    ```
    and paste the token into `DISCORD_BOT_TOKEN`.
-4. **Run everything**: `start.bat`. It installs Node dependencies on first run, waits for the
-   model to load, then starts the backend (and bot) and the dashboard at <http://localhost:5173>.
+4. **Run it**: double-click `start.bat`. Everything runs in that one window: it installs Node
+   dependencies on first run, rebuilds the dashboard if it changed, loads the model, starts the
+   backend and bot, then shows a short status and the bot's activity. The dashboard is at
+   <http://127.0.0.1:8730>.
+
+   **To stop**, press Ctrl+C. Metis disconnects from Discord, saves what it learned from the
+   conversation, and then stops the model, in that order. Closing the window also stops everything,
+   but Windows only allows a few seconds for it, so the last bit of learning may be skipped. If a
+   crash ever leaves something running, `stop.bat` cleans it up.
+
+   Options: `start.bat --open` opens the dashboard in your browser, `--verbose` shows every log
+   line, `--dev` adds the live-reloading dashboard dev server at <http://localhost:5173> for UI work.
+   Full logs are kept in `logs/` (`llm.log`, `backend.log`).
 
 Running the pieces by hand, each in its own terminal:
 
@@ -71,8 +82,9 @@ venv\Scripts\python -m backend
 cd frontend && npm run dev
 ```
 
-(LLM service on :3730, backend + bot on :8730, dashboard on :5173 — ports are set in `config.yaml`;
-when running the dashboard by hand, set `VITE_API_URL` if you change `backend.port`.)
+(LLM service on :3730, backend + bot + built dashboard on :8730, dev dashboard on :5173 — ports are
+set in `config.yaml`; when running the dev dashboard by hand, set `VITE_API_URL` if you change
+`backend.port`.)
 
 Set `discord.enabled: false` to run the backend and dashboard without the bot.
 
@@ -184,7 +196,7 @@ What keeps it there (all configurable in `config.yaml`):
 ## Dashboard & API
 
 The dashboard is read-only: all conversation happens on Discord. Useful endpoints
-(full list at <http://localhost:8730/docs>):
+(full list at <http://127.0.0.1:8730/docs>):
 
 - `GET /status` — LLM / Discord / voice status
 - `GET /discord/stream` — SSE feed of messages (resumable via `Last-Event-ID`)

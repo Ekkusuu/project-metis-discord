@@ -17,6 +17,7 @@ discord-ext-voice-recv @ git+https://github.com/porgeeratad/discord-ext-voice-re
 # Web search (DuckDuckGo - no server required) and web page reading
 ddgs>=6.0.0
 httpx>=0.27
+psutil>=5.9
 trafilatura>=2.0
 lxml_html_clean>=0.4  # needed by trafilatura with lxml>=5.2
 

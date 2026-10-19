@@ -14,7 +14,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from backend.config import get_config
+from backend.config import PROJECT_ROOT, get_config
 from backend.routers.chat import router as chat_router
 from backend.routers.discord import router as discord_router
 from backend.routers.memory import router as memory_router
@@ -97,10 +97,6 @@ app.include_router(memory_router)
 app.include_router(discord_router)
 
 
-@app.get("/", tags=["root"])
-async def read_root():
-    return {"message": "Project Metis backend is running"}
-
 
 @app.get("/health", tags=["health"])
 async def health():
@@ -132,6 +128,19 @@ async def status():
         "voice_channels": bot["voice_channels"],
         "people_known": len(get_people().people),
     }
+
+
+# The dashboard (frontend/, built with `npm run build`) is served from the same address as the API,
+# so there's no separate web server to run. Mounted last so API routes take precedence.
+_DASHBOARD = PROJECT_ROOT / "frontend" / "dist"
+if (_DASHBOARD / "index.html").exists():
+    from fastapi.staticfiles import StaticFiles
+
+    app.mount("/", StaticFiles(directory=_DASHBOARD, html=True), name="dashboard")
+else:
+    @app.get("/", tags=["root"])
+    async def read_root():
+        return {"message": "Metis backend is running. Build the dashboard with: cd frontend && npm run build"}
 
 
 if __name__ == "__main__":
