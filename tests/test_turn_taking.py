@@ -156,3 +156,22 @@ def test_alone_with_metis_everything_is_for_her():
 def test_wait_kind_is_reported():
     assert decide([t(SAVA, "anyone know a pizza place?")], BOT, ["Metis"], NAMES, now=NOW).signals["wait"] == "room"
     assert decide([t(SAVA, "how do magnets work")], BOT, ["Metis"], NAMES, now=NOW).signals["wait"] == "lone"
+
+
+# --- leaving the voice call when asked (the model only sees messages that pass this word check) ---
+@pytest.mark.parametrize("text", [
+    "Metis, leave the call", "okay you can go now", "Metis disconnect", "bye Metis", "get out of the vc",
+    "Metis hang up", "go away Metis", "you can log off now",
+])
+def test_leave_requests_reach_the_model(text):
+    from backend.turn_taking import might_ask_to_leave
+    assert might_ask_to_leave(text)
+
+
+@pytest.mark.parametrize("text", [
+    "what's the weather tomorrow", "Metis tell me a joke", "I'm going to the store", "golf is fun",
+    "that was a great goal",
+])
+def test_ordinary_messages_skip_the_leave_check(text):
+    from backend.turn_taking import might_ask_to_leave
+    assert not might_ask_to_leave(text)

@@ -290,6 +290,32 @@ Decide who the LAST message is meant for.
 Answer with one option."""
 
 
+# ---------------------------------------------------------------------------
+# Leaving the voice call when asked
+# ---------------------------------------------------------------------------
+# Cheap word check first, so the model is only asked when leaving could actually be meant.
+LEAVE_HINT = re.compile(
+    r"\b(leave|leaving|go away|get out|you can go|go now|disconnect|hang up|log ?off|sign off|bye|goodbye|"
+    r"good ?night|see (you|ya)|head out|dip|exit|quit|scram|kick(ed)? you)\b",
+    re.IGNORECASE,
+)
+
+LEAVE_CHOICES = ["Metis should leave the call", "Metis should stay"]
+
+LEAVE_PROMPT = """You read a Discord voice chat that includes an AI companion called Metis.
+Decide whether the LAST speaker is asking Metis to leave the voice call now.
+- Metis should leave the call: they tell or ask Metis to leave, go, disconnect or hang up \
+("Metis, leave the call", "you can go now Metis", "bye Metis, get out of here", or right after \
+Metis spoke: "thanks, you can leave now").
+- Metis should stay: anything else, e.g. the speaker says THEY are leaving ("I have to go, bye"), \
+says bye to someone else, talks about leaving a game or place, or asks whether Metis is leaving.
+Answer with one option."""
+
+
+def might_ask_to_leave(text: str) -> bool:
+    return bool(LEAVE_HINT.search(text))
+
+
 def transcript_for_model(turns: Sequence[Turn], names_by_id: Dict[int, str], limit: int = 10) -> str:
     lines = []
     for t in turns[-limit:]:

@@ -19,6 +19,7 @@ import asyncio
 import io
 import json
 import os
+import random
 import re
 import threading
 import time
@@ -46,7 +47,7 @@ from backend.text_utils import (
 )
 from backend.turn_taking import (
     ADDRESSEE_CHOICES, ADDRESSEE_PROMPT, ASK, RESPOND, WAIT_OPEN, Settings, Turn, decide, transcript_for_model,
-    verdict_from_addressee,
+    verdict_from_addressee, LEAVE_CHOICES, LEAVE_PROMPT, might_ask_to_leave,
 )
 from backend.voice_service import TTS_SAMPLE_RATE, get_voice_service
 from backend import voice_compat
@@ -306,6 +307,34 @@ async def ask_addressee(conversation: Conversation) -> str:
     except Exception as e:
         print(f"Addressee check failed ({e}); staying quiet")
         return "nobody in particular"
+
+
+async def asked_to_leave(conversation: Conversation) -> bool:
+    """Is the latest (voice) message someone telling Metis to leave the call?"""
+    if not config.get("voice", {}).get("leave_when_asked", True):
+        return False
+    turns = conversation.turns()
+    if not turns or not might_ask_to_leave(turns[-1].text):
+        return False
+    payload = {
+        "messages": [
+            {"role": "system", "content": LEAVE_PROMPT},
+            {"role": "user", "content": "Voice chat:\n" + transcript_for_model(turns, conversation.names_by_id(), 6)
+                                        + "\n\nShould Metis leave the call now?"},
+        ],
+        "json_schema": {"enum": LEAVE_CHOICES},
+        "temperature": 0,
+        "max_tokens": 16,
+    }
+    try:
+        async with http().post(f"{llm_service_url()}/chat/completion", json=payload,
+                               timeout=aiohttp.ClientTimeout(total=30)) as response:
+            choice = json.loads((await response.json())["choices"][0]["message"]["content"])
+    except Exception as e:
+        print(f"Leave check failed ({e}); staying")
+        return False
+    print(f"🚪 leave check: {choice}")
+    return choice == LEAVE_CHOICES[0]
 
 
 async def is_metis_turn(conversation: Conversation, *, is_dm: bool = False, voice: bool = False,
@@ -745,6 +774,9 @@ class VoiceReceiver:
             alone = len(self.present_members()) <= 1
             if not await is_metis_turn(conversation, voice=True, alone_with_metis=alone):
                 return
+            if await asked_to_leave(conversation):
+                await self._say_goodbye_and_leave(user, seq)
+                return
             timings["judgment"] = time.perf_counter() - t
 
             reply, stats, outcome = await self._speak_streamed_reply(conversation, t0, timings, seq)
@@ -771,6 +803,30 @@ class VoiceReceiver:
         })
         asyncio.create_task(conversation.compact())
         self._print_timings(timings, stats, time.perf_counter() - t0)
+
+    async def _say_goodbye_and_leave(self, user: discord.abc.User, seq: int) -> None:
+        """
+        Someone asked Metis to leave the call: say bye, then disconnect. The goodbye is a set line
+        rather than generated: a small model in character tends to argue about leaving instead.
+        """
+        lines = self.cfg.get("goodbyes") or ["Okay, bye!"]
+        goodbye = random.choice(lines)
+        pcm = await (await get_voice_service()).synthesize_speech(goodbye)
+        if pcm and await self.wait_for_floor(seq):
+            await self._play_pcm(pcm)
+            async with self.conversation.lock:
+                self.conversation.add_assistant(goodbye, to=user.id)
+        guild = self.voice_client.guild
+        channel_name = self.voice_client.channel.name
+        if voice_receivers.get(guild.id) is not self:
+            return  # already left (>leave, or everyone else left meanwhile)
+        await _disconnect(guild)
+        print(f"👋 Left {channel_name}: {user.display_name} asked me to")
+        try:
+            await self.text_channel.send(
+                f"👋 Left **{channel_name}** ({user.display_name} asked me to). Text chat is back on.")
+        except discord.HTTPException:
+            pass
 
     async def _speak_streamed_reply(self, conversation: Conversation, t0: float, timings: Dict[str, float],
                                     seq: int) -> Tuple[str, Dict[str, Any], str]:
@@ -1022,7 +1078,7 @@ async def join_voice(ctx: commands.Context):
         voice_receivers[ctx.guild.id] = receiver
         await notice.edit(content=(
             f"🔊 Joined **{target.name}** — just talk, I'm listening.\n"
-            "💬 Text replies are paused while I'm in voice. Use `>leave` when you're done."
+            "💬 Text replies are paused while I'm in voice. Say \"Metis, you can leave\" or use `>leave` when you're done."
         ))
     except Exception as e:
         # Don't leave a half-open connection behind: discord.py would keep retrying it, which shows

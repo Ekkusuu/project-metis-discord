@@ -95,6 +95,10 @@ voice:
   # Only used when etiquette.barge_in is false: ignore speech while Metis is talking.
   discard_while_speaking: true
 
+  # Leave the call when someone asks her to ("Metis, you can leave now"), after saying one of these.
+  leave_when_asked: true
+  goodbyes: ["Okay, bye!", "Alright, see you later!", "Got it, bye everyone!", "Okay, talk to you later!"]
+
   # Same etiquette as text chat, plus turn-taking for speech.
   etiquette:
     engagement: "balanced"      # reserved | balanced | chatty | always

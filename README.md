@@ -97,7 +97,7 @@ She always answers when you **@mention** her, **reply** to her, **address her by
 | Command | |
 |---|---|
 | `>join` | Join your voice channel and start listening. Text replies pause while she's in voice. |
-| `>leave` | Leave voice (she also leaves by herself when everyone else does). |
+| `>leave` | Leave voice. You can also just say it in the call ("Metis, you can leave now"); she says bye and goes. She also leaves by herself when everyone else does. |
 | `>reset` | Start the channel's conversation fresh (she learns from it first). |
 | `>status` | Personality, context usage, tools and voice state. |
 | `>personality [name]` | List personalities or switch (needs *Manage Server*; lasts until restart). |
