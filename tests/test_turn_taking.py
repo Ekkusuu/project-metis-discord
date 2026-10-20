@@ -175,3 +175,29 @@ def test_leave_requests_reach_the_model(text):
 def test_ordinary_messages_skip_the_leave_check(text):
     from backend.turn_taking import might_ask_to_leave
     assert not might_ask_to_leave(text)
+
+
+@pytest.mark.parametrize("text", [
+    "Okay, just leave.", "No, I mean leave the voice channel.", "Just leave, please.",
+    "I told you, Metis, please leave.", "Metis Leave.", "okay Metis you can leave now",
+    "can you leave the vc please?", "Metis disconnect",
+])
+def test_plain_commands_to_leave_need_no_model(text):
+    from backend.turn_taking import clearly_asks_to_leave
+    assert clearly_asks_to_leave(text, alone_with_metis=True)
+
+
+@pytest.mark.parametrize("text", [
+    "I have to leave soon guys, bye", "Metis are you leaving?", "Sava you should leave that game",
+    "don't leave", "I'm gonna leave the call", "leave me alone", "I want to leave the voice channel",
+    "when you leave the call, tell me",
+])
+def test_not_commands_to_leave(text):
+    from backend.turn_taking import clearly_asks_to_leave
+    assert not clearly_asks_to_leave(text, alone_with_metis=True)
+
+
+def test_bare_leave_in_a_group_needs_her_name():
+    from backend.turn_taking import clearly_asks_to_leave
+    assert not clearly_asks_to_leave("Okay, just leave.", alone_with_metis=False)
+    assert clearly_asks_to_leave("Metis, just leave.", alone_with_metis=False)

@@ -9,4 +9,5 @@ entities:
 # How the speech recogniser tends to mishear names -> the correct spelling.
 # (Fuzzy matching against 'entities' catches close misspellings; these cover the ones it can't.)
 aliases:
+  Chisinau: [Chichino, Chishinau, Kishinev]
   Metis: [Matthis, Mattis, Matis, Mathis, Metas, Medis, Madis, Meadis, Metiss, Meetis]

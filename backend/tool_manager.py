@@ -150,8 +150,20 @@ _DECIDE_PROMPT = """Decide whether an AI companion needs a tool before replying 
 - none: greetings, small talk, feelings, jokes, or things you can answer from general knowledge
 Answer with one option."""
 
-_QUERY_PROMPT = ("Write a short web search query (2-6 keywords) for what the latest message is asking. Use the "
-                 "earlier messages only to work out what words like 'it' or 'that' refer to. Output only the query.")
+_QUERY_PROMPT = ("Write a short web search query (2-6 keywords) for what the latest message wants to know. If it "
+                 "refers back ('it', 'that', 'the date', 'search for it', 'do it'), the topic is in the earlier "
+                 "messages: put that topic in the query. Output only the query.")
+# Follow-ups like "tell me the exact date" were searched literally ("what is the exact date").
+_QUERY_EXAMPLES = [
+    ("Earlier messages:\n[Robin]: when was the tesla roadster released?\n\n"
+     "Latest message: [Robin]: but can't you just search for the date?", "Tesla Roadster release date"),
+    ("Earlier messages:\n[Sam]: who won the f1 race yesterday\n\nLatest message: [Sam]: then do it", "F1 race winner"),
+    ("Latest message: [Ana]: what's the price of a ps5 right now", "PS5 price"),
+]
+# "Do it" / "go ahead" after Metis offered to look something up.
+_GO_AHEAD = re.compile(r"^\W*(then |so |ok(ay)? |yes |yeah |sure |please )*(do it|do that|go ahead|go for it|"
+                       r"please do|yes please|search( it| for it)?|look it up|check)\W*$", re.IGNORECASE)
+_OFFERED_TO_SEARCH = re.compile(r"\b(search|look (it |that )?up|check|find (it|that|out))\b", re.IGNORECASE)
 
 # Recent-events questions go to the news index, which is sorted by date; a text search for
 # "what happened in France" returns encyclopedia pages.
@@ -263,7 +275,8 @@ async def decide_tools(
     prompt = (f"Recent conversation:\n{context}\n\n" if context else "") + f"Latest message: {last_user_message}"
     # The query is written from what people said, not from Metis's replies: if she made something up,
     # a query built from it searches for her mistake ("roadster" when asked about news in France).
-    said = "\n".join(m["content"][:200] for m in recent if m["role"] == "user")
+    # Further back than the decision context: "tell me the exact date" can come a few turns after the question.
+    said = "\n".join(m["content"][:200] for m in [m for m in messages[:-1] if m.get("role") == "user"][-3:])
     query_prompt = (f"Earlier messages:\n{said}\n\n" if said else "") + f"Latest message: {last_user_message}"
 
     try:
@@ -274,13 +287,19 @@ async def decide_tools(
             0.0,
             12,
         )
+        last_metis = next((m["content"] for m in reversed(recent) if m["role"] == "assistant"), "")
         if choice == "none" and "web_search" in decidable and (
-                _SEARCH_REQUEST.search(text) or (is_question_like(text) and _FRESH_INFO.search(text))):
+                _SEARCH_REQUEST.search(text) or (is_question_like(text) and _FRESH_INFO.search(text))
+                or (_GO_AHEAD.match(text) and (_OFFERED_TO_SEARCH.search(last_metis) or _SEARCH_REQUEST.search(said)
+                                               or (is_question_like(said) and _FRESH_INFO.search(said))))):
             choice = "web_search"
         if choice in decidable:
+            examples: List[Dict[str, str]] = []
+            for question, answer in _QUERY_EXAMPLES:
+                examples += [{"role": "user", "content": question}, {"role": "assistant", "content": answer}]
             query = await asyncio.to_thread(
                 chat_completion,
-                [{"role": "system", "content": _QUERY_PROMPT}, {"role": "user", "content": query_prompt}],
+                [{"role": "system", "content": _QUERY_PROMPT}, *examples, {"role": "user", "content": query_prompt}],
                 0.0, 0.9, 24,
             )
             written = query.strip().strip('"').splitlines()[0].strip() if query.strip() else ""

@@ -6,6 +6,7 @@ Uses the `ddgs` package - no server, API key or Docker required.
 from __future__ import annotations
 
 import asyncio
+import re
 from typing import Any, Dict, List
 
 from backend.config import get_config
@@ -117,6 +118,23 @@ class WebSearchTool(BaseTool):
                 return f"({page['url']})\n{page['text']}"
         return ""
 
+    async def _weather(self, query: str, message: str) -> str:
+        """Live weather for weather questions (search snippets don't have it); "" if not one or no place found."""
+        from backend.tools import weather
+
+        if not (weather.WEATHER_QUESTION.search(query) or weather.WEATHER_QUESTION.search(message)):
+            return ""
+        # The person's own words first: the model's query sometimes swaps the town for the country.
+        for text in dict.fromkeys(t for t in (re.sub(r"^\[[^\]]+\]:?\s*", "", message), query) if t):
+            try:
+                found = await asyncio.wait_for(asyncio.to_thread(weather.lookup, text), timeout=12)
+            except Exception as e:
+                print(f"Weather lookup failed: {e}")
+                return ""
+            if found:
+                return found
+        return ""
+
     async def execute(
         self, 
         query: str, 
@@ -136,6 +154,11 @@ class WebSearchTool(BaseTool):
         Returns:
             Dict with success status and search results
         """
+        weather = await self._weather(query, kwargs.get("message", ""))
+        if weather:
+            print(f"🌦️ {weather.splitlines()[0]}")
+            return {"success": True, "result": weather,
+                    "metadata": {"query": query, "num_results": 1, "search_type": "weather"}}
         try:
             num_results = min(max(1, int(num_results or 5)), 10)
             if search_type not in ("text", "news"):
@@ -159,6 +182,10 @@ class WebSearchTool(BaseTool):
                     }
                 }
             
+            print(f"🌐 {len(results)} {search_type} result(s) for {query!r}:\n"
+                  + "\n".join(f"   - {r.get('title', '')[:100]}" + (f" ({r['date'][:10]})" if r.get("date") else "")
+                              for r in results))
+
             # Format results for context
             formatted_results = []
             

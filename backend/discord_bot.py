@@ -48,7 +48,7 @@ from backend.text_utils import (
 )
 from backend.turn_taking import (
     ADDRESSEE_CHOICES, ADDRESSEE_PROMPT, ASK, RESPOND, WAIT_OPEN, Settings, Turn, decide, transcript_for_model,
-    verdict_from_addressee, LEAVE_CHOICES, LEAVE_PROMPT, might_ask_to_leave,
+    verdict_from_addressee, LEAVE_CHOICES, LEAVE_PROMPT, clearly_asks_to_leave, might_ask_to_leave,
 )
 from backend.voice_service import TTS_SAMPLE_RATE, get_voice_service
 from backend import voice_compat
@@ -310,13 +310,16 @@ async def ask_addressee(conversation: Conversation) -> str:
         return "nobody in particular"
 
 
-async def asked_to_leave(conversation: Conversation) -> bool:
+async def asked_to_leave(conversation: Conversation, alone_with_metis: bool = False) -> bool:
     """Is the latest (voice) message someone telling Metis to leave the call?"""
     if not config.get("voice", {}).get("leave_when_asked", True):
         return False
     turns = conversation.turns()
     if not turns or not might_ask_to_leave(turns[-1].text):
         return False
+    if clearly_asks_to_leave(turns[-1].text, alone_with_metis):
+        print("🚪 leave check: a plain command to leave")
+        return True
     payload = {
         "messages": [
             {"role": "system", "content": LEAVE_PROMPT},
@@ -636,6 +639,8 @@ class VoiceReceiver:
         self._buffer_lock = threading.Lock()
         self._respond_lock = asyncio.Lock()  # one spoken reply at a time
         self._speaking = False
+        # What people said while Metis was talking: user name -> [seconds of audio, loudest frame RMS]
+        self._talk_over: Dict[str, List[float]] = {}
         self._active = True
         self._monitor: Optional[asyncio.Task] = None
         self.conversation = get_conversation(self.channel_id, "voice")
@@ -649,7 +654,12 @@ class VoiceReceiver:
             samples = samples * self.gain
             pcm = np.clip(samples, -32768, 32767).astype(np.int16).tobytes()
         now = time.monotonic()
-        if samples.size and float(np.sqrt(np.mean(samples ** 2))) >= self.barge_in_rms:
+        rms = float(np.sqrt(np.mean(samples ** 2))) if samples.size else 0.0
+        if self._speaking and rms >= 0.005 * 32768:
+            heard = self._talk_over.setdefault(user.display_name, [0.0, 0.0])
+            heard[0] += samples.size / 2 / 48000
+            heard[1] = max(heard[1], rms / 32768)
+        if rms >= self.barge_in_rms:
             with self._buffer_lock:
                 stretch = self._activity.get(user.id)
                 if stretch is None or now - stretch[1] > 0.3:
@@ -776,7 +786,7 @@ class VoiceReceiver:
             alone = len(self.present_members()) <= 1
             if not await is_metis_turn(conversation, voice=True, alone_with_metis=alone):
                 return
-            if await asked_to_leave(conversation):
+            if await asked_to_leave(conversation, alone):
                 await self._say_goodbye_and_leave(user, seq)
                 return
             timings["judgment"] = time.perf_counter() - t
@@ -927,6 +937,7 @@ class VoiceReceiver:
             loop.call_soon_threadsafe(done.set)
 
         self._speaking = True
+        self._talk_over.clear()
         if self.discard_while_speaking and not self.barge_in:
             self._discard_buffers()
         interrupted = False
@@ -948,6 +959,11 @@ class VoiceReceiver:
             print(f"Playback skipped: {e}")
         finally:
             self._speaking = False
+        for name, (seconds, loudest) in self._talk_over.items():
+            # For tuning barge_in_seconds / barge_in_min_rms when she doesn't stop (or stops too easily).
+            print(f"🗣️ {name} talked while Metis was speaking: {seconds:.1f}s of audio, loudest {loudest:.3f} "
+                  f"({'she stopped' if interrupted else 'not enough to stop her'}; she stops after "
+                  f"{self.barge_in_seconds}s at {self.barge_in_rms / 32768:.3f} or louder)")
         return not interrupted
 
     @staticmethod

@@ -383,7 +383,10 @@ def main() -> int:
 
     # PYTHONFAULTHANDLER: if a native library (CUDA, audio) crashes the backend, the log shows where.
     env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1", "FORCE_COLOR": "0",
-           "PYTHONFAULTHANDLER": "1"}
+           "PYTHONFAULTHANDLER": "1",
+           # Otherwise the Fortran runtime in numpy/scipy kills the backend the moment the window is closed
+           # ("forrtl: error (200): program aborting due to window-CLOSE event"), before it can save anything.
+           "FOR_DISABLE_CONSOLE_CTRL_HANDLER": "1"}
     llm = Service("llm", "llm    ", LAVENDER, [node, "server.js"], ROOT / "backend" / "llm_service", env, args.verbose)
     backend = Service("backend", "metis  ", MINT, [sys.executable, "-m", "backend"], ROOT, env, args.verbose)
     services: List[Service] = [llm, backend]

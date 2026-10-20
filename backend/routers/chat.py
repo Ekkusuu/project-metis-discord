@@ -214,7 +214,9 @@ def people_context(req: ChatRequest) -> str:
         parts.append(
             "Each message starts with the speaker's name in brackets; different names are different people. "
             "Keep track of who said what. You are Metis: reply only as yourself, never write lines for anyone "
-            "else, and don't start your reply with a name in brackets. To ping someone, write @ and their name."
+            "else, and don't start your reply with a name in brackets."
+            # In voice an @ is read out (and she started pinging herself: "@Metis it's 13 degrees").
+            + ("" if req.voice_mode else " To ping someone, write @ and their name.")
         )
     if req.present:
         parts.append("In the voice channel right now: " + ", ".join(req.present))
@@ -228,7 +230,7 @@ def people_context(req: ChatRequest) -> str:
     return "\n\n".join(parts)
 
 
-def reply_guidance(messages: List[Dict[str, str]], voice: bool, has_context: bool) -> str:
+def reply_guidance(messages: List[Dict[str, str]], voice: bool, has_context: bool, searched_web: bool = False) -> str:
     """
     A short reminder placed right before the latest message. Small models follow the most recent
     instructions far more than a long persona prompt at the top, so without this the personality
@@ -244,6 +246,11 @@ def reply_guidance(messages: List[Dict[str, str]], voice: bool, has_context: boo
          "instead of guessing." if has_context else
          "Never invent facts, dates or numbers; if you don't know, say so."),
     ]
+    if searched_web:
+        # Without this a small model replied "I could search that if you want" with the results right there.
+        rules.append("You already searched the web for this; the results are above. Say what they found "
+                     "(the date, number, name or event). Don't offer to search, and don't say you can't look "
+                     "things up. If the results don't answer it, say you couldn't find it.")
     if voice:
         rules.append("This is spoken aloud: one or two short sentences, no emoji, no lists.")
     return "How to reply:\n- " + "\n- ".join(rules)
@@ -284,7 +291,7 @@ def _sampling(req: ChatRequest) -> Dict[str, Any]:
 async def _prepare(req: ChatRequest) -> Tuple[List[Dict[str, str]], Dict[str, Any]]:
     messages = _base_messages(req)
     context_text, tool_timings, rag_timings = await gather_context(messages, req)
-    guidance = reply_guidance(messages, req.voice_mode, bool(context_text))
+    guidance = reply_guidance(messages, req.voice_mode, bool(context_text), "[web_search]" in context_text)
     final = trim_messages_to_context(build_prompt(messages, context_text, people_context(req), guidance))
     stamp = datetime.datetime.now().isoformat()
     state.context = [{**m, "timestamp": stamp} for m in final]

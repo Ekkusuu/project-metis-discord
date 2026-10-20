@@ -85,3 +85,26 @@ def test_grounded_query_keeps_good_queries():
     assert grounded_query("Tesla Roadster release date", "when was the tesla roadster released", metis, "x") == \
         "Tesla Roadster release date"
     assert grounded_query("f1 race winner", "who won the f1 race yesterday?", "", "x") == "f1 race winner"
+
+
+def test_weather_place_comes_from_the_question():
+    from backend.tools.weather import WEATHER_QUESTION, place_words
+
+    assert place_words("Uh could you please search for me what is the weather in Moldova Right Now?") == ["Moldova"]
+    assert place_words("What is the weather in Chisinau right now") == ["Chisinau"]
+    assert WEATHER_QUESTION.search("what's the temperature in London") and not WEATHER_QUESTION.search("hi there")
+
+
+def test_go_ahead_after_a_question_searches():
+    from backend.tool_manager import _GO_AHEAD
+
+    for text in ["Then do it.", "go ahead", "yes please", "ok search it"]:
+        assert _GO_AHEAD.match(text), text
+    assert not _GO_AHEAD.match("do it yourself, I'm busy")
+
+
+def test_metis_does_not_ping_herself():
+    from backend.text_utils import strip_name_prefix
+
+    assert strip_name_prefix("@Metis it's 13 degrees") == "it's 13 degrees"
+    assert strip_name_prefix("Metis: hi") == "hi"

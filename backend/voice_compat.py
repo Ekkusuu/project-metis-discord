@@ -49,4 +49,50 @@ def apply() -> None:
         return result
 
     vr_opus.PacketDecoder._decode_packet = _decode_packet
+    _patch_reader()
     _applied = True
+
+
+def _patch_reader() -> None:
+    """
+    voice-recv logs "CryptoError decoding packet data" at ERROR for every packet it can't decrypt.
+    While Metis talks, Discord sends RTCP reports about her outgoing audio several times a second
+    that it can't decrypt: harmless (there is nothing to hear in them), but it filled the window
+    with errors. Those are dropped quietly; a failure on actual audio (RTP) is still reported,
+    once per second per stream, with what's needed to diagnose it.
+    """
+    import time
+
+    from discord.ext.voice_recv import reader as vr_reader, rtp
+    from nacl.exceptions import CryptoError
+
+    original_callback = vr_reader.AudioReader.callback
+    last_report: dict = {}
+    failures: dict = {}
+
+    def callback(self, packet_data: bytes) -> None:
+        if len(packet_data) < 12:
+            return original_callback(self, packet_data)
+        rtcp = rtp.is_rtcp(packet_data)
+        try:
+            if rtcp:
+                self.decryptor.decrypt_rtcp(packet_data)
+            else:
+                self.decryptor.decrypt_rtp(rtp.decode_rtp(packet_data))
+        except CryptoError:
+            if rtcp:
+                return
+            ssrc = int.from_bytes(packet_data[8:12], "big")
+            failures[ssrc] = failures.get(ssrc, 0) + 1
+            now = time.monotonic()
+            if now - last_report.get(ssrc, 0) >= 1.0:
+                last_report[ssrc] = now
+                user_id = self.voice_client._get_id_from_ssrc(ssrc)
+                print(f"🔐 Voice: can't decrypt audio from ssrc {ssrc} (user {user_id}): "
+                      f"{failures[ssrc]} packet(s) so far; header {packet_data[:2].hex()}, {len(packet_data)} bytes")
+            return
+        except Exception:
+            pass  # let voice-recv handle and log anything else as before
+        return original_callback(self, packet_data)
+
+    vr_reader.AudioReader.callback = callback

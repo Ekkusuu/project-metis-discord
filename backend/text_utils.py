@@ -96,11 +96,11 @@ def _partial_tag_suffix(text: str, tag: str) -> int:
 # ---------------------------------------------------------------------------
 # Reply cleanup
 # ---------------------------------------------------------------------------
-_NAME_PREFIX = re.compile(r"^\s*\[?metis\]?\s*:\s*", re.IGNORECASE)
+_NAME_PREFIX = re.compile(r"^\s*(?:\[?metis\]?\s*:|@metis\b[,:]?)\s*", re.IGNORECASE)
 
 
 def strip_name_prefix(text: str) -> str:
-    """Drop a leading "Metis:" / "[Metis]:" the model sometimes adds to its own replies."""
+    """Drop a leading "Metis:" / "[Metis]:" / "@Metis" the model sometimes adds to its own replies."""
     return _NAME_PREFIX.sub("", text, count=1)
 
 

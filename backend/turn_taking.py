@@ -316,6 +316,42 @@ def might_ask_to_leave(text: str) -> bool:
     return bool(LEAVE_HINT.search(text))
 
 
+# A plain command needs no model. The model was asked anyway and, after a few in-character replies
+# like "I'd never leave", it answered "stay" to "Okay, just leave." and "I told you, Metis, please leave."
+_LEAVE_VERB = r"(leave|go away|get out|disconnect|hang up|log ?off)"
+_FILLER = (r"(?:ok(?:ay)?|no|yes|yeah|well|so|alright|right|now|then|and|but|uh|um|hey|please|just|"
+           r"i said|i told you|i mean|like i said|metis|you can|can you|could you|would you|will you)")
+# A clause that starts with the command, after any fillers: "okay just leave", "metis, leave the call".
+_LEAVE_COMMAND = re.compile(rf"^(?:{_FILLER}\s+)*{_LEAVE_VERB}(?:\s+(?:now|please|already|the (?:voice|vc|call|channel|chat)\b.*))?$")
+# "leave the voice channel" anywhere, unless the speaker is the one leaving.
+_LEAVE_THE_CALL = re.compile(r"\b(leave|disconnect from|get out of) the (voice|vc|call|channel|voice chat|voice channel)\b")
+_SPEAKER_LEAVING = re.compile(r"\b(i|i'm|im|i'll|we|we're|we'll|gonna|going to|have to|need to|about to|want to)\s+"
+                              r"(\w+\s+)?(leave|disconnect|get out)\b")
+_NEGATED = re.compile(r"\b(don't|dont|do not|never|not|no need to|shouldn't|why|when|if|after|before|once|until)\b")
+
+
+def clearly_asks_to_leave(text: str, alone_with_metis: bool) -> bool:
+    """
+    True for unmistakable commands to leave the call. Bare commands ("just leave") count only if
+    they name Metis or nobody else is in the call; otherwise they could be meant for someone else.
+    """
+    lowered = text.lower().replace("’", "'")
+    if "?" in lowered and not re.search(r"\b(can|could|would|will) you\b", lowered):
+        return False  # "are you leaving?"
+    if not (alone_with_metis or re.search(r"\bmetis\b", lowered)):
+        return False
+    for clause in re.split(r"[.,!;:]+", lowered):
+        clause = re.sub(r"[^a-z' ]", " ", clause)
+        clause = re.sub(r"\s+", " ", clause).strip()
+        if not clause or _NEGATED.search(clause):
+            continue
+        if _LEAVE_COMMAND.match(clause):
+            return True
+        if _LEAVE_THE_CALL.search(clause) and not _SPEAKER_LEAVING.search(clause):
+            return True
+    return False
+
+
 def transcript_for_model(turns: Sequence[Turn], names_by_id: Dict[int, str], limit: int = 10) -> str:
     lines = []
     for t in turns[-limit:]:
