@@ -108,3 +108,26 @@ def test_metis_does_not_ping_herself():
 
     assert strip_name_prefix("@Metis it's 13 degrees") == "it's 13 degrees"
     assert strip_name_prefix("Metis: hi") == "hi"
+
+
+def test_weather_place_ignores_ordinary_words():
+    from backend.tools.weather import place_words
+
+    # "give" fuzzy-matched Givet, France, and the trailing "." spoiled "Moldova."
+    assert place_words("No, just give me the weather for Moldova.") == ["Moldova"]
+    assert place_words("Could you please search for Moldova's weather?") == ["Moldova"]
+
+
+def test_spoken_text_has_no_quotes_or_actions():
+    from backend.text_utils import clean_for_speech
+
+    assert clean_for_speech('"Yo. You want the weather? Fine."') == "Yo. You want the weather? Fine."
+    assert clean_for_speech("*checks phone, rolls her eyes*") == ""
+
+
+def test_backchannel_needs_no_answer():
+    from backend.turn_taking import is_acknowledgement
+
+    for text in ["Mm-hmm.", "Uh-huh.", "Mhm", "Hmm, I see."]:
+        assert is_acknowledgement(text), text
+    assert not is_acknowledgement("Um, what is the weather?")

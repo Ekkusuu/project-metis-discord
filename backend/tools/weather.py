@@ -22,7 +22,9 @@ _NOT_PLACE = set(
     "what whats what's is the weather temperature forecast degrees celsius fahrenheit in at for of right now today "
     "tonight tomorrow currently current like how hot cold it outside there there's search please tell me can could "
     "uh um okay ok so well hey metis also something else just know wanted ask "
-    "you check look up find a an and or raining snowing humid humidity windy this week weekend".split()
+    "you check look up find a an and or raining snowing humid humidity windy this week weekend "
+    "no yes yeah give show get got need want tell say does do did will would should are was were be "
+    "your my our their his her its going gonna pretty good thanks thank but".split()
 )
 
 _WMO = {
@@ -47,8 +49,12 @@ def _ascii(text: str) -> str:
 
 def place_words(query: str) -> List[str]:
     """The words of the query that could be a place name, in order."""
-    words = re.findall(r"[^\W\d_][\w'.-]*", query)
-    return [w for w in words if w.lower() not in _NOT_PLACE and len(w) >= 3]
+    words = [re.sub(r"'s$", "", w.strip(".'-")) for w in re.findall(r"[^\W\d_][\w'.-]*", query)]
+    words = [w for w in words if w.lower() not in _NOT_PLACE and len(w) >= 3]
+    # The transcriber capitalises names: in "No, just give me the weather for Moldova." only "Moldova" is a
+    # place, and fuzzy-matching "give" found Givet, France.
+    capitalised = [w for w in words if w[0].isupper()]
+    return capitalised if capitalised and len(capitalised) < len(words) else words
 
 
 def _geocode(name: str, country_code: Optional[str] = None) -> Optional[Dict[str, Any]]:

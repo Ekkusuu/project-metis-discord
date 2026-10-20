@@ -200,6 +200,7 @@ def clean_for_speech(text: str) -> str:
     text = re.sub(r"https?://\S+", "", text)
     text = _MARKDOWN_NOISE.sub("", text)
     text = _EMOJI.sub("", text)
+    text = re.sub(r'["“”]', "", text)  # a reply wrapped in quotes; they aren't spoken anyway
     return re.sub(r"\s{2,}", " ", text).strip()
 
 

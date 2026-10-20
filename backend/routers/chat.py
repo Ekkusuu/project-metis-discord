@@ -251,11 +251,14 @@ def reply_guidance(messages: List[Dict[str, str]], voice: bool, has_context: boo
     ]
     if searched_web:
         # Without this a small model replied "I could search that if you want" with the results right there.
-        rules.append("You already searched the web for this; the results are above. Say what they found "
-                     "(the date, number, name or event). Don't offer to search, and don't say you can't look "
-                     "things up. If the results don't answer it, say you couldn't find it.")
+        rules.append("You can search the web, and you already did for this message: the results are above. "
+                     "Say what they found (the date, number, name or event). Don't offer to search, and don't "
+                     "say you can't look things up. If the results don't answer it, say you couldn't find it.")
     if voice:
-        rules.append("This is spoken aloud: one or two short sentences, no emoji, no lists.")
+        # Personas that roleplay replied with only "*checks phone, rolls her eyes*", which the voice
+        # can't say, and the mean one wrapped every reply in quotes.
+        rules.append("This is spoken aloud: one or two short sentences of what you say, nothing else. No "
+                     "*actions* or descriptions, no quotation marks around your reply, no emoji, no lists.")
     return "How to reply:\n- " + "\n- ".join(rules)
 
 

@@ -62,7 +62,9 @@ _GREETING = r"(?:hey|hi|hello|hiya|yo|oi|ok|okay|so|and|but|well|thanks|thank yo
 _ACK_WORD = (
     r"(?:ok(?:ay)?|k+|kk|alright|aight|sure|yeah|yea|yep|yup|ya|true|fair|right|nice|cool|great|perfect|"
     r"lol+|lmao+|lmfao|haha+|hehe+|xd+|ty|thx|thanks?(?: (?:you|u|a lot|so much))?|tysm|np|got it|gotcha|"
-    r"bet|word|gg|ggs|same|mood|rip|oof|damn|wow|nah|no|yes|ye|hm+|ah+|oh+|bye|cya|gn|night|will do|sounds good)"
+    r"bet|word|gg|ggs|same|mood|rip|oof|damn|wow|nah|no|yes|ye|hm+|ah+|oh+|bye|cya|gn|night|will do|sounds good|"
+    # Spoken backchannel, as the transcriber writes it ("Mm-hmm.", "Uh-huh.", "Mhm.")
+    r"m+-?hm+|mhm+|uh-?huh|uh+|um+|er+m*|i see)"
 )
 _ACK = re.compile(rf"^\W*{_ACK_WORD}(?:[\W_]+{_ACK_WORD})*\W*$", re.IGNORECASE)
 # After a name at the start of a message, these mean the person is being spoken TO

@@ -791,8 +791,13 @@ class VoiceReceiver:
                 return
             timings["judgment"] = time.perf_counter() - t
 
-            reply, stats, outcome = await self._speak_streamed_reply(conversation, t0, timings, seq)
-            reply = clean_reply(reply)
+            for attempt in range(2):
+                reply, stats, outcome = await self._speak_streamed_reply(conversation, t0, timings, seq)
+                if outcome == "done" and not reply and attempt == 0:
+                    # e.g. only "*checks phone, rolls her eyes*": nothing the voice can say. One more try.
+                    print(f"🙊 nothing in the reply could be said aloud ({stats.get('raw_reply', '')!r}); trying again")
+                    continue
+                break
             if outcome == "yielded":
                 print("🤐 gave up the turn: people kept talking or the conversation moved on")
                 return
@@ -910,9 +915,10 @@ class VoiceReceiver:
         finally:
             await sentences.put(None)
             await asyncio.gather(synth_task, play_task, return_exceptions=True)
-        if state["outcome"] == "interrupted":
-            reply = " ".join(state["spoken"])  # only what people actually heard
-        return reply, stats, state["outcome"]
+        # What people actually heard (no *actions*, cut short if interrupted). It's also what goes into the
+        # history: keeping "*rolls her eyes*" there taught the model to answer with more of them.
+        stats["raw_reply"] = reply
+        return " ".join(state["spoken"]), stats, state["outcome"]
 
     async def _play_pcm(self, pcm24k_mono: bytes) -> bool:
         """
