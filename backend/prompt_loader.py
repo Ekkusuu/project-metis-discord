@@ -9,6 +9,8 @@ Auto-personality mode:
   personality: "casual" will use @text_chat.casual, @voice_chat.casual, etc.
 """
 
+import os
+
 import yaml
 from pathlib import Path
 from typing import Dict, Any, Optional
@@ -17,7 +19,8 @@ from backend.config import PROJECT_ROOT, get_config
 
 # Cache for loaded prompts
 _prompts_cache: Optional[Dict[str, Any]] = None
-_prompts_file = PROJECT_ROOT / "system_prompts.yaml"
+# Overridable like METIS_CONFIG (e.g. to try the dashboard editor on a scratch copy).
+_prompts_file = Path(os.getenv("METIS_PROMPTS") or PROJECT_ROOT / "system_prompts.yaml")
 
 
 def load_prompts() -> Dict[str, Any]:

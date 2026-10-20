@@ -159,7 +159,7 @@ You can review and delete anything in the dashboard's **People** tab.
 Everything lives in `config.yaml` (prompts in `system_prompts.yaml`, see
 [SYSTEM_PROMPTS_GUIDE.md](SYSTEM_PROMPTS_GUIDE.md)).
 
-- `personality` — picks `text_chat.<name>` / `voice_chat.<name>` prompts. Switch it from the dashboard (click the personality in the header) or with `>personality`; both write it here.
+- `personality` — picks `text_chat.<name>` / `voice_chat.<name>` prompts. Switch it from the dashboard (click the personality in the header) or with `>personality`; both write it here. The same menu edits, adds and deletes personalities in `system_prompts.yaml` (previous version kept as `system_prompts.yaml.bak`).
 - `model.chat_wrapper` — `auto` reads the prompt format from the GGUF. Only override it for a model with broken metadata.
 - `llm_service.aux_context_size` — a second small context for judgment/tool calls so the chat cache survives between turns. Set `0` if VRAM is tight.
 - `chat.judgment` / `voice.judgment` — turn the "should I reply?" step on or off.

@@ -172,3 +172,53 @@ def test_personalities_are_listed_with_descriptions():
 
     found = {p["name"]: p for p in available()}
     assert "casual" in found and found["casual"]["description"].startswith("A casual")
+
+
+@pytest.fixture
+def prompts_copy(tmp_path, monkeypatch):
+    import shutil
+    import backend.prompt_loader as loader
+    from backend.config import PROJECT_ROOT
+
+    path = tmp_path / "system_prompts.yaml"
+    shutil.copy(PROJECT_ROOT / "system_prompts.yaml", path)
+    monkeypatch.setattr(loader, "_prompts_file", path)
+    monkeypatch.setattr(loader, "_prompts_cache", None)
+    yield path
+    loader._prompts_cache = None
+
+
+def test_personalities_can_be_added_edited_and_deleted(prompts_copy):
+    import yaml
+    from backend.personality_store import delete, raw_prompt, save
+
+    original = yaml.safe_load(prompts_copy.read_text(encoding="utf-8"))
+    assert raw_prompt("casual", "voice_chat").startswith("You are Metis, a casual")
+
+    save("pirate", {"text_chat": "You are Metis, a pirate.\nSay arr.", "voice_chat": "You are Metis, a pirate.\n\n  No emoji."})
+    data = yaml.safe_load(prompts_copy.read_text(encoding="utf-8"))
+    assert data["text_chat"]["pirate"].strip() == "You are Metis, a pirate.\nSay arr."
+    assert data["voice_chat"]["pirate"].strip() == "You are Metis, a pirate.\n\n  No emoji."
+    assert data["rag"] == original["rag"] and data["text_chat"]["flirty"] == original["text_chat"]["flirty"]
+    assert raw_prompt("pirate", "voice_chat") == "You are Metis, a pirate.\n\n  No emoji."
+
+    save("casual", {"text_chat": "edited text", "voice_chat": "edited voice"})
+    data = yaml.safe_load(prompts_copy.read_text(encoding="utf-8"))
+    assert data["voice_chat"]["casual"].strip() == "edited voice"
+    assert data["voice_chat"]["mean"] == original["voice_chat"]["mean"]
+
+    delete("pirate")
+    data = yaml.safe_load(prompts_copy.read_text(encoding="utf-8"))
+    assert "pirate" not in data["text_chat"] and "pirate" not in data["voice_chat"]
+    assert data["rag"] == original["rag"] and len(data["text_chat"]) == len(original["text_chat"])
+    assert "# Voice Chat Prompts" in prompts_copy.read_text(encoding="utf-8")
+    assert prompts_copy.with_suffix(".yaml.bak").exists()
+
+
+def test_bad_personality_names_and_empty_prompts_are_refused(prompts_copy):
+    from backend.personality_store import PersonalityError, save
+
+    with pytest.raises(PersonalityError):
+        save("Bad Name!", {"text_chat": "x", "voice_chat": "y"})
+    with pytest.raises(PersonalityError):
+        save("ok", {"text_chat": "x", "voice_chat": "  "})

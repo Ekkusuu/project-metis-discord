@@ -159,3 +159,25 @@ export const setPersonality = (name: string) =>
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name }),
   });
+
+export interface PersonalityPrompts {
+  name: string;
+  text_chat: string;
+  voice_chat: string;
+}
+
+export const getPersonality = (name: string) =>
+  request<PersonalityPrompts>(`/personality/${encodeURIComponent(name)}`);
+export const savePersonality = (name: string, prompts: { text_chat: string; voice_chat: string }) =>
+  request<{ name: string; created: boolean; available: Personality[] }>(
+    `/personality/${encodeURIComponent(name)}`,
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(prompts),
+    },
+  );
+export const deletePersonality = (name: string) =>
+  request<{ available: Personality[] }>(`/personality/${encodeURIComponent(name)}`, {
+    method: 'DELETE',
+  });

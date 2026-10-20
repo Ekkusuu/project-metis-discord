@@ -60,6 +60,49 @@ class PersonalityChange(BaseModel):
     name: str
 
 
+@router.get("/{name}")
+async def get_personality(name: str):
+    """Both prompts as written in system_prompts.yaml, for the editor."""
+    from backend.personality_store import SECTIONS, raw_prompt
+
+    if name not in [p["name"] for p in available()]:
+        raise HTTPException(status_code=404, detail=f"No personality called {name}")
+    return {"name": name, **{section: raw_prompt(name, section) for section in SECTIONS}}
+
+
+class PersonalityPrompts(BaseModel):
+    text_chat: str
+    voice_chat: str
+
+
+@router.put("/{name}")
+async def save_personality(name: str, prompts: PersonalityPrompts):
+    """Create or update a personality in system_prompts.yaml."""
+    from backend.personality_store import PersonalityError, save
+
+    existed = name in [p["name"] for p in available()]
+    try:
+        save(name, prompts.model_dump())
+    except PersonalityError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    print(f"🎭 Personality {name} {'updated' if existed else 'added'} from the dashboard")
+    return {"name": name, "created": not existed, "available": available()}
+
+
+@router.delete("/{name}")
+async def delete_personality(name: str):
+    from backend.personality_store import PersonalityError, delete
+
+    if name == get_config().get("personality"):
+        raise HTTPException(status_code=400, detail="That's the personality in use; switch to another one first.")
+    try:
+        delete(name)
+    except PersonalityError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    print(f"🎭 Personality {name} deleted from the dashboard")
+    return {"available": available()}
+
+
 @router.put("")
 async def set_personality(change: PersonalityChange):
     names = [p["name"] for p in available()]
