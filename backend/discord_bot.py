@@ -1066,8 +1066,11 @@ async def personality_command(ctx: commands.Context, name: Optional[str] = None)
     if name not in available:
         await ctx.send(f"❌ Unknown personality `{name}`. Try one of: {', '.join(available)}")
         return
-    config["personality"] = name  # takes effect immediately, until the next restart
-    await ctx.send(f"🎭 Personality switched to **{name}** (until restart — set `personality` in config.yaml to keep it).")
+    from backend.routers.personality import save_to_config
+
+    config["personality"] = name  # takes effect from the next reply
+    kept = "saved" if save_to_config(name) else "until restart: config.yaml couldn't be updated"
+    await ctx.send(f"🎭 Personality switched to **{name}** ({kept}).")
 
 
 @bot.command(name="join")

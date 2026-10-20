@@ -2,7 +2,8 @@
 # Global Personality Setting
 # ============================================================================
 # Options: therapist, casual, mean, flirty (any key under text_chat/voice_chat in system_prompts.yaml)
-# Can also be switched at runtime from Discord with ">personality <name>".
+# Can also be switched from the dashboard (click the personality next to the bot name; saved here)
+# or from Discord with ">personality <name>".
 # This automatically selects the matching prompts from system_prompts.yaml
 # To add more: just add new personality sections in system_prompts.yaml
 personality: "flirty"

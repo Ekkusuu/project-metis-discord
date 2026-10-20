@@ -103,7 +103,7 @@ She always answers when you **@mention** her, **reply** to her, **address her by
 | `>leave` | Leave voice. You can also just say it in the call ("Metis, you can leave now"); she says bye and goes. She also leaves by herself when everyone else does. |
 | `>reset` | Start the channel's conversation fresh (she learns from it first). |
 | `>status` | Personality, context usage, tools and voice state. |
-| `>personality [name]` | List personalities or switch (needs *Manage Server*; lasts until restart). |
+| `>personality [name]` | List personalities or switch (needs *Manage Server*; saved to config.yaml). You can also click the personality next to the bot name in the dashboard. |
 | `>help` | All commands. `!` works as a prefix too. |
 
 ## How Metis knows who's who
@@ -159,7 +159,7 @@ You can review and delete anything in the dashboard's **People** tab.
 Everything lives in `config.yaml` (prompts in `system_prompts.yaml`, see
 [SYSTEM_PROMPTS_GUIDE.md](SYSTEM_PROMPTS_GUIDE.md)).
 
-- `personality` — picks `text_chat.<name>` / `voice_chat.<name>` prompts.
+- `personality` — picks `text_chat.<name>` / `voice_chat.<name>` prompts. Switch it from the dashboard (click the personality in the header) or with `>personality`; both write it here.
 - `model.chat_wrapper` — `auto` reads the prompt format from the GGUF. Only override it for a model with broken metadata.
 - `llm_service.aux_context_size` — a second small context for judgment/tool calls so the chat cache survives between turns. Set `0` if VRAM is tight.
 - `chat.judgment` / `voice.judgment` — turn the "should I reply?" step on or off.

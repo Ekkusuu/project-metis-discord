@@ -155,3 +155,20 @@ def test_find_urls():
 def test_private_urls_are_refused(url):
     with pytest.raises(UnsafeURLError):
         _check_public(url)
+
+
+def test_personality_switch_keeps_config_comments(tmp_path, monkeypatch):
+    import backend.routers.personality as personality
+
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text('# Global Personality Setting\npersonality: "flirty"\n\nchat:\n  temperature: 0.7\n', encoding="utf-8")
+    monkeypatch.setattr(personality, "CONFIG_PATH", cfg)
+    assert personality.save_to_config("casual")
+    assert cfg.read_text(encoding="utf-8") == '# Global Personality Setting\npersonality: "casual"\n\nchat:\n  temperature: 0.7\n'
+
+
+def test_personalities_are_listed_with_descriptions():
+    from backend.routers.personality import available
+
+    found = {p["name"]: p for p in available()}
+    assert "casual" in found and found["casual"]["description"].startswith("A casual")

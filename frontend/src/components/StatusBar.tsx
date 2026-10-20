@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { getStatus } from '../api';
 import type { BackendStatus } from '../api';
 import Icon from './Icon';
+import PersonalityPicker from './PersonalityPicker';
 import './StatusBar.css';
 
 const POLL_INTERVAL_MS = 10_000;
@@ -57,7 +58,12 @@ function StatusBar() {
   return (
     <div className="status-bar">
       <span className="status-bot">{status.bot_user ?? 'Metis'}</span>
-      {status.personality && <span className="status-pill">{status.personality}</span>}
+      {status.personality && (
+        <PersonalityPicker
+          current={status.personality}
+          onChange={(name) => setStatus((prev) => (prev ? { ...prev, personality: name } : prev))}
+        />
+      )}
       <Dot ok={status.llm_ready} label={status.llm_ready ? 'LLM ready' : 'LLM loading'} />
       <Dot
         ok={status.discord_connected}

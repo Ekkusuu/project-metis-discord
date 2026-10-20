@@ -144,3 +144,18 @@ export const deleteNote = (factId: string) =>
   });
 export const learnNow = () =>
   request<{ status: string; learned: number }>('/memory/learn', { method: 'POST' });
+
+export interface Personality {
+  name: string;
+  description: string;
+  has_voice: boolean;
+}
+
+export const getPersonalities = () =>
+  request<{ current: string; available: Personality[] }>('/personality');
+export const setPersonality = (name: string) =>
+  request<{ current: string; saved: boolean }>('/personality', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name }),
+  });

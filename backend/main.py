@@ -18,6 +18,7 @@ from backend.config import PROJECT_ROOT, get_config
 from backend.routers.chat import router as chat_router
 from backend.routers.discord import router as discord_router
 from backend.routers.memory import router as memory_router
+from backend.routers.personality import router as personality_router
 
 # Windows consoles/redirects default to cp1252, which can't print the emoji in our logs.
 for _stream in (sys.stdout, sys.stderr):
@@ -95,6 +96,7 @@ app.add_middleware(
 app.include_router(chat_router)
 app.include_router(memory_router)
 app.include_router(discord_router)
+app.include_router(personality_router)
 
 
 
