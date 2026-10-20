@@ -4,6 +4,7 @@ knowledge_search - retrieval from the indexed knowledge base (notes + long-term 
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from backend.config import get_config
@@ -73,6 +74,8 @@ class RAGTool(BaseTool):
         print(f"📚 Knowledge queries: {queries}")
         found = search(queries, top_k=int(num_results) if num_results else None)
         accepted = found["accepted"]
+        sources = sorted({Path(str((c.get("metadata") or {}).get("source_file", "?"))).name for c in accepted})
+        print(f"📚 Knowledge: {len(accepted)} result(s)" + (f" from {', '.join(sources)}" if sources else ""))
         return {
             "success": True,
             "result": format_context_for_prompt(accepted) or None,

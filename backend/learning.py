@@ -22,12 +22,15 @@ from backend.people import get_people
 _SYSTEM = (
     "You help an AI companion remember people. Given the messages one person wrote, list the lasting facts "
     "they reveal about themselves, one short phrase per line, without their name. Only what they actually said. "
-    "Skip greetings, moods and small talk. If there is nothing worth remembering, write NONE."
+    "Skip greetings, moods and small talk, and skip what they asked about or asked Metis to do: a question "
+    "is not a fact about the person. If there is nothing worth remembering, write NONE."
 )
 
 _EXAMPLE_IN = """Messages by Robin:
 (context) Lena: anyone up for pizza later?
 Robin: can't, i'm vegetarian and that place only does meat lol
+Robin: metis what's the weather like tomorrow?
+(context) Metis: Sunny, around 20 degrees.
 Robin: also my exam in organic chemistry is tomorrow, wish me luck
 (context) Metis: Good luck! You've got this.
 Robin: thanks! after that i'm finally adopting a puppy, gonna call him Biscuit
@@ -43,6 +46,14 @@ _STOPWORDS = set(
     "the and but with for from that this have has had are was were been being their they them about very really "
     "just also into your you named name likes like loves enjoys hates dislikes plays playing wants going gonna "
     "would could should will some lots".split()
+)
+# Questions and requests ("is asking about X", "wants to know Y") and anything about Metis herself
+# ("does not want Metis to leave") describe the moment, not the person; a small model often turns a
+# request into a "fact", and the next prompt then treats it as something the person cares about.
+_NOT_ABOUT_THEM = re.compile(
+    r"^(is |was )?(asking|asked|asks|wants to know|wanted to know|wondering|wonders|curious|inquiring|requesting)\b"
+    r"|\b(metis|the (ai|bot|assistant))\b",
+    re.IGNORECASE,
 )
 # One-off states that aren't worth remembering.
 _TRANSIENT = re.compile(
@@ -133,7 +144,8 @@ def extract_facts(messages: List[Dict[str, Any]], name: str) -> List[str]:
     facts = []
     for line in response.splitlines():
         fact = _clean_fact(line, name)
-        if not fact or fact.upper() == "NONE" or len(fact) > 160 or _TRANSIENT.match(fact):
+        if (not fact or fact.upper() == "NONE" or len(fact) > 160 or _TRANSIENT.match(fact)
+                or _NOT_ABOUT_THEM.search(fact)):
             continue
         if is_grounded(fact, own):
             facts.append(fact)

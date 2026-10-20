@@ -116,6 +116,16 @@ def test_extract_facts_filters_ungrounded_and_transient(monkeypatch):
     assert extract_facts(CONVO, "Sava") == ["works as a nurse", "has a cat named Pixel"]
 
 
+def test_requests_and_facts_about_metis_are_not_remembered():
+    from backend.learning import _NOT_ABOUT_THEM
+
+    for fact in ["is asking for the exact release date of a Tesla Roadster", "wants to know what happened in France",
+                 "does not want Metis to leave", "asked the bot to search for news"]:
+        assert _NOT_ABOUT_THEM.search(fact), fact
+    for fact in ["is vegetarian", "wants to become a pilot", "is curiously good at chess", "metisse"]:
+        assert not _NOT_ABOUT_THEM.search(fact), fact
+
+
 def test_clean_fact_strips_name():
     assert _clean_fact("Sava's cat is called Pixel.", "Sava") == "cat is called Pixel"
     assert _clean_fact('"Sava likes tea"', "Sava") == "likes tea"

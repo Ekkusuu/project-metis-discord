@@ -150,7 +150,13 @@ _DECIDE_PROMPT = """Decide whether an AI companion needs a tool before replying 
 - none: greetings, small talk, feelings, jokes, or things you can answer from general knowledge
 Answer with one option."""
 
-_QUERY_PROMPT = "Write a short web search query (2-6 keywords) for what the message is asking. Output only the query."
+_QUERY_PROMPT = ("Write a short web search query (2-6 keywords) for what the latest message is asking. Use the "
+                 "earlier messages only to work out what words like 'it' or 'that' refer to. Output only the query.")
+
+# Recent-events questions go to the news index, which is sorted by date; a text search for
+# "what happened in France" returns encyclopedia pages.
+_NEWS = re.compile(r"\b(news|happen(ed|ing)?|going on|latest|recent(ly)?|today|tonight|yesterday|this (week|month))\b",
+                   re.IGNORECASE)
 
 
 # Questions that are obviously about fresh information get a web search even if the small model says
@@ -178,6 +184,22 @@ def is_question_like(text: str) -> bool:
 def _message_text(message: str) -> str:
     """Strip the '[Name]:' speaker prefix."""
     return re.sub(r"^\[[^\]]+\]:?\s*", "", message).strip()
+
+
+def _words(text: str) -> set:
+    """Distinctive words (short ones like 'date' or 'news' are too common to tell anything), by stem."""
+    return {w[:5] for w in re.findall(r"[a-z0-9]+", text.lower()) if len(w) >= 5}
+
+
+def grounded_query(query: str, said_by_people: str, said_by_metis: str, fallback: str) -> str:
+    """
+    The query, or `fallback` if it picked up words only Metis used. Her replies can be made up, and
+    a topic she invented must not become the search. Generic additions ("date", "winner") are fine.
+    """
+    if not query:
+        return fallback
+    borrowed = (_words(query) & _words(said_by_metis)) - _words(said_by_people)
+    return fallback if borrowed else query
 
 
 def _first_string_param(tool: BaseTool) -> Optional[str]:
@@ -239,6 +261,10 @@ async def decide_tools(
     context = "\n".join(f"{'Metis' if m['role'] == 'assistant' else 'User'}: {m['content'][:200]}" for m in recent)
     options = "\n".join(f"- {name}: {tool.definition.description}" for name, tool in decidable.items())
     prompt = (f"Recent conversation:\n{context}\n\n" if context else "") + f"Latest message: {last_user_message}"
+    # The query is written from what people said, not from Metis's replies: if she made something up,
+    # a query built from it searches for her mistake ("roadster" when asked about news in France).
+    said = "\n".join(m["content"][:200] for m in recent if m["role"] == "user")
+    query_prompt = (f"Earlier messages:\n{said}\n\n" if said else "") + f"Latest message: {last_user_message}"
 
     try:
         choice = await asyncio.to_thread(
@@ -254,11 +280,17 @@ async def decide_tools(
         if choice in decidable:
             query = await asyncio.to_thread(
                 chat_completion,
-                [{"role": "system", "content": _QUERY_PROMPT}, {"role": "user", "content": prompt}],
+                [{"role": "system", "content": _QUERY_PROMPT}, {"role": "user", "content": query_prompt}],
                 0.0, 0.9, 24,
             )
             query = query.strip().strip('"').splitlines()[0].strip() if query.strip() else ""
-            calls.append(ToolCall(choice, {_first_string_param(decidable[choice]): query or text}, f"chose {choice}"))
+            metis_said = " ".join(m["content"][:200] for m in recent if m["role"] == "assistant")
+            query = grounded_query(query, f"{said} {text}", metis_said, text)
+            arguments: Dict[str, Any] = {_first_string_param(decidable[choice]): query}
+            if choice == "web_search" and _NEWS.search(text):
+                arguments["search_type"] = "news"
+            print(f"🔎 {choice}: {arguments}")
+            calls.append(ToolCall(choice, arguments, f"chose {choice}"))
     except Exception as e:
         print(f"Tool decision failed: {e}")
     return calls

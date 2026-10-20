@@ -86,7 +86,7 @@ async def test_web_search_choice_gets_a_generated_query(fake_model):
     state, _ = fake_model
     state["choice"] = "web_search"
     result = await select_tools([], "[Sava]: who won the f1 race yesterday?", 2)
-    assert ("web_search", {"query": "f1 race winner"}) in [(c.tool_name, c.arguments) for c in result]
+    assert ("web_search", {"query": "f1 race winner", "search_type": "news"}) in [(c.tool_name, c.arguments) for c in result]
 
 
 async def test_links_are_always_fetched(fake_model):

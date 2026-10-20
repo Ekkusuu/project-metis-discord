@@ -50,3 +50,38 @@ def test_voice_name_aliases():
     svc.config, svc._names, svc._aliases = {}, [], {"matthis": "Metis", "mathis": "Metis"}
     assert svc._correct_names("Hello Matthis, how are you") == "Hello Metis, how are you"
     assert svc._correct_names("I bought a new mattress") == "I bought a new mattress"
+
+
+def test_search_query_ignores_metis_replies_and_made_up_words(monkeypatch):
+    """A query built from Metis's own made-up reply searched for 'roadster' when asked about France."""
+    import asyncio
+    import backend.tool_manager as tm
+
+    seen = {}
+
+    def fake_query(messages, *args):
+        seen["prompt"] = messages[-1]["content"]
+        return "roadster date France news"
+
+    monkeypatch.setattr(tm, "json_completion", lambda *a, **k: "web_search")
+    monkeypatch.setattr(tm, "chat_completion", fake_query)
+    messages = [
+        {"role": "user", "content": "[ekkusu]: hello"},
+        {"role": "assistant", "content": "Are you here for the roadster date today?"},
+        {"role": "user", "content": "[ekkusu]: What happened in France recently that everyone is talking about?"},
+    ]
+    calls = asyncio.run(tm.decide_tools(messages, messages[-1]["content"]))
+    assert "roadster" not in seen["prompt"]
+    assert calls[0].arguments["query"] == "What happened in France recently that everyone is talking about?"
+    assert calls[0].arguments["search_type"] == "news"
+
+
+def test_grounded_query_keeps_good_queries():
+    from backend.tool_manager import grounded_query
+
+    metis = "Are you here for the roadster date today?"
+    assert grounded_query("France news", "what happened in France? it is on the news", metis, "x") == "France news"
+    assert grounded_query("roadster France news", "what happened in France?", metis, "x") == "x"
+    assert grounded_query("Tesla Roadster release date", "when was the tesla roadster released", metis, "x") == \
+        "Tesla Roadster release date"
+    assert grounded_query("f1 race winner", "who won the f1 race yesterday?", "", "x") == "f1 race winner"

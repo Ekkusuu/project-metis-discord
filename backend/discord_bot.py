@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import logging
 import os
 import random
 import re
@@ -566,6 +567,7 @@ async def on_message(message: discord.Message):
         else:
             sent = await message.channel.send(chunk, allowed_mentions=mentions)
 
+    print(f"💬 Metis → {message.author.display_name}: {reply}")
     async with conversation.lock:
         conversation.add_assistant(reply, to=message.author.id)
     await publish({
@@ -789,6 +791,7 @@ class VoiceReceiver:
             if outcome == "interrupted":
                 print("✋ interrupted; stopped talking")
                 reply += " —"
+            print(f"💬 Metis → {user.display_name}: {reply}")
             async with conversation.lock:
                 conversation.add_assistant(reply, to=user.id)
 
@@ -1159,6 +1162,8 @@ def start_in_background() -> Optional[threading.Thread]:
             _loop.close()
 
     discord.utils.setup_logging()
+    # It logs every RTCP sender report (one a second during a call) at INFO.
+    logging.getLogger("discord.ext.voice_recv.reader").setLevel(logging.WARNING)
     _thread = threading.Thread(target=runner, name="discord-bot", daemon=True)
     _thread.start()
     return _thread
