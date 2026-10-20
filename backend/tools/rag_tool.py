@@ -52,27 +52,26 @@ class RAGTool(BaseTool):
             traceback.print_exc()
             return {"success": False, "result": None, "error": str(e)}
 
-    def _queries(self, query: str, conversation_context: str, voice_mode: bool) -> List[str]:
+    def _queries(self, query: str, conversation_context: str, voice_mode: bool, message: str) -> List[str]:
         rag_cfg = get_config().get("rag", {})
         tool_cfg = get_config().get("tools", {}).get("knowledge_search") or {}
-        # The selector already wrote a focused query. In voice mode latency matters more
-        # than recall, so skip the extra LLM round-trip for query expansion.
-        if voice_mode or not tool_cfg.get("expand_queries", False):
+        if not tool_cfg.get("expand_queries", True):
             return [query]
         from backend.rag_engine import generate_optimized_queries
 
-        expanded = generate_optimized_queries(
-            query,
-            conversation_context=conversation_context,
-            num_queries=int(rag_cfg.get("query_generation_count", 3)),
+        # Voice: one query, since every LLM call delays the spoken reply.
+        count = int(tool_cfg.get("voice_query_count", 1)) if voice_mode else int(rag_cfg.get("query_generation_count", 3))
+        generated = generate_optimized_queries(
+            message or query, conversation_context=conversation_context, num_queries=count, voice_mode=voice_mode,
         )
-        return list(dict.fromkeys([query, *expanded]))
+        # The message itself stays as a query too: it still finds notes that use its exact words.
+        return list(dict.fromkeys([*generated, query]))
 
     def _run(self, query: str, num_results: Optional[int], conversation_context: str, voice_mode: bool,
              message: str = "") -> Dict[str, Any]:
         from backend.rag_engine import format_context_for_prompt, search
 
-        queries = self._queries(query, conversation_context, voice_mode)
+        queries = self._queries(query, conversation_context, voice_mode, message)
         print(f"📚 Knowledge queries: {queries}" + (f"\n   made from: {message!r}" if message else ""))
         found = search(queries, top_k=int(num_results) if num_results else None)
         accepted = found["accepted"]

@@ -166,10 +166,11 @@ tools:
   # Individual tool settings
   knowledge_search:
     enabled: true
-    # Expand the query into rag.query_generation_count extra queries with the LLM. Off by default:
-    # knowledge_search runs on every message, and expansion added an LLM call plus extra retrievals
-    # (median tool time 0.47 s -> see README benchmarks). Always skipped in voice chat.
-    expand_queries: false
+    # Have the LLM write search queries from the conversation (names, the topic of "it"/"that")
+    # instead of searching with the raw message only. rag.query_generation_count queries in text
+    # chat, voice_query_count in voice (each LLM call delays the spoken reply a little).
+    expand_queries: true
+    voice_query_count: 1
 
   # Web search using DuckDuckGo (no server or Docker needed)
   web_search:

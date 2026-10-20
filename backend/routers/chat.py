@@ -101,11 +101,14 @@ def _base_messages(req: ChatRequest) -> List[Dict[str, str]]:
 
 
 def _conversation_text(messages: List[Dict[str, str]], count: int) -> str:
-    """Last `count` messages before the latest one, as plain text (for query generation)."""
+    """
+    What people said in the last `count` messages before the latest one (for query generation).
+    Metis's replies are left out: when she makes something up, queries built from it search for it.
+    """
     if count <= 0:
         return ""
     history = [m for m in messages[:-1] if m["role"] in ("user", "assistant")][-count:]
-    return "\n".join(f"{'User' if m['role'] == 'user' else 'Assistant'}: {m['content']}" for m in history)
+    return "\n".join(m["content"][:300] for m in history if m["role"] == "user")
 
 
 async def _run_tools(messages: List[Dict[str, str]], req: ChatRequest, timings: Dict[str, float]) -> str:

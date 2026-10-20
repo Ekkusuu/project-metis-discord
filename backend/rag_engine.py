@@ -426,25 +426,42 @@ def generate_rag_queries(
     return queries or [last_user_message]
 
 
+# A small model follows worked examples far better than a list of rules (the old prompt mostly got
+# the message echoed back). Memories about people are stored as "user personal information: <name> ...".
+_KNOWLEDGE_QUERY_SYSTEM = (
+    "You write search queries for Metis's memory: notes and what she remembers about people. Given a chat, "
+    "write short keyword queries that would find what helps her reply to the latest message. Use people's "
+    "names, and take the topic from earlier messages when the latest one says 'it' or 'that'. For things about "
+    "a person, start with 'user personal information' and their name. One query per line, nothing else."
+)
+_KNOWLEDGE_QUERY_EXAMPLES = [
+    ("Earlier messages:\n[Robin]: I've started learning guitar\n\nLatest message: [Robin]: what song should I try next?\n\n"
+     "Write 2 queries.",
+     "user personal information Robin guitar\nbeginner guitar songs"),
+    ("Latest message: [Sava]: do you remember what my cat is called?\n\nWrite 1 query.",
+     "user personal information Sava cat name"),
+    ("Earlier messages:\n[Ana]: my exam is on friday\n\nLatest message: [Ana]: I'm so nervous about it\n\n"
+     "Write 2 queries.",
+     "user personal information Ana exam\nexam nerves"),
+]
+
+
 def generate_optimized_queries(
     last_user_message: str,
     conversation_context: str = "",
     num_queries: int = 3,
     voice_mode: bool = False,
 ) -> List[str]:
-    """Query generation for the knowledge_search tool (context is already a formatted string)."""
-    rag_cfg = _rag_cfg()
-    prefix = "query_generation_voice" if voice_mode else "query_generation"
-    system_prompt = resolve_prompt(rag_cfg.get(f"{prefix}_system_prompt", f"@rag.{prefix}_system"))
-    template = resolve_prompt(rag_cfg.get(f"{prefix}_user_prompt", f"@rag.{prefix}_user"))
-    user_prompt = template.format(
-        conversation_context=conversation_context or "No previous context.",
-        last_user_message=last_user_message,
-    )
+    """Queries for the knowledge_search tool (context: earlier messages, one per line)."""
+    examples: List[Dict[str, str]] = []
+    for question, answer in _KNOWLEDGE_QUERY_EXAMPLES:
+        examples += [{"role": "user", "content": question}, {"role": "assistant", "content": answer}]
+    prompt = ((f"Earlier messages:\n{conversation_context}\n\n" if conversation_context else "")
+              + f"Latest message: {last_user_message}\n\nWrite {num_queries} {'query' if num_queries == 1 else 'queries'}.")
     try:
         response = chat_completion(
-            [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
-            temperature=0.3, max_tokens=60 * num_queries,
+            [{"role": "system", "content": _KNOWLEDGE_QUERY_SYSTEM}, *examples, {"role": "user", "content": prompt}],
+            temperature=0.2, max_tokens=24 * num_queries,
         )
         queries = _parse_query_lines(response, num_queries)
     except Exception as e:
