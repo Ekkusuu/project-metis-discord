@@ -116,6 +116,7 @@ async def _run_tools(messages: List[Dict[str, str]], req: ChatRequest, timings: 
     extra = {
         "conversation_context": _conversation_text(messages, int(tools_cfg.get("context_messages", 3))),
         "voice_mode": req.voice_mode,
+        "message": last_user,  # for the log: which message a query was made from
     }
 
     # Calls that need no decision (knowledge search, links) run while the model decides about the web.
@@ -170,6 +171,7 @@ def _run_legacy_rag(messages: List[Dict[str, str]], req: ChatRequest, timings: D
         user_prompt_override=req.rag_user_prompt,
     )
     timings["query_generation"] = round(time.perf_counter() - t0, 3)
+    print(f"📚 Knowledge queries: {queries}\n   made from: {last_user!r}")
 
     t0 = time.perf_counter()
     found = search(queries)

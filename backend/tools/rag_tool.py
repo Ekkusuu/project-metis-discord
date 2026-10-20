@@ -42,10 +42,11 @@ class RAGTool(BaseTool):
         num_results: Optional[int] = None,
         conversation_context: str = "",
         voice_mode: bool = False,
+        message: str = "",
         **kwargs: Any,
     ) -> Dict[str, Any]:
         try:
-            return await asyncio.to_thread(self._run, query, num_results, conversation_context, voice_mode)
+            return await asyncio.to_thread(self._run, query, num_results, conversation_context, voice_mode, message)
         except Exception as e:
             import traceback
             traceback.print_exc()
@@ -67,11 +68,12 @@ class RAGTool(BaseTool):
         )
         return list(dict.fromkeys([query, *expanded]))
 
-    def _run(self, query: str, num_results: Optional[int], conversation_context: str, voice_mode: bool) -> Dict[str, Any]:
+    def _run(self, query: str, num_results: Optional[int], conversation_context: str, voice_mode: bool,
+             message: str = "") -> Dict[str, Any]:
         from backend.rag_engine import format_context_for_prompt, search
 
         queries = self._queries(query, conversation_context, voice_mode)
-        print(f"📚 Knowledge queries: {queries}")
+        print(f"📚 Knowledge queries: {queries}" + (f"\n   made from: {message!r}" if message else ""))
         found = search(queries, top_k=int(num_results) if num_results else None)
         accepted = found["accepted"]
         sources = sorted({Path(str((c.get("metadata") or {}).get("source_file", "?"))).name for c in accepted})

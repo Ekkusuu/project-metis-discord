@@ -283,13 +283,18 @@ async def decide_tools(
                 [{"role": "system", "content": _QUERY_PROMPT}, {"role": "user", "content": query_prompt}],
                 0.0, 0.9, 24,
             )
-            query = query.strip().strip('"').splitlines()[0].strip() if query.strip() else ""
+            written = query.strip().strip('"').splitlines()[0].strip() if query.strip() else ""
             metis_said = " ".join(m["content"][:200] for m in recent if m["role"] == "assistant")
-            query = grounded_query(query, f"{said} {text}", metis_said, text)
+            query = grounded_query(written, f"{said} {text}", metis_said, text)
             arguments: Dict[str, Any] = {_first_string_param(decidable[choice]): query}
             if choice == "web_search" and _NEWS.search(text):
                 arguments["search_type"] = "news"
-            print(f"🔎 {choice}: {arguments}")
+            print(f"🔎 {choice} query {query!r}"
+                  + (f" ({arguments['search_type']})" if "search_type" in arguments else "")
+                  + f"\n   made from: {last_user_message!r}"
+                  + (f"\n   earlier messages used: {said!r}" if said else "")
+                  + (f"\n   model wrote {written!r}, replaced: it used words only Metis said" if written and query != written else "")
+                  + ("\n   model wrote nothing, using the message" if not written else ""))
             calls.append(ToolCall(choice, arguments, f"chose {choice}"))
     except Exception as e:
         print(f"Tool decision failed: {e}")
