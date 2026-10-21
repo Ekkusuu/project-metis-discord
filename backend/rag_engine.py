@@ -538,6 +538,36 @@ def retrieve_context(query: str, top_k: Optional[int] = None) -> Dict[str, List[
     }
 
 
+def quick_search(query: str, max_distance: float = 1.2, limit: int = 2) -> Dict[str, Any]:
+    """
+    One vector lookup, no reranker and no generated queries: ~50 ms instead of 1-2 s, for every message.
+    Only close matches count. On the notes index, chunks that answer a message were at distance
+    0.94-1.14 and small talk never came closer than 1.41, so a distance cutoff alone tells them apart.
+    The full search (generated queries + reranker) is the `remember` tool, used when the model asks for it.
+    """
+    if not _rag_cfg().get("enabled", True) or not query.strip():
+        return {"queries": [query], "accepted": [], "rejected": []}
+    try:
+        collection = get_collection()
+        count = collection.count()
+        results = collection.query(query_texts=[query], n_results=min(limit + 2, count)) if count else {}
+    except Exception as e:
+        print(f"Error retrieving context: {e}")
+        results = {}
+    contexts = [
+        {"text": doc, "metadata": md or {}, "distance": dist}
+        for doc, md, dist in zip((results.get("documents") or [[]])[0], (results.get("metadatas") or [[]])[0],
+                                 (results.get("distances") or [[]])[0])
+    ]
+    close = [c for c in contexts if c["distance"] <= max_distance]
+    return {
+        "queries": [query],
+        "accepted": close[:limit],
+        "rejected": [dict(c, rejection_reason="distance") for c in contexts if c["distance"] > max_distance]
+        + [dict(c, rejection_reason="rank") for c in close[limit:]],
+    }
+
+
 def _chunk_key(ctx: Dict[str, Any]) -> Tuple[Any, Any]:
     md = ctx.get("metadata") or {}
     if md.get("source_file") is None or md.get("chunk_index") is None:

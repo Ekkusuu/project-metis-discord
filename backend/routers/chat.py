@@ -7,11 +7,12 @@ the last retrieval, the last tool execution and the exact prompt sent to the LLM
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import datetime
 import json
 import re
 import time
-from typing import Any, Dict, List, Literal, Optional, Tuple
+from typing import Any, Callable, Dict, List, Literal, Optional, Tuple
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -111,7 +112,12 @@ def _conversation_text(messages: List[Dict[str, str]], count: int) -> str:
     return "\n".join(m["content"][:300] for m in history if m["role"] == "user")
 
 
-async def _run_tools(messages: List[Dict[str, str]], req: ChatRequest, timings: Dict[str, float]) -> str:
+# Tools that take a second or two: the voice bot says something like "hmm, let me think" while they run.
+SLOW_TOOLS = ("remember", "web_search")
+
+
+async def _run_tools(messages: List[Dict[str, str]], req: ChatRequest, timings: Dict[str, float],
+                     notify: Optional[Callable[[str], None]] = None) -> str:
     from backend.tool_manager import decide_tools, execute_tools, format_tool_results_for_context, immediate_calls
 
     tools_cfg = get_config().get("tools", {})
@@ -130,6 +136,9 @@ async def _run_tools(messages: List[Dict[str, str]], req: ChatRequest, timings: 
     timings["tool_selection"] = round(time.perf_counter() - t0, 3)
     calls = immediate + decided
     print(f"Tool selection: {[c.tool_name for c in calls] or 'none'}")
+    slow = next((c.tool_name for c in decided if c.tool_name in SLOW_TOOLS), None)
+    if slow and notify:
+        notify(slow)
 
     if not calls:
         state.update(
@@ -141,11 +150,14 @@ async def _run_tools(messages: List[Dict[str, str]], req: ChatRequest, timings: 
     t1 = time.perf_counter()
     decided_results = await execute_tools(decided, extra) if decided else []
     results = (await immediate_task if immediate_task else []) + decided_results
+    if any(r.tool_name == "remember" and r.success for r in results):
+        # The quick lookup's matches are among the thorough search's anyway; don't list them twice.
+        results = [r for r in results if r.tool_name != "knowledge_search"]
     timings["tool_execution"] = round(time.perf_counter() - t1, 3)
 
     rag_view: Optional[Dict[str, Any]] = None
     for r in results:
-        if r.tool_name == "knowledge_search" and r.success and r.raw_response:
+        if r.tool_name in ("knowledge_search", "remember") and r.success and r.raw_response:
             from backend.rag_engine import results_for_ui
             rag_view = results_for_ui(r.raw_response["search"], last_user, tool_mode=True)
     state.update(
@@ -184,7 +196,8 @@ def _run_legacy_rag(messages: List[Dict[str, str]], req: ChatRequest, timings: D
     return format_context_for_prompt(found["accepted"])
 
 
-async def gather_context(messages: List[Dict[str, str]], req: ChatRequest) -> Tuple[str, Dict[str, float], Dict[str, float]]:
+async def gather_context(messages: List[Dict[str, str]], req: ChatRequest,
+                         notify: Optional[Callable[[str], None]] = None) -> Tuple[str, Dict[str, float], Dict[str, float]]:
     """Run tools (or legacy RAG). Returns (context_text, tool_timings, rag_timings)."""
     config = get_config()
     tool_timings: Dict[str, float] = {}
@@ -193,7 +206,7 @@ async def gather_context(messages: List[Dict[str, str]], req: ChatRequest) -> Tu
 
     if use_tools:
         try:
-            return await _run_tools(messages, req, tool_timings), tool_timings, rag_timings
+            return await _run_tools(messages, req, tool_timings, notify), tool_timings, rag_timings
         except Exception as e:
             import traceback
             print(f"Tool system error, falling back to plain RAG: {e}")
@@ -270,10 +283,15 @@ def reply_guidance(messages: List[Dict[str, str]], voice: bool, has_context: boo
         emotions = voice_emotions()
         if emotions:
             # The Qwen3-TTS voice has a recording per mood; the tag picks it (discord_bot strips it out).
-            rules.append("Start your reply with how you sound, in square brackets, one of: "
+            # The model invented tags ("[hmmph]", "[buzz]") when sounds were mentioned alongside the tags.
+            rules.append("Start your reply with how you sound: exactly one of "
                          + " ".join(f"[{e}]" for e in ["neutral", *emotions])
-                         + ". Pick what fits what you're saying and the mood; if your mood changes, put another "
-                         "one before that sentence. Tags aren't spoken, but sounds like heehee, hmph, aww or ugh are.")
+                         + " (only these words in brackets). Pick what fits what you're saying and the mood.")
+        # A small model copied its previous reply almost word for word, turn after turn; a general "don't
+        # repeat yourself" didn't stop it, quoting the reply it would copy did.
+        last = next((m["content"] for m in reversed(messages[:-1]) if m["role"] == "assistant"), "")
+        rules.append("Say something new" + (f": your last reply was \"{last[:160]}\", don't reuse its words or "
+                                            "jokes." if last else "."))
     return "How to reply:\n- " + "\n- ".join(rules)
 
 
@@ -309,9 +327,10 @@ def _sampling(req: ChatRequest) -> Dict[str, Any]:
     }
 
 
-async def _prepare(req: ChatRequest) -> Tuple[List[Dict[str, str]], Dict[str, Any]]:
+async def _prepare(req: ChatRequest, notify: Optional[Callable[[str], None]] = None
+                   ) -> Tuple[List[Dict[str, str]], Dict[str, Any]]:
     messages = _base_messages(req)
-    context_text, tool_timings, rag_timings = await gather_context(messages, req)
+    context_text, tool_timings, rag_timings = await gather_context(messages, req, notify)
     guidance = reply_guidance(messages, req.voice_mode, bool(context_text), "[web_search]" in context_text)
     final = trim_messages_to_context(build_prompt(messages, context_text, people_context(req), guidance))
     stamp = datetime.datetime.now().isoformat()
@@ -319,26 +338,79 @@ async def _prepare(req: ChatRequest) -> Tuple[List[Dict[str, str]], Dict[str, An
     return final, {"tool_timings": tool_timings, "rag_timings": rag_timings}
 
 
+_OPENING_CHARS = 30
+
+
+def _opening(text: str) -> str:
+    """The start of a reply for comparing replies: no voice tags or name prefix, letters and spaces only."""
+    text = re.sub(r"^\s*(\[[^\]]{1,24}\]\s*:?\s*)+", "", text)
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]", "", text.lower())).strip()
+
+
 @router.post("/chat/stream")
 async def chat_stream(req: ChatRequest, request: Request):
     """
     Stream a reply as NDJSON: {"delta": "..."} lines, then a final
     {"done": true, "tokens_per_second", "llm_generation_time", "ttft", "tool_timings", "rag_timings"}.
+    Before the reply, {"thinking": "<tool>"} when a slow tool (SLOW_TOOLS) is about to run, so the voice
+    bot can fill the pause.
     """
-    final, meta = await _prepare(req)
+    _base_messages(req)  # a bad request fails here with a 400, not halfway through the stream
     sampling = _sampling(req)
 
     async def generate():
+        events: asyncio.Queue[str] = asyncio.Queue()
+        preparing = asyncio.create_task(_prepare(req, events.put_nowait))
+        while not preparing.done():
+            waiter = asyncio.create_task(events.get())
+            await asyncio.wait({preparing, waiter}, return_when=asyncio.FIRST_COMPLETED)
+            if waiter.done():
+                yield json.dumps({"thinking": waiter.result()}) + "\n"
+            else:
+                waiter.cancel()
+        while not events.empty():
+            yield json.dumps({"thinking": events.get_nowait()}) + "\n"
+        try:
+            final, meta = preparing.result()
+        except Exception as e:
+            yield json.dumps({"error": str(e), "done": True}) + "\n"
+            return
         stats: Dict[str, Any] = {}
         start = time.perf_counter()
         first_token: Optional[float] = None
-        reply = ""
+        previous = _opening(next((m["content"] for m in reversed(final) if m["role"] == "assistant"), ""))
         try:
-            async for delta in astream_chat(final, stats=stats, **sampling):
-                if first_token is None:
-                    first_token = time.perf_counter() - start
-                reply += delta
-                yield json.dumps({"delta": delta}) + "\n"
+            for attempt in range(2):
+                # A small model sometimes starts its previous reply over, word for word. The first few words are
+                # held back (~0.1 s) and compared; a repeat is dropped and regenerated with more randomness.
+                checking, held, repeated, reply = bool(previous) and attempt == 0, [], False, ""
+                params = sampling if attempt == 0 else {**sampling, "temperature": min(1.2, sampling["temperature"] + 0.3)}
+                async with contextlib.aclosing(astream_chat(final, stats=stats, **params)) as deltas:
+                    async for delta in deltas:
+                        if first_token is None:
+                            first_token = time.perf_counter() - start
+                        reply += delta
+                        if checking:
+                            held.append(delta)
+                            opening = _opening(reply)
+                            if len(opening) < _OPENING_CHARS:
+                                continue
+                            checking = False
+                            if opening[:_OPENING_CHARS] == previous[:_OPENING_CHARS]:
+                                repeated = True
+                                break  # closing the stream stops the generation
+                            for d in held:
+                                yield json.dumps({"delta": d}) + "\n"
+                            continue
+                        yield json.dumps({"delta": delta}) + "\n"
+                if checking:  # the whole reply was shorter than the check
+                    repeated = _opening(reply) == previous
+                    if not repeated:
+                        for d in held:
+                            yield json.dumps({"delta": d}) + "\n"
+                if not repeated:
+                    break
+                print(f"🔁 Reply started repeating the previous one ({reply.strip()[:60]!r}); generating a new one")
         except Exception as e:
             yield json.dumps({"error": str(e), "done": True}) + "\n"
             return

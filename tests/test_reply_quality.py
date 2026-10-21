@@ -144,3 +144,41 @@ def test_voice_guidance_lists_the_voice_emotions(monkeypatch):
     assert "[happy]" not in reply_guidance(messages, voice=False, has_context=False)
     monkeypatch.setattr(chat, "get_config", lambda: {"voice": {"tts_engine": "kokoro"}})
     assert "[happy]" not in reply_guidance(messages, voice=True, has_context=False)
+
+
+async def test_stream_regenerates_a_reply_that_repeats_the_previous_one(monkeypatch):
+    import json as _json
+
+    import backend.routers.chat as chat
+
+    previous = "You sound like a dog who just found out the Great Discovery exists, so what are you waiting for?"
+    final = [{"role": "assistant", "content": previous}, {"role": "user", "content": "[a]: I'm not waiting"}]
+    calls = []
+
+    async def fake_prepare(req, notify=None):
+        return final, {}
+
+    async def fake_stream(messages, stats=None, temperature=0.7, **kw):
+        calls.append(temperature)
+        text = ("[annoyed] " + previous) if len(calls) == 1 else "[teasing] Fine, then sit there."
+        for word in text.split(" "):
+            yield word + " "
+
+    monkeypatch.setattr(chat, "_prepare", fake_prepare)
+    monkeypatch.setattr(chat, "astream_chat", fake_stream)
+    req = chat.ChatRequest(messages=[{"role": "user", "content": "[a]: hi"}], voice_mode=True)
+    response = await chat.chat_stream(req, None)
+    lines = [_json.loads(c) async for c in response.body_iterator]
+    said = "".join(line.get("delta", "") for line in lines)
+    assert said.strip() == "[teasing] Fine, then sit there."  # nothing of the repeat reached the client
+    assert len(calls) == 2 and calls[1] > calls[0]
+
+
+def test_made_up_voice_tags_map_to_the_nearest_emotion():
+    from backend.text_utils import take_emotion
+
+    known = ["excited", "annoyed", "scared", "teasing"]
+    assert take_emotion("[crazy] Yes!", known) == ("excited", "Yes!")
+    assert take_emotion("[hmph] Whatever.", known) == ("annoyed", "Whatever.")
+    assert take_emotion("[danger] Run!", known) == ("scared", "Run!")
+    assert take_emotion("[lucky] Nice.", known) == (None, "Nice.")  # "happy" isn't one of this voice's moods

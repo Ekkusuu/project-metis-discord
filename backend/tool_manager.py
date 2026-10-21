@@ -140,8 +140,9 @@ def get_tool_registry() -> ToolRegistry:
 # ---------------------------------------------------------------------------
 # Selection is built for small local models:
 # - fetch_webpage runs for any link in the message; no decision needed.
-# - knowledge_search runs on every message (tools.knowledge_search.always): it is cheap, and
-#   the distance/rerank filters drop irrelevant chunks, so there's nothing for the model to get wrong.
+# - knowledge_search runs on every message (tools.knowledge_search.always): a quick lookup (~50 ms) that
+#   only keeps close matches, so there's nothing for the model to get wrong. The thorough search is
+#   `remember`, which the model chooses like the other tools.
 # - For the remaining tools the model makes ONE constrained choice from an enum ("none" or a tool
 #   name) and then writes a short query. A 2B model picked the right option 6/8 times this way vs
 #   3/8 when asked for a JSON array of calls.
@@ -183,6 +184,14 @@ _FRESH_INFO = re.compile(
 # Someone explicitly asking Metis to look something up.
 _SEARCH_REQUEST = re.compile(
     r"\b(search|google|look (it |that |this )?up|look for|check online|find out|browse)\b", re.IGNORECASE
+)
+# Asking Metis to think back gets `remember` even if the small model says "none" (it did for
+# "what did I tell you about my exam last week?").
+_REMEMBER = re.compile(
+    r"\b(do you |can you |try to )?(remember|recall)\b|\bdid I (ever )?(tell|mention|say)|\bwhat did I (say|tell|mention)|"
+    r"\bI (told|showed|mentioned to) you\b|\b(thing|stuff|what) I (said|told you|mentioned)\b|\byou (said|told me|promised)\b|\b(last time|the other day) (we|I|you)\b|"
+    r"\bwhat('s| is| was) my\b|\bdo you know (my|what my|who my)\b",
+    re.IGNORECASE,
 )
 _QUESTION_WORDS = re.compile(r"^\W*(who|what|when|where|which|why|how|is|are|was|were|did|does|do|can|could|tell me|give me)\b",
                              re.IGNORECASE)
@@ -293,7 +302,13 @@ async def decide_tools(
                 or (_GO_AHEAD.match(text) and (_OFFERED_TO_SEARCH.search(last_metis) or _SEARCH_REQUEST.search(said)
                                                or (is_question_like(said) and _FRESH_INFO.search(said))))):
             choice = "web_search"
-        if choice in decidable:
+        if choice == "none" and "remember" in decidable and _REMEMBER.search(text):
+            choice = "remember"
+        if choice == "remember":
+            # The tool writes its own memory queries from the conversation; no web-style query needed.
+            print(f"🧠 remember chosen for: {last_user_message!r}")
+            calls.append(ToolCall("remember", {"query": text}, "chose remember"))
+        elif choice in decidable:
             examples: List[Dict[str, str]] = []
             for question, answer in _QUERY_EXAMPLES:
                 examples += [{"role": "user", "content": question}, {"role": "assistant", "content": answer}]

@@ -23,12 +23,13 @@ def get_all_tools() -> List[BaseTool]:
     
     Add new tools here as they are implemented.
     """
-    from backend.tools.rag_tool import RAGTool
+    from backend.tools.rag_tool import RAGTool, RememberTool
     from backend.tools.web_page_tool import WebPageTool
     from backend.tools.web_search_tool import WebSearchTool
 
     return [
         RAGTool(),
+        RememberTool(),
         WebSearchTool(),
         WebPageTool(),
     ]

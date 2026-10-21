@@ -192,6 +192,22 @@ def pop_sentences(buffer: str) -> tuple[List[str], str]:
 _TAG = re.compile(r"\[\s*([A-Za-z][A-Za-z ]{0,20}?)\s*\]|\(\s*([A-Za-z]{3,15})\s*\)")
 
 
+# The model also makes up its own tags ("[crazy]", "[hmph]", "[danger]"); these map to the nearest real one.
+_SIMILAR_EMOTIONS = {
+    "excited": ["crazy", "hyper", "thrilled", "wild", "eager", "amazed", "surprised", "shocked"],
+    "happy": ["cheerful", "joyful", "glad", "lucky", "proud", "pleased", "delighted", "laughing", "giggling"],
+    "teasing": ["playful", "smug", "sarcastic", "mocking", "sassy", "cheeky", "mischievous", "flirty", "laughs"],
+    "affectionate": ["loving", "sweet", "warm", "tender", "soft", "caring", "romantic", "shy"],
+    "sleepy": ["tired", "bored", "yawning", "lazy", "drowsy", "sleepy"],
+    "annoyed": ["angry", "mad", "irritated", "hmph", "hmmph", "ugh", "grumpy", "frustrated", "furious", "savage",
+                "disgusted", "rude", "mean", "sassy annoyed"],
+    "sad": ["upset", "crying", "hurt", "disappointed", "lonely", "gloomy"],
+    "scared": ["afraid", "nervous", "worried", "anxious", "danger", "panicked", "terrified", "startled"],
+    "neutral": ["calm", "normal", "flat", "serious", "thinking", "curious"],
+}
+_EMOTION_OF = {word: emotion for emotion, words in _SIMILAR_EMOTIONS.items() for word in words}
+
+
 def take_emotion(text: str, known: List[str]) -> tuple[Optional[str], str]:
     """(the last known emotion tagged in `text`, or None; `text` without its tags)."""
     emotion: Optional[str] = None
@@ -199,6 +215,8 @@ def take_emotion(text: str, known: List[str]) -> tuple[Optional[str], str]:
     def drop(match: re.Match) -> str:
         nonlocal emotion
         word = (match.group(1) or match.group(2)).strip().lower()
+        if word not in known and _EMOTION_OF.get(word) in [*known, "neutral"] and match.group(1):
+            word = _EMOTION_OF[word]
         if word in known or word == "neutral":
             emotion = word
         elif match.group(2):

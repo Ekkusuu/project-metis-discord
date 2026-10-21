@@ -26,7 +26,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
+from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional, Tuple
 
 import aiohttp
 import discord
@@ -408,8 +408,12 @@ async def wait_until_quiet(channel_id: int, message_id: int, conversation: Conve
     return conversation.latest_id == message_id
 
 
-async def stream_reply(payload: Dict[str, Any], stats: Dict[str, Any]) -> AsyncIterator[str]:
-    """Yield reply text deltas from the backend. The final stats chunk is stored in `stats`."""
+async def stream_reply(payload: Dict[str, Any], stats: Dict[str, Any],
+                       on_thinking: Optional[Callable[[str], Awaitable[None]]] = None) -> AsyncIterator[str]:
+    """
+    Yield reply text deltas from the backend. The final stats chunk is stored in `stats`.
+    on_thinking(tool) is awaited when a slow tool (remembering, a web search) starts, before the reply.
+    """
     async with http().post(f"{backend_url()}/chat/stream", json=payload) as response:
         if response.status != 200:
             raise RuntimeError(f"backend returned {response.status}: {(await response.text())[:300]}")
@@ -423,6 +427,8 @@ async def stream_reply(payload: Dict[str, Any], stats: Dict[str, Any]) -> AsyncI
                 continue
             if chunk.get("error"):
                 raise RuntimeError(chunk["error"])
+            if chunk.get("thinking") and on_thinking:
+                await on_thinking(chunk["thinking"])
             if chunk.get("delta"):
                 yield chunk["delta"]
             if chunk.get("done"):
@@ -881,6 +887,22 @@ class VoiceReceiver:
         asyncio.create_task(conversation.compact())
         self._print_timings(timings, stats, time.perf_counter() - t0)
 
+    _DEFAULT_THINKING = {
+        "remember": ["Hmm, let me think.", "Hmm... wait, let me remember.", "Ooh, let me think about that.",
+                     "Hold on, I'm thinking.", "Hmm, give me a second."],
+        "web_search": ["Hmm, let me look that up.", "One sec, I'll check.", "Ooh, let me see.",
+                       "Hold on, let me find out."],
+    }
+
+    def _thinking_line(self, tool: str) -> str:
+        """A filler line for while a slow tool runs (voice.thinking_lines), never the same one twice in a row."""
+        lines = (self.cfg.get("thinking_lines") or {}).get(tool) or self._DEFAULT_THINKING.get(tool) or []
+        fresh = [line for line in lines if line != getattr(self, "_last_thinking", None)] or lines
+        if not fresh:
+            return ""
+        self._last_thinking = random.choice(fresh)
+        return self._last_thinking
+
     async def _say_goodbye_and_leave(self, user: discord.abc.User, seq: int) -> None:
         """
         Someone asked Metis to leave the call: say bye, then disconnect. The goodbye is a set line
@@ -980,8 +1002,16 @@ class VoiceReceiver:
             if len(spoken) > 1:
                 await sentences.put((spoken, emotion))
 
+        async def think_aloud(tool: str) -> None:
+            # Remembering or searching takes a second or two: say so instead of going quiet, like a person would.
+            line = self._thinking_line(tool)
+            if line:
+                print(f"🤔 {tool}: saying {line!r} while it runs")
+                await say(line)
+
         try:
-            async for delta in stream_reply(chat_payload(conversation, True, self.present_members()), stats):
+            async for delta in stream_reply(chat_payload(conversation, True, self.present_members()), stats,
+                                            think_aloud):
                 if stopped():
                     break  # closing the stream stops generation upstream
                 reply += delta
