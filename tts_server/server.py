@@ -44,7 +44,7 @@ LANGUAGE = cfg.get("language", "Auto")  # "Auto" matches how the fine-tune was t
 CHUNK = int(cfg.get("chunk_size", 4))  # codec frames per streamed chunk (12 per second of audio)
 NEUTRAL = resolve(cfg["ref_audio"])
 EMOTIONS = {name: (resolve(e["audio"]), e["text"]) for name, e in (cfg.get("emotions") or {}).items()}
-SAMPLING = dict(temperature=float(cfg.get("temperature", 0.9)), top_k=int(cfg.get("top_k", 50)),
+SAMPLING = dict(temperature=float(cfg.get("temperature", 0.75)), top_k=int(cfg.get("top_k", 50)),
                 repetition_penalty=float(cfg.get("repetition_penalty", 1.05)))
 
 from faster_qwen3_tts import FasterQwen3TTS  # noqa: E402  (slow import; after config errors surface)
