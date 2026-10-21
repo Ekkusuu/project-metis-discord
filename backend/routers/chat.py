@@ -233,6 +233,14 @@ def people_context(req: ChatRequest) -> str:
     return "\n\n".join(parts)
 
 
+def voice_emotions() -> List[str]:
+    """The moods the voice can express besides neutral (voice.qwen_tts.emotions), when Qwen3-TTS is the voice."""
+    voice = get_config().get("voice", {})
+    if str(voice.get("tts_engine", "kokoro")).lower() != "qwen3":
+        return []
+    return [str(e).lower() for e in (voice.get("qwen_tts", {}).get("emotions") or {})]
+
+
 def reply_guidance(messages: List[Dict[str, str]], voice: bool, has_context: bool, searched_web: bool = False) -> str:
     """
     A short reminder placed right before the latest message. Small models follow the most recent
@@ -259,6 +267,13 @@ def reply_guidance(messages: List[Dict[str, str]], voice: bool, has_context: boo
         # can't say, and the mean one wrapped every reply in quotes.
         rules.append("This is spoken aloud: one or two short sentences of what you say, nothing else. No "
                      "*actions* or descriptions, no quotation marks around your reply, no emoji, no lists.")
+        emotions = voice_emotions()
+        if emotions:
+            # The Qwen3-TTS voice has a recording per mood; the tag picks it (discord_bot strips it out).
+            rules.append("Start your reply with how you sound, in square brackets, one of: "
+                         + " ".join(f"[{e}]" for e in ["neutral", *emotions])
+                         + ". Pick what fits what you're saying and the mood; if your mood changes, put another "
+                         "one before that sentence. Tags aren't spoken, but sounds like heehee, hmph, aww or ugh are.")
     return "How to reply:\n- " + "\n- ".join(rules)
 
 

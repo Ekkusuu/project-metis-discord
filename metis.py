@@ -265,8 +265,17 @@ def log_environment(cfg: dict, args: argparse.Namespace) -> None:
       f"discord={'on' if cfg.get('discord', {}).get('enabled', True) else 'off'} "
       f"rag={'on' if cfg.get('rag', {}).get('enabled') else 'off'} "
       f"tools={'on' if cfg.get('tools', {}).get('enabled') else 'off'} "
-      f"tts={voice.get('tts_voice')}/{voice.get('tts_device', 'auto')} stt={voice.get('stt_model_path')}")
+      f"tts={tts_engine(cfg)}:{voice.get('qwen_tts', {}).get('model') if tts_engine(cfg) == 'qwen3' else voice.get('tts_voice')} "
+      f"stt={voice.get('stt_model_path')}")
     w(f".env present: {(ROOT / '.env').exists()}; config file: {os.getenv('METIS_CONFIG') or 'config.yaml'}")
+
+
+def tts_engine(cfg: dict) -> str:
+    return str(cfg.get("voice", {}).get("tts_engine", "kokoro")).lower()
+
+
+def tts_port(cfg: dict) -> int:
+    return int(cfg.get("voice", {}).get("qwen_tts", {}).get("port", 8732))
 
 
 def ensure_node_modules(npm: str) -> bool:
@@ -316,6 +325,8 @@ def stop_running(cfg: dict) -> int:
     import psutil
 
     ports = {int(cfg["llm_service"]["port"]), int(cfg["backend"]["port"]), 5173}
+    if tts_engine(cfg) == "qwen3":
+        ports.add(tts_port(cfg))
     found = False
     for conn in psutil.net_connections(kind="tcp"):
         if conn.status == psutil.CONN_LISTEN and conn.laddr and conn.laddr.port in ports and conn.pid:
@@ -390,6 +401,18 @@ def main() -> int:
     llm = Service("llm", "llm    ", LAVENDER, [node, "server.js"], ROOT / "backend" / "llm_service", env, args.verbose)
     backend = Service("backend", "metis  ", MINT, [sys.executable, "-m", "backend"], ROOT, env, args.verbose)
     services: List[Service] = [llm, backend]
+    # The Qwen3-TTS voice server runs in its own Python environment (it needs library versions the
+    # main venv can't have). If it's missing or fails, voice chat falls back to Kokoro.
+    tts: Optional[Service] = None
+    if tts_engine(cfg) == "qwen3":
+        tts_python = Path(cfg["voice"].get("qwen_tts", {}).get("python", ""))
+        if not tts_python.is_file():
+            warn(f"voice.qwen_tts.python not found ({tts_python}); voice chat will use Kokoro.")
+        elif not port_free(tts_port(cfg)):
+            warn(f"Port {tts_port(cfg)} (voice.qwen_tts.port) is in use; voice chat will use Kokoro.")
+        else:
+            tts = Service("tts", "voice  ", YELLOW, [str(tts_python), str(ROOT / "tts_server" / "server.py")], ROOT,
+                          env, args.verbose)
     dashboard: Optional[Service] = None
     if args.dev:
         dev_env = {**env, "VITE_API_URL": f"http://127.0.0.1:{backend_port}"}
@@ -413,6 +436,8 @@ def main() -> int:
             step("Disconnecting the bot and saving what Metis learned...")
             backend.stop(timeout=90)
         llm.stop(timeout=10)
+        if tts:
+            tts.stop(timeout=5)
         ok("Stopped. Bye!")
 
     if WINDOWS:
@@ -437,6 +462,8 @@ def main() -> int:
     try:
         # 3. LLM service
         t0 = time.monotonic()
+        if tts:
+            tts.start()  # the slowest to load (~30 s); it loads while everything else does
         step(f"Loading the language model ({model_name})...")
         llm.start()
         health = f"http://127.0.0.1:{llm_port}/health"
@@ -457,6 +484,20 @@ def main() -> int:
         if dashboard:
             dashboard.start()
 
+        voice_line = _c(DIM, f"Kokoro ({cfg.get('voice', {}).get('tts_voice', 'af_heart')})")
+        if tts:
+            step("Waiting for the voice (Qwen3-TTS)...")
+            ready = wait_until(lambda: http_json(f"http://127.0.0.1:{tts_port(cfg)}/health") is not None, tts, 180,
+                               "The Qwen3-TTS voice server")
+            if ready:
+                voice_line = _c(MINT, f"Qwen3-TTS ({Path(cfg['voice']['qwen_tts']['model']).name})")
+            else:
+                warn("Voice chat will use Kokoro instead.")
+                tts.stop(timeout=5)
+                tts = None
+            if tts:
+                services.append(tts)
+
         bot_line = _c(DIM, "disabled in config.yaml")
         if cfg.get("discord", {}).get("enabled", True):
             bot_line = _c(YELLOW, f"not connected yet - check {log_name()}")
@@ -475,6 +516,7 @@ def main() -> int:
         say(f"    Dashboard   {_c(BOLD, url)}")
         say(f"    Discord     {bot_line}")
         say(f"    Model       {model_name}")
+        say(f"    Voice       {voice_line}")
         say(f"    Log         {_c(DIM, log_name())}")
         say()
         say(_c(DIM, "  Press Ctrl+C to stop. Activity:"))
@@ -487,6 +529,12 @@ def main() -> int:
         # 5. Keep an eye on the services
         while not stopping.is_set():
             for s in services:
+                if s is tts and not s.running and not stopping.is_set():
+                    say()
+                    warn(f"The voice server stopped (exit code {s.proc.returncode}); voice chat switches to Kokoro.")
+                    s.show_tail()
+                    services.remove(s)
+                    break
                 if not s.running and not stopping.is_set():
                     say()
                     fail(f"{s.name} stopped unexpectedly (exit code {s.proc.returncode}).")

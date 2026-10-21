@@ -13,7 +13,7 @@ import backend.discord_bot as bot_mod
 
 
 class FakeVoiceClient:
-    """Plays 'audio' for its real duration; stop() ends it early, like discord's VoiceClient."""
+    """Pulls 20 ms frames from the source in real time until it ends; stop() ends it early, like discord's VoiceClient."""
 
     def __init__(self):
         self.channel = SimpleNamespace(id=4242, name="Lounge", voice_states={}, guild=None)
@@ -29,10 +29,15 @@ class FakeVoiceClient:
 
     def play(self, source, after):
         self._after = after
-        data = source.stream.getvalue() if hasattr(source, "stream") else b""
-        duration = len(data) / (48000 * 2 * 2)
-        loop = asyncio.get_running_loop()
-        self._task = loop.call_later(duration, after, None)
+        self.frames = []
+
+        async def player():
+            while frame := source.read():
+                self.frames.append(frame)
+                await asyncio.sleep(0.02)
+            after(None)
+
+        self._task = asyncio.get_running_loop().create_task(player())
 
     def stop(self):
         self.stopped = True
@@ -58,6 +63,13 @@ def speak(r, user_id, seconds_ago_started, seconds_ago_last=0.0):
 
 def pcm(seconds):
     return (np.zeros(int(24000 * seconds), dtype=np.int16)).tobytes()
+
+
+def speech(seconds):
+    s = bot_mod.SpeechStream()
+    s.feed(pcm(seconds))
+    s.finish()
+    return s
 
 
 async def test_someone_speaking(receiver):
@@ -113,7 +125,7 @@ async def test_stops_talking_when_talked_over(receiver):
 
     task = asyncio.create_task(interrupt())
     t0 = time.monotonic()
-    finished = await receiver._play_pcm(pcm(3.0))
+    finished = await receiver._play(speech(3.0))
     task.cancel()
     assert finished is False
     assert receiver.voice_client.stopped
@@ -121,8 +133,46 @@ async def test_stops_talking_when_talked_over(receiver):
 
 
 async def test_plays_to_the_end_when_nobody_interrupts(receiver):
-    assert await receiver._play_pcm(pcm(0.3)) is True
+    assert await receiver._play(speech(0.3)) is True
     assert not receiver.voice_client.stopped
+
+
+async def test_plays_speech_while_it_is_still_being_generated(receiver):
+    stream = bot_mod.SpeechStream()
+    stream.feed(pcm(0.1))
+
+    async def generate_the_rest():
+        for _ in range(3):
+            await asyncio.sleep(0.1)
+            stream.feed(pcm(0.1))
+        stream.finish()
+
+    task = asyncio.create_task(generate_the_rest())
+    assert await receiver._play(stream) is True  # didn't end when the first piece ran out
+    await task
+    frames = receiver.voice_client.frames
+    assert len(frames) >= 20 and all(len(f) == bot_mod.SpeechStream.FRAME for f in frames)
+
+
+def test_speech_stream_upsamples_without_clicks_between_pieces():
+    tone = (np.sin(2 * np.pi * 440 * np.arange(4800) / 24000) * 10000).astype(np.int16)
+    whole, pieces = bot_mod.SpeechStream(), bot_mod.SpeechStream()
+    whole.feed(tone.tobytes())
+    for part in np.array_split(tone, 7):
+        pieces.feed(part.tobytes())
+    for s in (whole, pieces):
+        s.finish()
+
+    def drain(s):
+        out = b""
+        while frame := s.read():
+            out += frame
+        return np.frombuffer(out, dtype=np.int16)
+
+    a, b = drain(whole), drain(pieces)
+    assert len(a) == len(b) and np.abs(a.astype(int) - b.astype(int)).max() <= 1  # same as one piece
+    left = a[0::2].astype(float)
+    assert np.abs(left).max() > 9000  # 48 kHz version keeps the tone's level
 
 
 async def test_text_reply_waits_while_someone_types(monkeypatch):

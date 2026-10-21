@@ -131,3 +131,16 @@ def test_backchannel_needs_no_answer():
     for text in ["Mm-hmm.", "Uh-huh.", "Mhm", "Hmm, I see."]:
         assert is_acknowledgement(text), text
     assert not is_acknowledgement("Um, what is the weather?")
+
+
+def test_voice_guidance_lists_the_voice_emotions(monkeypatch):
+    import backend.routers.chat as chat
+
+    messages = [{"role": "user", "content": "[a]: hi"}]
+    monkeypatch.setattr(chat, "get_config", lambda: {"voice": {
+        "tts_engine": "qwen3", "qwen_tts": {"emotions": {"happy": {}, "teasing": {}}}}})
+    guidance = reply_guidance(messages, voice=True, has_context=False)
+    assert "[neutral] [happy] [teasing]" in guidance
+    assert "[happy]" not in reply_guidance(messages, voice=False, has_context=False)
+    monkeypatch.setattr(chat, "get_config", lambda: {"voice": {"tts_engine": "kokoro"}})
+    assert "[happy]" not in reply_guidance(messages, voice=True, has_context=False)

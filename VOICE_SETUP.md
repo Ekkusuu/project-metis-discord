@@ -29,8 +29,11 @@ Voice conversations are kept separately from text conversations and are saved to
 ```
 audio (48 kHz stereo) ─► pause detected ─► Parakeet STT ─► name correction (voice_corrections.yaml)
    ─► judgment ─► /chat/stream (1 tool max, no query expansion) ─► sentence splitter
-   ─► Kokoro TTS per sentence ─► 24→48 kHz in memory ─► Discord
+   ─► emotion tag ([teasing] …) ─► Qwen3-TTS streamed per sentence (or Kokoro) ─► 24→48 kHz in memory ─► Discord
 ```
+
+The voice is Qwen3-TTS with a fine-tuned custom voice and emotions when `tts_engine: "qwen3"`
+(setup: [tts_server/README.md](tts_server/README.md)), otherwise Kokoro.
 
 Each turn prints a timing breakdown (STT, judgment, tools, first token, TTS, time to first audio)
 in the backend console.
@@ -39,6 +42,7 @@ in the backend console.
 
 | Key | Meaning |
 |---|---|
+| `tts_engine` | `qwen3` (custom voice + emotions, `qwen_tts` settings) or `kokoro` |
 | `tts_voice` | Kokoro voice, e.g. `af_heart`, `af_sarah`, `am_adam`, `am_michael` |
 | `tts_lang_code` | `a` American English, `b` British English |
 | `tts_speed` | Speaking rate (1.0 = normal) |

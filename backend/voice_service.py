@@ -1,5 +1,6 @@
 """
-Speech-to-text (NVIDIA Parakeet via NeMo) and text-to-speech (Kokoro).
+Speech-to-text (NVIDIA Parakeet via NeMo) and text-to-speech: Qwen3-TTS (tts_server/, streamed, with
+emotions) or Kokoro, which is also the fallback whenever the Qwen3-TTS server isn't running.
 """
 from __future__ import annotations
 
@@ -10,7 +11,7 @@ import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, AsyncIterator, Dict, List, Optional
 
 import numpy as np
 import yaml
@@ -20,7 +21,7 @@ from backend.config import PROJECT_ROOT, get_config, resolve_path
 # NeMo and Kokoro are imported when voice is first used (>join), not at startup: importing them
 # costs ~5.6 s and ~270 MB of RAM, which is wasted whenever nobody uses voice chat.
 
-TTS_SAMPLE_RATE = 24000  # Kokoro output
+TTS_SAMPLE_RATE = 24000  # Kokoro and Qwen3-TTS output
 STT_SAMPLE_RATE = 16000  # Parakeet input
 
 
@@ -36,7 +37,10 @@ class VoiceService:
     def __init__(self) -> None:
         self.config = get_config().get("voice", {})
         self.stt_model: Optional[Any] = None
-        self.tts_pipeline: Optional[Any] = None
+        self.tts_pipeline: Optional[Any] = None  # Kokoro
+        self.qwen_url: Optional[str] = None  # Qwen3-TTS server, when it's the voice
+        self.emotions: List[str] = []  # voices the Qwen3-TTS server has besides neutral
+        self._http: Optional[Any] = None
         self._initialized = False
         # One worker each: GPU models don't like concurrent calls, and a long TTS
         # job shouldn't delay transcription of the next speaker (or vice versa).
@@ -92,6 +96,25 @@ class VoiceService:
             self.stt_model = None
 
     def _init_tts(self) -> None:
+        if str(self.config.get("tts_engine", "kokoro")).lower() == "qwen3":
+            port = int(self.config.get("qwen_tts", {}).get("port", 8732))
+            url = f"http://127.0.0.1:{port}"
+            try:
+                import json
+                import urllib.request
+
+                with urllib.request.urlopen(f"{url}/health", timeout=3) as response:
+                    health = json.loads(response.read())
+                self.qwen_url, self.emotions = url, list(health.get("emotions") or [])
+                print(f"✓ TTS: Qwen3-TTS server on port {port} (emotions: {', '.join(self.emotions) or 'none'})")
+                return
+            except Exception as e:
+                print(f"⚠️ Qwen3-TTS server not reachable on port {port} ({e}); using Kokoro")
+        self._init_kokoro()
+
+    def _init_kokoro(self) -> None:
+        if self.tts_pipeline:
+            return
         try:
             from kokoro import KPipeline
         except ImportError:
@@ -232,9 +255,54 @@ class VoiceService:
     # ------------------------------------------------------------------
     # Text to speech
     # ------------------------------------------------------------------
-    async def synthesize_speech(self, text: str) -> Optional[bytes]:
+    async def synthesize_speech(self, text: str, emotion: Optional[str] = None) -> Optional[bytes]:
         """Text -> 16-bit mono PCM at 24 kHz, or None on failure."""
-        if not self.tts_pipeline or not text.strip():
+        chunks = [chunk async for chunk in self.stream_speech(text, emotion)]
+        return b"".join(chunks) or None
+
+    async def stream_speech(self, text: str, emotion: Optional[str] = None) -> AsyncIterator[bytes]:
+        """
+        Text -> 16-bit mono PCM at 24 kHz, in pieces as it's generated (Qwen3-TTS: the first ~0.3 s of
+        audio after ~150 ms; Kokoro: all at once). Closing the iterator early stops generation.
+        """
+        if not text.strip():
+            return
+        if self.qwen_url:
+            got_audio = False
+            try:
+                async for chunk in self._stream_qwen(text, emotion):
+                    got_audio = True
+                    yield chunk
+                return
+            except Exception as e:
+                if got_audio:
+                    print(f"TTS error (Qwen3-TTS, mid-sentence): {e}")
+                    return
+                print(f"⚠️ Qwen3-TTS failed ({e!r}); switching to Kokoro")
+                self.qwen_url = None
+                await asyncio.get_running_loop().run_in_executor(self._tts_executor, self._init_kokoro)
+        pcm = await self._kokoro(text)
+        if pcm:
+            yield pcm
+
+    async def _stream_qwen(self, text: str, emotion: Optional[str]) -> AsyncIterator[bytes]:
+        import aiohttp
+
+        if self._http is None or self._http.closed:
+            self._http = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None, sock_read=30))
+        body = {"text": text, "emotion": emotion if emotion in self.emotions else "neutral"}
+        async with self._http.post(f"{self.qwen_url}/speak", json=body) as response:
+            response.raise_for_status()
+            carry = b""
+            async for chunk in response.content.iter_any():
+                chunk = carry + chunk
+                cut = len(chunk) - len(chunk) % 2  # never split a 16-bit sample
+                carry = chunk[cut:]
+                if cut:
+                    yield chunk[:cut]
+
+    async def _kokoro(self, text: str) -> Optional[bytes]:
+        if not self.tts_pipeline:
             return None
         voice = self.config.get("tts_voice", "af_heart")
         speed = float(self.config.get("tts_speed", 1.0))

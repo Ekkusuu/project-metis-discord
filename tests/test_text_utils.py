@@ -304,3 +304,17 @@ def test_split_message_code_block_fences_stay_balanced():
     # Every chunk after the first reopens the fence with the same language tag.
     assert chunks[0].startswith("```python\n")
     assert all(chunk.startswith("```python\n") for chunk in chunks[1:])
+
+
+def test_take_emotion_reads_and_removes_voice_tags():
+    from backend.text_utils import take_emotion
+
+    known = ["happy", "teasing", "sad"]
+    assert take_emotion("[teasing] Heehee, late again?", known) == ("teasing", "Heehee, late again?")
+    assert take_emotion("[ Happy ]Yay!", known) == ("happy", "Yay!")
+    assert take_emotion("(sad) Oh no.", known) == ("sad", "Oh no.")
+    assert take_emotion("[neutral] Okay.", known) == ("neutral", "Okay.")
+    assert take_emotion("No tag here.", known) == (None, "No tag here.")
+    # Unknown bracketed words are dropped (never spoken); ordinary parentheses are kept.
+    assert take_emotion("[giggles] Fine.", known) == (None, "Fine.")
+    assert take_emotion("It was (honestly) fine.", known) == (None, "It was (honestly) fine.")

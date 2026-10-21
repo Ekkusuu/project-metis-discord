@@ -5,7 +5,7 @@ No heavy imports here so it stays cheap to import and easy to test.
 from __future__ import annotations
 
 import re
-from typing import List
+from typing import List, Optional
 
 # ---------------------------------------------------------------------------
 # Reasoning ("<think>") handling
@@ -185,6 +185,28 @@ def pop_sentences(buffer: str) -> tuple[List[str], str]:
         buffer = buffer[end + 1:].lstrip()
         if sentence:
             sentences.append(sentence)
+
+
+# Voice tags: in voice chat the model starts a sentence with how she sounds, e.g. "[teasing] Heehee, late
+# again?" (backend/routers/chat.py tells it which ones exist). Short bracketed words are never spoken.
+_TAG = re.compile(r"\[\s*([A-Za-z][A-Za-z ]{0,20}?)\s*\]|\(\s*([A-Za-z]{3,15})\s*\)")
+
+
+def take_emotion(text: str, known: List[str]) -> tuple[Optional[str], str]:
+    """(the last known emotion tagged in `text`, or None; `text` without its tags)."""
+    emotion: Optional[str] = None
+
+    def drop(match: re.Match) -> str:
+        nonlocal emotion
+        word = (match.group(1) or match.group(2)).strip().lower()
+        if word in known or word == "neutral":
+            emotion = word
+        elif match.group(2):
+            return match.group(0)  # "(seriously)" is part of what she says, not a voice tag
+        return " "
+
+    text = _TAG.sub(drop, text)
+    return emotion, re.sub(r"\s{2,}", " ", text).strip()
 
 
 _MARKDOWN_NOISE = re.compile(r"(\*\*|__|\*|`+|^#+\s*|^>\s*|^\s*[-•]\s+)", re.MULTILINE)

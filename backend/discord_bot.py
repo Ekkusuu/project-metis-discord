@@ -16,7 +16,7 @@ dashboard sees exactly the same traffic.
 from __future__ import annotations
 
 import asyncio
-import io
+import contextlib
 import json
 import logging
 import os
@@ -45,6 +45,7 @@ from backend.text_utils import (
     split_message,
     strip_name_prefix,
     strip_thinking,
+    take_emotion,
 )
 from backend.turn_taking import (
     ADDRESSEE_CHOICES, ADDRESSEE_PROMPT, ASK, RESPOND, WAIT_OPEN, Settings, Turn, decide, transcript_for_model,
@@ -607,6 +608,64 @@ class VoiceAudioSink(voice_recv.AudioSink):
         pass
 
 
+class SpeechStream(discord.AudioSource):
+    """
+    Plays speech while it is still being generated: 24 kHz mono PCM goes in (feed) as the voice model
+    produces it, Discord pulls 20 ms frames of 48 kHz stereo out (read). If the audio runs short
+    before the sentence is finished it plays silence rather than ending.
+    """
+
+    FRAME = 3840  # 20 ms of 48 kHz 16-bit stereo
+    _TAPS = None  # low-pass filter for 24 -> 48 kHz, shared
+
+    def __init__(self) -> None:
+        from scipy.signal import firwin, lfilter_zi
+
+        if SpeechStream._TAPS is None:
+            SpeechStream._TAPS = firwin(48, 0.5) * 2
+        self._zi = lfilter_zi(self._TAPS, 1.0) * 0.0
+        self._buffer = bytearray()
+        self._lock = threading.Lock()
+        self.finished = False  # no more audio is coming
+        self.seconds = 0.0  # audio fed so far
+        self.last_fed = time.monotonic()
+
+    def feed(self, pcm24k_mono: bytes) -> None:
+        from scipy.signal import lfilter
+
+        samples = np.frombuffer(pcm24k_mono, dtype=np.int16).astype(np.float32)
+        if not len(samples):
+            return
+        stuffed = np.zeros(len(samples) * 2, dtype=np.float32)
+        stuffed[::2] = samples  # upsample by 2: zeros between samples, then low-pass (state kept across pieces)
+        upsampled, self._zi = lfilter(self._TAPS, 1.0, stuffed, zi=self._zi)
+        stereo = np.repeat(np.clip(upsampled, -32768, 32767).astype(np.int16), 2).tobytes()
+        with self._lock:
+            self._buffer += stereo
+        self.seconds += len(samples) / TTS_SAMPLE_RATE
+        self.last_fed = time.monotonic()
+
+    def finish(self) -> None:
+        if not self.finished:
+            self.feed(b"\0\0" * 24)  # flush the filter's delay so the last syllable isn't cut
+            self.finished = True
+
+    def read(self) -> bytes:
+        with self._lock:
+            if len(self._buffer) >= self.FRAME:
+                frame = bytes(self._buffer[:self.FRAME])
+                del self._buffer[:self.FRAME]
+                return frame
+            if self.finished:
+                rest = bytes(self._buffer)
+                self._buffer.clear()
+                return rest + b"\0" * (self.FRAME - len(rest)) if rest else b""
+        return b"\0" * self.FRAME  # generation is behind playback: a moment of silence
+
+    def is_opus(self) -> bool:
+        return False
+
+
 @dataclass
 class _Utterance:
     user: Any
@@ -831,7 +890,10 @@ class VoiceReceiver:
         goodbye = random.choice(lines)
         pcm = await (await get_voice_service()).synthesize_speech(goodbye)
         if pcm and await self.wait_for_floor(seq):
-            await self._play_pcm(pcm)
+            speech = SpeechStream()
+            speech.feed(pcm)
+            speech.finish()
+            await self._play(speech)
             async with self.conversation.lock:
                 self.conversation.add_assistant(goodbye, to=user.id)
         guild = self.voice_client.guild
@@ -854,8 +916,8 @@ class VoiceReceiver:
         (never started: people kept talking / conversation moved on) or "interrupted".
         """
         service = await get_voice_service()
-        sentences: asyncio.Queue[Optional[str]] = asyncio.Queue()
-        audio: asyncio.Queue[Optional[Tuple[str, bytes]]] = asyncio.Queue()
+        sentences: asyncio.Queue[Optional[Tuple[str, Optional[str]]]] = asyncio.Queue()
+        audio: asyncio.Queue[Optional[Tuple[str, SpeechStream]]] = asyncio.Queue()
         stats: Dict[str, Any] = {}
         state = {"outcome": "done", "spoken": []}
 
@@ -863,29 +925,42 @@ class VoiceReceiver:
             return state["outcome"] != "done"
 
         async def synthesize() -> None:
-            while (sentence := await sentences.get()) is not None:
+            # Sentence by sentence, each streamed: playback starts with the first piece of audio, and the
+            # next sentence is generated while this one plays (generation is ~3x faster than speech).
+            while (item := await sentences.get()) is not None:
                 if stopped():
                     continue
+                sentence, emotion = item
+                speech = SpeechStream()
                 t = time.perf_counter()
-                pcm = await service.synthesize_speech(sentence)
+                try:
+                    async with contextlib.aclosing(service.stream_speech(sentence, emotion)) as pieces:
+                        async for pcm in pieces:
+                            if stopped():
+                                break  # leaving the loop stops the voice model mid-sentence
+                            if not speech.seconds:
+                                timings.setdefault("tts_first", time.perf_counter() - t)
+                                await audio.put((sentence, speech))
+                            speech.feed(pcm)
+                finally:
+                    speech.finish()
                 timings["tts"] = timings.get("tts", 0.0) + time.perf_counter() - t
-                if pcm:
-                    await audio.put((sentence, pcm))
+                print(f"🎙️ [{emotion or 'neutral'}] {speech.seconds:.1f}s: {sentence}")
             await audio.put(None)
 
         async def play() -> None:
             first = True
             while (item := await audio.get()) is not None:
+                sentence, speech = item
                 if stopped():
                     continue
-                sentence, pcm = item
                 if first:
                     if not await self.wait_for_floor(seq):
                         state["outcome"] = "yielded"
                         continue
                     timings["first_audio"] = time.perf_counter() - t0
                     first = False
-                if not await self._play_pcm(pcm):
+                if not await self._play(speech):
                     state["outcome"] = "interrupted"
                     continue
                 state["spoken"].append(sentence)
@@ -895,6 +970,16 @@ class VoiceReceiver:
         think = ThinkFilter()
         pending = ""
         reply = ""
+        emotion: Optional[str] = None  # "[teasing]" before a sentence sets the voice for the rest of the reply
+
+        async def say(sentence: str) -> None:
+            nonlocal emotion
+            tagged, sentence = take_emotion(strip_name_prefix(sentence), service.emotions)
+            emotion = tagged or emotion
+            spoken = clean_for_speech(sentence)
+            if len(spoken) > 1:
+                await sentences.put((spoken, emotion))
+
         try:
             async for delta in stream_reply(chat_payload(conversation, True, self.present_members()), stats):
                 if stopped():
@@ -903,13 +988,10 @@ class VoiceReceiver:
                 pending += think.feed(delta)
                 done, pending = pop_sentences(pending)
                 for sentence in done:
-                    spoken = clean_for_speech(strip_name_prefix(sentence))
-                    if len(spoken) > 1:
-                        await sentences.put(spoken)
+                    await say(sentence)
             pending += think.flush()
-            tail = clean_for_speech(strip_name_prefix(pending))
-            if tail:
-                await sentences.put(tail)
+            if pending.strip():
+                await say(pending)
         except Exception as e:
             print(f"Voice reply error: {e}")
         finally:
@@ -920,19 +1002,13 @@ class VoiceReceiver:
         stats["raw_reply"] = reply
         return " ".join(state["spoken"]), stats, state["outcome"]
 
-    async def _play_pcm(self, pcm24k_mono: bytes) -> bool:
+    async def _play(self, source: SpeechStream) -> bool:
         """
-        Play Kokoro output directly (no temp files or FFmpeg process per sentence).
+        Play speech, also while it's still being generated (no temp files or FFmpeg process).
         Returns False if a person talked over Metis and she stopped (barge-in).
         """
         if not self._active or not self.voice_client.is_connected():
             return False
-        from scipy.signal import resample_poly
-
-        samples = np.frombuffer(pcm24k_mono, dtype=np.int16).astype(np.float32)
-        upsampled = resample_poly(samples, 48000 // TTS_SAMPLE_RATE, 1)
-        stereo = np.repeat(np.clip(upsampled, -32768, 32767).astype(np.int16), 2)
-        source = discord.PCMAudio(io.BytesIO(stereo.tobytes()))
 
         loop = asyncio.get_running_loop()
         done = asyncio.Event()
@@ -949,8 +1025,8 @@ class VoiceReceiver:
         interrupted = False
         try:
             self.voice_client.play(source, after=after)
-            deadline = time.monotonic() + len(pcm24k_mono) / (TTS_SAMPLE_RATE * 2) + 5
-            while not done.is_set() and time.monotonic() < deadline:
+            # Safety net: stop if the voice model stalls (no audio for 10 s) before finishing the sentence.
+            while not done.is_set() and (source.finished or time.monotonic() - source.last_fed < 10):
                 if self.barge_in and self.someone_speaking(for_at_least=self.barge_in_seconds):
                     interrupted = True  # someone is talking over her: stop, like a person would
                     self.voice_client.stop()
@@ -985,6 +1061,7 @@ class VoiceReceiver:
             ("RAG retrieval", rag.get("retrieval")),
             ("LLM first token", stats.get("ttft")),
             ("LLM generation", stats.get("llm_generation_time")),
+            ("TTS first audio", timings.get("tts_first")),
             ("TTS (sum)", timings.get("tts")),
         ]
         print("\n⏱️  Voice pipeline")
