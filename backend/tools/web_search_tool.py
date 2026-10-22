@@ -165,11 +165,17 @@ class WebSearchTool(BaseTool):
             from backend.research import format_brief, research
 
             question = re.sub(r"^\[[^\]]+\]:?\s*", "", kwargs.get("message", "")).strip() or query
-            found = await research(
-                question, query, kwargs.get("conversation_context", ""),
-                max_steps=int(cfg.get("research_steps_voice", 5) if voice_mode else cfg.get("research_steps", 8)),
-                time_budget=float(cfg.get("research_seconds_voice", 20) if voice_mode else cfg.get("research_seconds", 60)),
-                first_kind="news" if search_type == "news" else "text", notify=kwargs.get("notify"))
+            budget = float(cfg.get("research_seconds_voice", 20) if voice_mode else cfg.get("research_seconds", 60))
+            try:
+                # Each step has its own limit too; this is the backstop so a reply can never wait forever.
+                found = await asyncio.wait_for(research(
+                    question, query, kwargs.get("conversation_context", ""),
+                    max_steps=int(cfg.get("research_steps_voice", 5) if voice_mode else cfg.get("research_steps", 8)),
+                    time_budget=budget, first_kind="news" if search_type == "news" else "text",
+                    notify=kwargs.get("notify")), timeout=budget + 20)
+            except asyncio.TimeoutError:
+                print(f"🔬 research gave up after {budget + 20:.0f}s")
+                found = {"answer": "", "found": False, "sources": [], "searches": [query], "steps": 0}
             return {"success": True, "result": format_brief(found, question),
                     "metadata": {"query": query, "searches": found["searches"], "found": found["found"],
                                  "search_type": "research"}}

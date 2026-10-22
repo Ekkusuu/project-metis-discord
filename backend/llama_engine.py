@@ -82,12 +82,14 @@ def json_completion(
     schema: Dict[str, Any],
     temperature: float = 0.2,
     max_tokens: int = 512,
+    timeout: float = 180,
 ) -> Any:
     """
     Completion whose output is grammar-constrained to `schema` by the LLM service,
     parsed into Python objects. Small local models can't produce malformed JSON this way.
     """
-    text = chat_completion(messages, temperature=temperature, top_p=0.9, max_tokens=max_tokens, json_schema=schema)
+    text = chat_completion(messages, temperature=temperature, top_p=0.9, max_tokens=max_tokens, json_schema=schema,
+                           timeout=timeout)
     try:
         return json.loads(text)
     except json.JSONDecodeError as e:

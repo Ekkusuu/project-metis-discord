@@ -115,6 +115,24 @@ def _conversation_text(messages: List[Dict[str, str]], count: int) -> str:
 # Tools that take a second or two: the voice bot says something like "hmm, let me think" while they run.
 SLOW_TOOLS = ("remember", "web_search")
 
+# What web lookups found in the last few minutes. A follow-up ("give me an actual answer") doesn't search
+# again, and the answer was only in the reply that missed it, so the model made up a different one.
+_recent_lookups: List[Tuple[float, str, str]] = []  # (time, question, answer)
+_LOOKUP_MEMORY_SECONDS = 600
+
+
+def remember_lookup(question: str, answer: str) -> None:
+    _recent_lookups.append((time.time(), question, answer))
+    del _recent_lookups[:-3]
+
+
+def recent_lookups_text() -> str:
+    fresh = [(q, a) for t, q, a in _recent_lookups if time.time() - t < _LOOKUP_MEMORY_SECONDS]
+    if not fresh:
+        return ""
+    return "What you looked up on the web in the last few minutes:\n" + "\n".join(
+        f"- {q[:150]} -> {a}" for q, a in fresh)
+
 
 async def _run_tools(messages: List[Dict[str, str]], req: ChatRequest, timings: Dict[str, float],
                      notify: Optional[Callable[[str], None]] = None) -> str:
@@ -255,7 +273,8 @@ def voice_emotions() -> List[str]:
     return [str(e).lower() for e in (voice.get("qwen_tts", {}).get("emotions") or {})]
 
 
-def reply_guidance(messages: List[Dict[str, str]], voice: bool, has_context: bool, searched_web: bool = False) -> str:
+def reply_guidance(messages: List[Dict[str, str]], voice: bool, has_context: bool, searched_web: bool = False,
+                   found_answer: str = "") -> str:
     """
     A short reminder placed right before the latest message. Small models follow the most recent
     instructions far more than a long persona prompt at the top, so without this the personality
@@ -293,6 +312,11 @@ def reply_guidance(messages: List[Dict[str, str]], voice: bool, has_context: boo
         last = next((m["content"] for m in reversed(messages[:-1]) if m["role"] == "assistant"), "")
         rules.append("Say something new" + (f": your last reply was \"{last[:160]}\", don't reuse its words or "
                                             "jokes." if last else "."))
+    if found_answer:
+        # The 4B model with the mean persona answered a successful lookup with "look it up yourself!" and a turn
+        # later made up a different answer. The answer as the very last instruction is followed.
+        rules.append(f'Your first sentence gives them what you found, in your own words: "{found_answer}". '
+                     "Only then add your own reaction.")
     return "How to reply:\n- " + "\n- ".join(rules)
 
 
@@ -309,6 +333,9 @@ def build_prompt(messages: List[Dict[str, str]], context_text: str, people_text:
     sections = [f"Current date and time: {now}"]
     if people_text:
         sections.append(people_text)
+    lookups = recent_lookups_text()
+    if lookups:
+        sections.append(lookups)
     if context_text:
         sections.append(
             "Information retrieved for the next reply (from notes, memories, or the web). "
@@ -332,8 +359,12 @@ async def _prepare(req: ChatRequest, notify: Optional[Callable[[str], None]] = N
                    ) -> Tuple[List[Dict[str, str]], Dict[str, Any]]:
     messages = _base_messages(req)
     context_text, tool_timings, rag_timings = await gather_context(messages, req, notify)
-    guidance = reply_guidance(messages, req.voice_mode, bool(context_text), "[web_search]" in context_text)
+    found = re.search(r"What you found: (.+)", context_text)
+    guidance = reply_guidance(messages, req.voice_mode, bool(context_text), "[web_search]" in context_text,
+                              found.group(1).strip() if found else "")
     final = trim_messages_to_context(build_prompt(messages, context_text, people_context(req), guidance))
+    if found:  # for the next few turns (it's in this prompt already)
+        remember_lookup(re.sub(r"^\[[^\]]+\]:?\s*", "", messages[-1]["content"]), found.group(1).strip())
     stamp = datetime.datetime.now().isoformat()
     state.context = [{**m, "timestamp": stamp} for m in final]
     return final, {"tool_timings": tool_timings, "rag_timings": rag_timings}
@@ -396,13 +427,22 @@ async def chat_stream(req: ChatRequest, request: Request):
     async def generate():
         events: asyncio.Queue[str] = asyncio.Queue()
         preparing = asyncio.create_task(_prepare(req, events.put_nowait))
+        # Once a slow tool has started, something is said at least every `heartbeat` seconds: after the first
+        # "let me look that up" she went silent for 10+ seconds while reading pages.
+        heartbeat = float(get_config().get("voice", {}).get("thinking_heartbeat", 4.0))
+        last_said: Optional[float] = None
         while not preparing.done():
             waiter = asyncio.create_task(events.get())
-            await asyncio.wait({preparing, waiter}, return_when=asyncio.FIRST_COMPLETED)
+            await asyncio.wait({preparing, waiter}, return_when=asyncio.FIRST_COMPLETED,
+                               timeout=heartbeat if last_said is not None else None)
             if waiter.done():
+                last_said = time.perf_counter()
                 yield json.dumps({"thinking": waiter.result()}) + "\n"
-            else:
-                waiter.cancel()
+                continue
+            waiter.cancel()
+            if not preparing.done() and last_said is not None and time.perf_counter() - last_said >= heartbeat:
+                last_said = time.perf_counter()
+                yield json.dumps({"thinking": "still_thinking"}) + "\n"
         while not events.empty():
             yield json.dumps({"thinking": events.get_nowait()}) + "\n"
         try:

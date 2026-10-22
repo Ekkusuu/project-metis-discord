@@ -189,7 +189,10 @@ _FRESH_INFO = re.compile(
 )
 # Someone explicitly asking Metis to look something up.
 _SEARCH_REQUEST = re.compile(
-    r"\b(search|google|look (it |that |this )?up|look for|check online|find out|browse)\b", re.IGNORECASE
+    r"\b(search|google|look (it |that |this )?up|look for|check online|find out|browse)\b"
+    # Naming a website: "check on the site rotten tomatoes how good ...", "what does reddit say about ..."
+    r"|\b(check|look) (on|at|in) (the )?(site|website|web|internet|page)\b|\bon the (site|website)\b"
+    r"|\bwhat (does|do) (?!(it|that|this|he|she|they|you|i)\b)[\w .'-]{2,30} say\b", re.IGNORECASE
 )
 # Asking Metis to think back gets `remember` even if the small model says "none" (it did for
 # "what did I tell you about my exam last week?").

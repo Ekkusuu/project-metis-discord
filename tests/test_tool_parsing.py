@@ -147,3 +147,49 @@ async def test_stream_announces_slow_tools_before_the_reply(monkeypatch):
     assert lines[0] == {"thinking": "remember"}
     assert lines[1] == {"delta": "Mochi!"}
     assert lines[-1]["done"]
+
+
+async def test_stream_keeps_showing_signs_of_life(monkeypatch):
+    import asyncio as _asyncio
+    import json as _json
+
+    import backend.routers.chat as chat
+
+    async def slow_prepare(req, notify=None):
+        notify("web_search")
+        await _asyncio.sleep(0.35)  # a long lookup with nothing else said
+        return [{"role": "user", "content": "hi"}], {}
+
+    async def fake_stream(final, stats=None, **kw):
+        yield "Found it."
+
+    real_config = chat.get_config()
+    monkeypatch.setattr(chat, "get_config", lambda: {**real_config, "voice": {"thinking_heartbeat": 0.1}})
+    monkeypatch.setattr(chat, "_prepare", slow_prepare)
+    monkeypatch.setattr(chat, "astream_chat", fake_stream)
+    req = chat.ChatRequest(messages=[{"role": "user", "content": "[a]: who won?"}], voice_mode=True)
+    response = await chat.chat_stream(req, None)
+    lines = [_json.loads(chunk) async for chunk in response.body_iterator]
+    thinking = [line["thinking"] for line in lines if "thinking" in line]
+    assert thinking[0] == "web_search" and 2 <= thinking.count("still_thinking") <= 4
+    assert {"delta": "Found it."} in lines
+
+
+def test_found_answer_is_the_last_instruction():
+    from backend.routers.chat import reply_guidance
+
+    messages = [{"role": "user", "content": "[a]: who won the race?"}]
+    guidance = reply_guidance(messages, voice=True, has_context=True, searched_web=True,
+                              found_answer="Verstappen won the Singapore GP (f1.com)")
+    assert guidance.rstrip().splitlines()[-1].startswith("- Your first sentence gives them what you found")
+    assert "Verstappen" in guidance.splitlines()[-1]
+
+
+def test_recent_lookups_are_remembered_for_a_while(monkeypatch):
+    import backend.routers.chat as chat
+
+    monkeypatch.setattr(chat, "_recent_lookups", [])
+    chat.remember_lookup("best jungler?", "Master Yi (u.gg)")
+    assert "best jungler? -> Master Yi (u.gg)" in chat.recent_lookups_text()
+    monkeypatch.setattr(chat, "_LOOKUP_MEMORY_SECONDS", -1)
+    assert chat.recent_lookups_text() == ""

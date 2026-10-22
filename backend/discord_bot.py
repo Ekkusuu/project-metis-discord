@@ -894,7 +894,12 @@ class VoiceReceiver:
                        "Hold on, let me find out."],
         # The first search didn't answer it and another one is running.
         "web_search_more": ["Hmm, not there. Let me check somewhere else.", "Wait, let me dig a bit more.",
-                            "Still looking, hold on."],
+                            "Let me try another search."],
+        # Opening pages to read them.
+        "web_read": ["Okay, reading this.", "Found something, reading it.", "Let me read that.",
+                     "Ooh, this looks right. Reading."],
+        # Nothing else was said for a few seconds while a tool runs (chat.py's heartbeat).
+        "still_thinking": ["Hmm...", "Still on it.", "Almost there.", "Hold on...", "Mmm, one sec."],
     }
 
     def _thinking_line(self, tool: str) -> str:
@@ -1007,6 +1012,8 @@ class VoiceReceiver:
 
         async def think_aloud(tool: str) -> None:
             # Remembering or searching takes a second or two: say so instead of going quiet, like a person would.
+            if not sentences.empty():
+                return  # the last filler hasn't even been voiced yet; don't pile them up
             line = self._thinking_line(tool)
             if line:
                 print(f"🤔 {tool}: saying {line!r} while it runs")

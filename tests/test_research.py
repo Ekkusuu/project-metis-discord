@@ -62,7 +62,7 @@ def test_search_open_answer(monkeypatch):
     assert "[3] Page on pcmag.com" in prompts[0][0]  # the model sees numbered results
     assert "text of https://rtings.com/page" in prompts[1][0]  # and what it read
     assert found["found"] and found["sources"] == ["notebookcheck.net", "rtings.com"]
-    assert notes == []
+    assert notes == ["web_read"]  # the voice bot says "reading a couple of pages"
 
 
 def test_searches_again_and_says_so(monkeypatch):
@@ -71,7 +71,7 @@ def test_searches_again_and_says_so(monkeypatch):
         _step("answer", "x")], [_fake_results("a.com"), _fake_results("b.com"), _fake_results("c.com")])
     assert [k for k, _ in searches] == ["text", "text", "news"]
     assert opened == ["https://c.com/page"]  # result numbers continue across searches
-    assert notes == ["web_search_more", "web_search_more"]  # "still looking" in voice
+    assert notes == ["web_search_more", "web_search_more", "web_read"]  # "still looking" in voice
 
 
 def test_last_step_must_answer(monkeypatch):
@@ -124,19 +124,22 @@ def test_correction_after_a_search():
     assert not _CORRECTION.search("no way, that's crazy")
 
 
-def test_site_search_falls_back_to_whole_web(monkeypatch):
+def test_search_races_engines_and_retries_a_misheard_site(monkeypatch):
     from backend.tools import web_search_tool
 
     tried = []
 
     def fake_sync(self, query, count, kind, backend="auto"):
         tried.append((query, backend))
-        return [] if "site:" in query else _fake_results("a.com")
+        if "site:" in query or backend == "yahoo":
+            return []
+        return [{"title": "ad", "url": "https://www.bing.com/aclick?x", "content": ""}] + _fake_results("u.gg")
 
     monkeypatch.setattr(web_search_tool.WebSearchTool, "_search_sync", fake_sync)
-    got = asyncio.run(research_mod._search("dune reviews site:rottentomatoes.com"))
-    assert got and tried[-1] == ("dune reviews", "auto")
-    assert tried[0] == ("dune reviews site:rottentomatoes.com", "bing")
+    got = asyncio.run(research_mod._search("best jungle champion site:u.g"))
+    assert [r["url"] for r in got] == ["https://u.gg/page"]  # the ad is dropped
+    assert ("best jungle champion u.g", "yandex") in tried  # the site name becomes a keyword
+    assert {b for q, b in tried if "site:" in q} == {"yandex", "yahoo", "auto"}
 
 
 def test_read_page_renders_javascript_pages(monkeypatch):
@@ -169,3 +172,32 @@ def test_site_kept_only_when_named(query, message, kept):
     from backend.tool_manager import keep_named_site
 
     assert (keep_named_site(query, message) == query) is kept
+
+
+def test_clip_shortens_old_steps_and_always_finishes():
+    from backend.research import _clip
+
+    parts = ["a" * 3000, "b" * 3000, "c" * 3000, "last " * 400]
+    clipped = _clip(parts, 7000)  # used to loop forever once the steps passed the budget
+    assert clipped.startswith("a" * 400 + " …(shortened)")
+    assert clipped.endswith("last " * 399 + "last ")  # the newest step is kept whole
+    assert _clip(["x" * 5000, "y"], 100).count("…(shortened)") == 1
+
+
+def test_site_search_runs_with_the_plain_name_at_once(monkeypatch):
+    tried = []
+
+    async def fake_once(query, kind, count):
+        tried.append(query)
+        return [] if "site:" in query else _fake_results("u.gg")
+
+    monkeypatch.setattr(research_mod, "_search_once", fake_once)
+    assert asyncio.run(research_mod._search("best jungle champion site:u.g"))[0]["url"] == "https://u.gg/page"
+    assert sorted(tried) == ["best jungle champion site:u.g", "best jungle champion u.g"]
+
+
+def test_video_pages_are_not_opened(monkeypatch):
+    _, _, opened, _, prompts = _run(monkeypatch, [_step("open", "1,2"), _step("answer", "x")],
+                                    [_fake_results("youtube.com", "a.com")])
+    assert opened == ["https://a.com/page"]
+    assert "(video/social, can't be read)" in prompts[0][0]
