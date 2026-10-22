@@ -72,7 +72,9 @@ function RagPanel({ retrieval }: { retrieval: RagRetrieval | null }) {
       'Delete all embeddings? This will require a full reindex.',
     );
 
-  const queries = retrieval?.queries ?? [];
+  // The quick memory lookup searches with the message itself; listing it again as a "query" looked like a bug.
+  const asked = (retrieval?.original_query ?? '').replace(/^\[[^\]]+\]:?\s*/, '').trim();
+  const queries = (retrieval?.queries ?? []).filter((q) => q.trim() !== asked);
 
   return (
     <div className="panel">
@@ -140,7 +142,7 @@ function RagPanel({ retrieval }: { retrieval: RagRetrieval | null }) {
           )}
           {queries.length > 0 && (
             <div className="rag-query-box">
-              <div className="rag-query-label">Generated queries</div>
+              <div className="rag-query-label">Memory search terms</div>
               <ol className="rag-query-list">
                 {queries.map((q, i) => (
                   <li key={i}>{q}</li>

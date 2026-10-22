@@ -25,7 +25,7 @@ class WebSearchTool(BaseTool):
     def definition(self) -> ToolDefinition:
         return ToolDefinition(
             name="web_search",
-            description="current events, news, sports results, weather, prices, product releases, or facts that change over time",
+            description="any question about facts: games (best picks, tier lists, builds, stats), products, people, shows, places, news, sports, weather, prices, releases, or anything that changes over time",
             parameters=[
                 ToolParameter(
                     name="query",

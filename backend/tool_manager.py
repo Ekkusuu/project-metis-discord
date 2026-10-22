@@ -148,7 +148,10 @@ def get_tool_registry() -> ToolRegistry:
 #   3/8 when asked for a JSON array of calls.
 _DECIDE_PROMPT = """Decide whether an AI companion needs a tool before replying to the latest Discord message.
 {options}
-- none: greetings, small talk, feelings, jokes, or things you can answer from general knowledge
+- none: greetings, small talk, feelings, opinions about the chat, jokes, or very basic facts that never change
+Your own knowledge is old and often wrong about specifics. Any question that asks for facts about a game, \
+product, person, team, show, place or event (what's best, rankings, stats, builds, prices, dates, who/what/which) \
+needs the web, even if they don't say "search".
 Answer with one option."""
 
 _QUERY_PROMPT = ("Write a short web search query (2-6 keywords) for what the latest message wants to know. If it "
@@ -187,6 +190,12 @@ _FRESH_INFO = re.compile(
     r"what (year|date|day)|exact date|how (much|many))\b",
     re.IGNORECASE,
 )
+# Questions asking for facts a small model gets wrong from memory: what's best, rankings, stats, how good
+# something is. People don't say "search" ("what is the best champion by win rate" got no search).
+_FACT_ASK = re.compile(
+    r"\b(best|top \d+|worst|strongest|weakest|fastest|cheapest|highest|lowest|rank(ed|ing|ings)?|tier( list)?|"
+    r"meta|win ?rate|pick ?rate|stats?|statistics|ratings?|reviews?|builds?|counters?|matchups?|"
+    r"versus|vs|compared? to|comparison|how good is|worth (it|buying)|best way to)\b", re.IGNORECASE)
 # Someone explicitly asking Metis to look something up.
 _SEARCH_REQUEST = re.compile(
     r"\b(search|google|look (it |that |this )?up|look for|check online|find out|browse)\b"
@@ -332,7 +341,7 @@ async def decide_tools(
         )
         last_metis = next((m["content"] for m in reversed(recent) if m["role"] == "assistant"), "")
         if choice == "none" and "web_search" in decidable and (
-                _SEARCH_REQUEST.search(text) or (is_question_like(text) and _FRESH_INFO.search(text))
+                _SEARCH_REQUEST.search(text) or (is_question_like(text) and (_FRESH_INFO.search(text) or _FACT_ASK.search(text)))
                 or (_GO_AHEAD.match(text) and (_OFFERED_TO_SEARCH.search(last_metis) or _SEARCH_REQUEST.search(said)
                                                or (is_question_like(said) and _FRESH_INFO.search(said))))):
             choice = "web_search"
@@ -356,7 +365,8 @@ async def decide_tools(
             )
             written = query.strip().strip('"').splitlines()[0].strip() if query.strip() else ""
             metis_said = " ".join(m["content"][:200] for m in recent if m["role"] == "assistant")
-            query = keep_named_site(grounded_query(written, f"{said} {text}", metis_said, text), text)
+            grounded = grounded_query(written, f"{said} {text}", metis_said, text)
+            query = keep_named_site(grounded, text)
             arguments: Dict[str, Any] = {_first_string_param(decidable[choice]): query}
             if choice == "web_search" and _NEWS.search(text):
                 arguments["search_type"] = "news"
@@ -364,7 +374,8 @@ async def decide_tools(
                   + (f" ({arguments['search_type']})" if "search_type" in arguments else "")
                   + f"\n   made from: {last_user_message!r}"
                   + (f"\n   earlier messages used: {said!r}" if said else "")
-                  + (f"\n   model wrote {written!r}, replaced: it used words only Metis said" if written and query != written else "")
+                  + (f"\n   model wrote {written!r}, replaced: it used words only Metis said" if written and grounded != written else "")
+                  + (f"\n   dropped the site: from {grounded!r}, this message doesn't name that site" if query != grounded else "")
                   + ("\n   model wrote nothing, using the message" if not written else ""))
             calls.append(ToolCall(choice, arguments, f"chose {choice}"))
     except Exception as e:

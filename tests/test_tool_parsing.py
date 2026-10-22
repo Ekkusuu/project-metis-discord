@@ -193,3 +193,25 @@ def test_recent_lookups_are_remembered_for_a_while(monkeypatch):
     assert "best jungler? -> Master Yi (u.gg)" in chat.recent_lookups_text()
     monkeypatch.setattr(chat, "_LOOKUP_MEMORY_SECONDS", -1)
     assert chat.recent_lookups_text() == ""
+
+
+@pytest.mark.parametrize("message", [
+    "Could you tell me by win rate what is the best champion",
+    "what's the strongest support right now",
+    "is the new iphone worth it",
+])
+async def test_fact_questions_search_without_being_asked_to(fake_model, message):
+    """People don't say "search": "what is the best champion by win rate" got no search (the model said none)."""
+    from backend.tool_manager import select_tools
+
+    result = await select_tools([], f"[Sava]: {message}", 2)
+    assert "web_search" in [c.tool_name for c in result]
+
+
+@pytest.mark.parametrize("message", ["You're kinda mean. Why are you so mean?", "No, I know about that. I think I'm pretty kind.",
+                                     "Fair enough.", "how are we doing?"])
+async def test_chat_stays_without_a_search(fake_model, message):
+    from backend.tool_manager import select_tools
+
+    result = await select_tools([], f"[Sava]: {message}", 2)
+    assert "web_search" not in [c.tool_name for c in result]
