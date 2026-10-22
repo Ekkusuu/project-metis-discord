@@ -55,7 +55,8 @@ class WebSearchTool(BaseTool):
         self, 
         query: str, 
         num_results: int = 5,
-        search_type: str = "text"
+        search_type: str = "text",
+        backend: str = "auto",
     ) -> List[Dict[str, Any]]:
         """
         Synchronous search function to run in thread pool.
@@ -87,7 +88,7 @@ class WebSearchTool(BaseTool):
                     })
             else:
                 # Regular text search
-                for r in ddgs.text(query, max_results=num_results):
+                for r in ddgs.text(query, max_results=num_results, backend=backend):
                     results.append({
                         "title": r.get("title", "No title"),
                         "url": r.get("href", ""),
@@ -159,6 +160,18 @@ class WebSearchTool(BaseTool):
             print(f"🌦️ {weather.splitlines()[0]}")
             return {"success": True, "result": weather,
                     "metadata": {"query": query, "num_results": 1, "search_type": "weather"}}
+        cfg = get_config().get("tools", {}).get("web_search") or {}
+        if search_type != "news" and cfg.get("research", True):
+            from backend.research import format_brief, research
+
+            question = re.sub(r"^\[[^\]]+\]:?\s*", "", kwargs.get("message", "")).strip() or query
+            found = await research(
+                question, query, kwargs.get("conversation_context", ""),
+                rounds=int(cfg.get("research_rounds_voice", 2) if voice_mode else cfg.get("research_rounds", 3)),
+                pages=int(cfg.get("research_pages", 2)), notify=kwargs.get("notify"))
+            return {"success": True, "result": format_brief(found, question),
+                    "metadata": {"query": query, "searches": found["searches"], "found": found["found"],
+                                 "search_type": "research"}}
         try:
             num_results = min(max(1, int(num_results or 5)), 10)
             if search_type not in ("text", "news"):

@@ -160,6 +160,9 @@ _QUERY_EXAMPLES = [
      "Latest message: [Robin]: but can't you just search for the date?", "Tesla Roadster release date"),
     ("Earlier messages:\n[Sam]: who won the f1 race yesterday\n\nLatest message: [Sam]: then do it", "F1 race winner"),
     ("Latest message: [Ana]: what's the price of a ps5 right now", "PS5 price"),
+    # A correction replaces the earlier search instead of adding to it.
+    ("Earlier messages:\n[Kai]: search the web for what is the best jungler right now\n\n"
+     "Latest message: [Kai]: no, I meant the best jungle champion in league", "best jungle champion League of Legends"),
 ]
 # "Do it" / "go ahead" after Metis offered to look something up.
 _GO_AHEAD = re.compile(r"^\W*(then |so |ok(ay)? |yes |yeah |sure |please )*(do it|do that|go ahead|go for it|"
@@ -193,6 +196,8 @@ _REMEMBER = re.compile(
     r"\bwhat('s| is| was) my\b|\bdo you know (my|what my|who my)\b",
     re.IGNORECASE,
 )
+# "No, I meant ..." right after a search: search again for what they meant (the model said "none").
+_CORRECTION = re.compile(r"^\W*(no|nah|nope|not that|wrong)\b.*\bI (meant|mean|said|asked)\b|^\W*I meant\b", re.IGNORECASE)
 _QUESTION_WORDS = re.compile(r"^\W*(who|what|when|where|which|why|how|is|are|was|were|did|does|do|can|could|tell me|give me)\b",
                              re.IGNORECASE)
 
@@ -301,6 +306,9 @@ async def decide_tools(
                 _SEARCH_REQUEST.search(text) or (is_question_like(text) and _FRESH_INFO.search(text))
                 or (_GO_AHEAD.match(text) and (_OFFERED_TO_SEARCH.search(last_metis) or _SEARCH_REQUEST.search(said)
                                                or (is_question_like(said) and _FRESH_INFO.search(said))))):
+            choice = "web_search"
+        if choice == "none" and "web_search" in decidable and _CORRECTION.search(text) and (
+                _SEARCH_REQUEST.search(said) or (is_question_like(said) and _FRESH_INFO.search(said))):
             choice = "web_search"
         if choice == "none" and "remember" in decidable and _REMEMBER.search(text):
             choice = "remember"

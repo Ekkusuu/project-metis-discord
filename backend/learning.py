@@ -23,7 +23,8 @@ _SYSTEM = (
     "You help an AI companion remember people. Given the messages one person wrote, list the lasting facts "
     "they reveal about themselves, one short phrase per line, without their name. Only what they actually said. "
     "Skip greetings, moods and small talk, and skip what they asked about or asked Metis to do: a question "
-    "is not a fact about the person. If there is nothing worth remembering, write NONE."
+    "is not a fact about the person, and asking about something once doesn't mean they love it. Don't exaggerate "
+    "what they said. If there is nothing worth remembering, write NONE."
 )
 
 _EXAMPLE_IN = """Messages by Robin:
@@ -52,6 +53,7 @@ _STOPWORDS = set(
 # request into a "fact", and the next prompt then treats it as something the person cares about.
 _NOT_ABOUT_THEM = re.compile(
     r"^(is |was )?(asking|asked|asks|wants to know|wanted to know|wondering|wonders|curious|inquiring|requesting)\b"
+    r"|^(wants|wanted|tried|is trying) to (search|look up|find|check|google)\b"
     r"|\b(metis|the (ai|bot|assistant))\b",
     re.IGNORECASE,
 )

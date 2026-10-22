@@ -126,6 +126,7 @@ async def _run_tools(messages: List[Dict[str, str]], req: ChatRequest, timings: 
         "conversation_context": _conversation_text(messages, int(tools_cfg.get("context_messages", 3))),
         "voice_mode": req.voice_mode,
         "message": last_user,  # for the log: which message a query was made from
+        "notify": notify,  # a long lookup can say "still looking" between searches
     }
 
     # Calls that need no decision (knowledge search, links) run while the model decides about the web.
@@ -347,6 +348,40 @@ def _opening(text: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]", "", text.lower())).strip()
 
 
+# Asking for more than a quick answer ("explain", "tell me about", "a story") allows a longer spoken reply.
+_WANTS_DETAIL = re.compile(r"\b(explain|tell me (more|about|everything)|story|describe|in detail|step by step|list|"
+                           r"how (do|does|can|should) (i|you|we)|walk me through)\b", re.IGNORECASE)
+
+
+def _sentence_limit(req: ChatRequest) -> int:
+    """How many sentences a spoken reply may have (voice.max_sentences / max_sentences_detail); 0 = no limit."""
+    if not req.voice_mode:
+        return 0
+    voice = get_config().get("voice", {})
+    last = req.messages[-1].content if req.messages else (req.prompt or "")
+    if _WANTS_DETAIL.search(last):
+        return int(voice.get("max_sentences_detail", 6))
+    return int(voice.get("max_sentences", 3))
+
+
+def _sentence_end(text: str, count: int) -> int:
+    """Index just past the end of the `count`-th complete sentence in `text`, or -1 if there aren't that many."""
+    from backend.text_utils import find_sentence_boundary
+
+    pos = 0
+    for _ in range(count):
+        # A voice tag on its own ("[teasing]") isn't a sentence.
+        while True:
+            boundary = find_sentence_boundary(text[pos:])
+            if boundary == -1:
+                return -1
+            piece = text[pos:pos + boundary + 1]
+            pos += boundary + 1
+            if re.sub(r"\[[^\]]*\]", "", piece).strip(" \n.!?"):
+                break
+    return pos
+
+
 @router.post("/chat/stream")
 async def chat_stream(req: ChatRequest, request: Request):
     """
@@ -379,11 +414,12 @@ async def chat_stream(req: ChatRequest, request: Request):
         start = time.perf_counter()
         first_token: Optional[float] = None
         previous = _opening(next((m["content"] for m in reversed(final) if m["role"] == "assistant"), ""))
+        limit = _sentence_limit(req)
         try:
             for attempt in range(2):
                 # A small model sometimes starts its previous reply over, word for word. The first few words are
                 # held back (~0.1 s) and compared; a repeat is dropped and regenerated with more randomness.
-                checking, held, repeated, reply = bool(previous) and attempt == 0, [], False, ""
+                checking, repeated, reply, sent = bool(previous) and attempt == 0, False, "", 0
                 params = sampling if attempt == 0 else {**sampling, "temperature": min(1.2, sampling["temperature"] + 0.3)}
                 async with contextlib.aclosing(astream_chat(final, stats=stats, **params)) as deltas:
                     async for delta in deltas:
@@ -391,7 +427,6 @@ async def chat_stream(req: ChatRequest, request: Request):
                             first_token = time.perf_counter() - start
                         reply += delta
                         if checking:
-                            held.append(delta)
                             opening = _opening(reply)
                             if len(opening) < _OPENING_CHARS:
                                 continue
@@ -399,15 +434,20 @@ async def chat_stream(req: ChatRequest, request: Request):
                             if opening[:_OPENING_CHARS] == previous[:_OPENING_CHARS]:
                                 repeated = True
                                 break  # closing the stream stops the generation
-                            for d in held:
-                                yield json.dumps({"delta": d}) + "\n"
-                            continue
-                        yield json.dumps({"delta": delta}) + "\n"
+                        # Spoken replies stop after `limit` sentences: she rambled for 18 seconds in one go.
+                        end = _sentence_end(reply, limit) if limit else -1
+                        upto = len(reply) if end == -1 else end
+                        if upto > sent:
+                            yield json.dumps({"delta": reply[sent:upto]}) + "\n"
+                            sent = upto
+                        if end != -1:
+                            reply = reply[:end]
+                            print(f"✂️ Stopped the spoken reply after {limit} sentences")
+                            break
                 if checking:  # the whole reply was shorter than the check
                     repeated = _opening(reply) == previous
                     if not repeated:
-                        for d in held:
-                            yield json.dumps({"delta": d}) + "\n"
+                        yield json.dumps({"delta": reply}) + "\n"
                 if not repeated:
                     break
                 print(f"🔁 Reply started repeating the previous one ({reply.strip()[:60]!r}); generating a new one")

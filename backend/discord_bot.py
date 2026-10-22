@@ -892,6 +892,9 @@ class VoiceReceiver:
                      "Hold on, I'm thinking.", "Hmm, give me a second."],
         "web_search": ["Hmm, let me look that up.", "One sec, I'll check.", "Ooh, let me see.",
                        "Hold on, let me find out."],
+        # The first search didn't answer it and another one is running.
+        "web_search_more": ["Hmm, not there. Let me check somewhere else.", "Wait, let me dig a bit more.",
+                            "Still looking, hold on."],
     }
 
     def _thinking_line(self, tool: str) -> str:

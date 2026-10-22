@@ -33,6 +33,19 @@ def float_to_pcm16(audio: Any) -> bytes:
     return (audio * 32767).astype(np.int16).tobytes()
 
 
+def _free_vram_gb() -> Optional[float]:
+    """Free memory on the first GPU according to the driver, or None. (On Windows torch.cuda.mem_get_info
+    reported 6.8 GB free while nvidia-smi showed 0.6 GB.)"""
+    import subprocess
+
+    try:
+        out = subprocess.run(["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
+                             capture_output=True, text=True, timeout=5).stdout
+        return float(out.split()[0]) / 1024
+    except Exception:
+        return None
+
+
 class VoiceService:
     def __init__(self) -> None:
         self.config = get_config().get("voice", {})
@@ -75,12 +88,14 @@ class VoiceService:
             path = resolve_path(self.config.get("stt_model_path", "model/parakeet-tdt-0.6b-v2.nemo"))
             if path.exists():
                 print(f"Loading STT model from {path}...")
-                self.stt_model = nemo_asr.models.ASRModel.restore_from(str(path))
+                self.stt_model = nemo_asr.models.ASRModel.restore_from(str(path), map_location="cpu")
             else:
                 print(f"STT model not found at {path}, downloading nvidia/parakeet-tdt-0.6b-v2...")
-                self.stt_model = nemo_asr.models.ASRModel.from_pretrained(model_name="nvidia/parakeet-tdt-0.6b-v2")
+                self.stt_model = nemo_asr.models.ASRModel.from_pretrained(model_name="nvidia/parakeet-tdt-0.6b-v2",
+                                                                          map_location="cpu")
             precision = "fp32"
-            if torch.cuda.is_available():
+            on_gpu = self._stt_on_gpu(torch)
+            if on_gpu:
                 self.stt_model = self.stt_model.cuda()
                 # bfloat16 halves Parakeet's VRAM (~2.6 GB -> ~1.6 GB reserved) with identical transcripts
                 # in testing, for ~20 ms more per utterance. fp16 was slower, so it isn't offered.
@@ -88,12 +103,33 @@ class VoiceService:
                     self.stt_model = self.stt_model.to(torch.bfloat16)
                     precision = "bf16"
             self.stt_model.eval()
-            print(f"✓ STT model loaded ({'cuda' if torch.cuda.is_available() else 'cpu'}, {precision})")
+            print(f"✓ STT model loaded ({'cuda' if on_gpu else 'cpu'}, {precision})")
             # The first transcription pays a one-time GPU warm-up (~0.3 s); do it now, not on a real speaker.
             self._transcribe_sync(np.zeros(STT_SAMPLE_RATE, dtype=np.float32))
         except Exception as e:
             print(f"❌ Failed to initialize STT: {e}")
             self.stt_model = None
+
+    def _stt_on_gpu(self, torch) -> bool:
+        """
+        voice.stt_device: cuda, cpu, or auto = the GPU only if it has room left (the model needs ~1.6 GB).
+        With a 9B language model and the Qwen3-TTS voice the GPU is full, and Windows then quietly moves
+        memory to system RAM, which slows everything down. On the CPU a 7 s clip takes ~0.45 s instead of ~0.15 s.
+        """
+        if not torch.cuda.is_available():
+            return False
+        device = str(self.config.get("stt_device", "auto")).lower()
+        if device in ("cuda", "gpu"):
+            return True
+        if device == "cpu":
+            return False
+        free = _free_vram_gb()
+        if free is None:
+            free = torch.cuda.mem_get_info()[0] / 1024 ** 3
+        if free < 2.2:
+            print(f"STT on the CPU: only {free:.1f} GB of VRAM free (voice.stt_device)")
+            return False
+        return True
 
     def _init_tts(self) -> None:
         if str(self.config.get("tts_engine", "kokoro")).lower() == "qwen3":

@@ -171,6 +171,11 @@ def get_collection() -> chromadb.Collection:
         return _collection
 
 
+def get_embedder() -> LocalEmbeddingFunction:
+    """The knowledge base's embedding model (also used to pick the relevant parts of web pages)."""
+    return get_collection()._embedding_function
+
+
 def clear_collection() -> int:
     """Delete every chunk and forget all file metadata. Returns the number of chunks removed."""
     collection = get_collection()
