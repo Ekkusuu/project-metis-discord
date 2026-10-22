@@ -1,14 +1,17 @@
 """
-Looking something up on the web the way a person would: search, open the most promising pages, read the
-parts about the question, and search again with better words if the answer isn't there yet.
+A web research agent, built like the web tools of coding agents: the model works step by step with
+`search` (web results with snippets), `news` (dated news results), `open` (read pages, keeping only the parts
+about the question; several at once) and finally `answer` or `give_up`. Each step is one constrained JSON
+choice, so even a small local model can't produce a malformed tool call.
 
-The reading is done by a neutral "researcher" prompt, not by Metis: asked to read raw search results and
-stay in character at the same time, a small model invented numbers ("Cho'Gath, 19% win rate" from a page
-title). The researcher writes a short factual answer with its source; Metis then says it her way.
+The research is done by a neutral prompt, not by Metis: asked to read raw search results and stay in
+character at the same time, a small model invented numbers from page titles. The agent writes down the
+answer with its source; Metis then says it her way.
 """
 from __future__ import annotations
 
 import asyncio
+import datetime
 import re
 import time
 from typing import Any, Callable, Dict, List, Optional
@@ -16,46 +19,41 @@ from urllib.parse import urlparse
 
 from backend.llama_engine import json_completion
 
-_SYSTEM = """You research questions for a voice assistant. You get web search results and excerpts of the pages \
-they link to. Using only that material, write down what answers the question.
-- answer: one to three plain sentences with the exact names, numbers and dates that answer the question, and \
-which site says so. Empty if the material doesn't answer it.
-- found: true only if the answer is in the material.
-- search_again: if not found, a better web search (2-8 words; add site:domain.com if they asked for a site). \
-Otherwise empty."""
+_SYSTEM = """You find information on the web for a voice assistant, one step at a time. Today is {today}.
+Tools:
+- search: web search. input = 2-8 keywords (add site:domain.com to search one website)
+- news: news search, newest first, for recent events. input = keywords
+- open: read pages. input = result numbers like "1" or "1,3", or a URL. You get the parts about the question.
+- answer: input = one to three plain sentences that answer the question with the exact names, numbers and \
+dates, and which site says so
+- give_up: the answer can't be found. input = the closest thing you found, or empty
+Rules:
+- Snippets are short and often outdated. Open pages before answering with numbers, prices, rankings, \
+dates or lists, unless a snippet states the answer plainly.
+- If the pages don't have it, search again with different words or open other results.
+- Use only what you read. Never guess or fill in from memory.
+Write `thought` as one short sentence about what to do next."""
 
-_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "answer": {"type": "string"},
-        "found": {"type": "boolean"},
-        "search_again": {"type": "string"},
-    },
-    "required": ["answer", "found", "search_again"],
-}
-
-# Sites people name in speech, as the transcriber writes them ("u.g", "u g g").
-_SPOKEN_SITES = {r"\bu\.? ?g\.? ?g?\b": "u.gg", r"\bop\.? ?gg?\b": "op.gg", r"\breddit\b": "reddit.com",
-                 r"\bwiki(pedia)?\b": "wikipedia.org", r"\bmobalytics\b": "mobalytics.gg",
-                 r"\bmetasrc\b": "metasrc.com", r"\bimdb\b": "imdb.com", r"\byoutube\b": "youtube.com"}
-_SITE_ASKED = re.compile(r"\b(on|in|from|at|use|using|check)\s+(the\s+)?(site|website|page)?\s*([a-z0-9-]+(\.[a-z0-9-]+)+)",
-                         re.IGNORECASE)
+_ACTIONS = ["search", "news", "open", "answer", "give_up"]
 
 
-def site_asked_for(message: str) -> Optional[str]:
-    """The website the person asked to use ("search on u.gg ..."), if any."""
-    if re.search(r"\b(site|website|on|from)\b", message, re.IGNORECASE):
-        for pattern, site in _SPOKEN_SITES.items():
-            if re.search(pattern, message, re.IGNORECASE):
-                return site
-    match = _SITE_ASKED.search(message)
-    if match and not match.group(4)[0].isdigit() and len(match.group(4).rsplit(".", 1)[1]) >= 2:
-        return match.group(4).lower()
-    return None
+def _schema(actions: List[str]) -> Dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {"thought": {"type": "string"}, "action": {"enum": actions}, "input": {"type": "string"}},
+        "required": ["thought", "action", "input"],
+    }
 
 
 # Video and social pages have no text to read.
 _UNREADABLE = ("youtube.com", "youtu.be", "tiktok.com", "instagram.com", "facebook.com", "x.com", "twitter.com")
+
+
+def site_in(query: str) -> Optional[str]:
+    """The site a query is limited to ("... site:example.com"), if any. The query writer adds it when someone
+    names a website; nothing here knows particular sites."""
+    match = re.search(r"\bsite:(\S+)", query)
+    return match.group(1).lower().removeprefix("www.") if match else None
 
 
 def _domain(url: str) -> str:
@@ -63,108 +61,135 @@ def _domain(url: str) -> str:
     return host[4:] if host.startswith("www.") else host
 
 
-async def _search(query: str, count: int = 6) -> List[Dict[str, Any]]:
-    """Web results; one engine first (Bing answered in ~0.9 s, ddgs's "auto" mix took 2-5 s), then the mix."""
+async def _search(query: str, kind: str = "text", count: int = 6) -> List[Dict[str, Any]]:
+    """Results from DuckDuckGo's ddgs: one engine first (Bing answered in ~0.9 s, the "auto" mix in 2-5 s),
+    then the mix. A site: search with no results is retried on the whole web (the name may be misheard)."""
     from backend.config import get_config
     from backend.tools.web_search_tool import WebSearchTool
 
     engine = (get_config().get("tools", {}).get("web_search") or {}).get("engine", "bing")
-    for backend in dict.fromkeys([engine, "auto"]):
+    attempts = [(query, b) for b in dict.fromkeys([engine, "auto"])] if kind == "text" else [(query, "auto")]
+    if site_in(query):
+        attempts.append((re.sub(r"\s*\bsite:\S+", "", query).strip(), "auto"))
+    for q, backend in attempts:
         try:
             found = await asyncio.wait_for(
-                asyncio.to_thread(WebSearchTool()._search_sync, query, count, "text", backend), timeout=8)
+                asyncio.to_thread(WebSearchTool()._search_sync, q, count, kind, backend), timeout=8)
             if found:
                 return found
         except Exception as e:
-            print(f"   search ({backend}) failed for {query!r}: {e}")
+            print(f"   {kind} search ({backend}) failed for {q!r}: {e}")
     return []
 
 
-def _rank(results: List[Dict[str, Any]], question: str, site: Optional[str]) -> List[Dict[str, Any]]:
-    """Results by how well their title and snippet match the question; the site they asked for first."""
-    if not results:
-        return []
-    try:
-        import numpy as np
-
-        from backend.rag_engine import get_embedder
-
-        embedder = get_embedder()
-        q = np.array(embedder.embed_query(question)[0])
-        docs = np.array(embedder.embed_documents([f"{r['title']}. {r['content']}" for r in results]))
-        scores = list(docs @ q / (np.linalg.norm(docs, axis=1) * np.linalg.norm(q) + 1e-9))
-    except Exception:
-        scores = [-i for i in range(len(results))]  # keep the search engine's order
-    for i, r in enumerate(results):
-        if site and _domain(r["url"]).endswith(site):
-            scores[i] += 1.0
-        if _domain(r["url"]).endswith(_UNREADABLE):
-            scores[i] -= 1.0
-    return [r for _, r in sorted(zip(scores, results), key=lambda pair: -pair[0])]
-
-
 async def _read(url: str, question: str, max_chars: int) -> str:
-    from backend.tools.web_page_tool import fetch_page_text, relevant_passages
+    from backend.tools.web_page_tool import read_page
 
     try:
-        page = await asyncio.wait_for(asyncio.to_thread(fetch_page_text, url, None, full=True), timeout=5)
-        return await asyncio.to_thread(relevant_passages, page["text"], question, max_chars)
+        return await asyncio.wait_for(asyncio.to_thread(read_page, url, question, max_chars), timeout=12)
     except Exception as e:
         print(f"   couldn't read {url}: {e}")
         return ""
 
 
-async def research(question: str, query: str, earlier: str = "", *, rounds: int = 2, pages: int = 2,
-                   page_chars: int = 1500, notify: Optional[Callable[[str], None]] = None) -> Dict[str, Any]:
+def _listing(results: List[Dict[str, Any]], start: int) -> str:
+    lines = []
+    for i, r in enumerate(results, start):
+        date = f", {r['date'][:10]}" if r.get("date") else ""
+        note = " (video/social, can't be read)" if _domain(r["url"]).endswith(_UNREADABLE) else ""
+        lines.append(f"[{i}] {r['title']} ({_domain(r['url'])}{date}){note}\n    {r['content'][:280]}")
+    return "\n".join(lines)
+
+
+def _clip(transcript: List[str], budget: int) -> str:
+    """The steps so far, oldest observations shortened first so the prompt fits the utility context."""
+    parts = list(transcript)
+    while sum(map(len, parts)) > budget and any(len(p) > 400 for p in parts[:-1]):
+        i = next(i for i, p in enumerate(parts[:-1]) if len(p) > 400)
+        parts[i] = parts[i][:400] + " …(shortened)"
+    return "\n\n".join(parts)
+
+
+async def research(question: str, query: str, earlier: str = "", *, max_steps: int = 5, page_chars: int = 1500,
+                   time_budget: float = 25.0, first_kind: str = "text",
+                   notify: Optional[Callable[[str], None]] = None) -> Dict[str, Any]:
     """
-    Search and read until the question is answered or `rounds` searches were made.
-    Returns {"answer", "found", "sources", "searches", "material"}; material is the last round's reading.
+    Research `question`, starting with a `first_kind` ("text" or "news") search for `query` (no model step
+    needed for that).
+    Returns {"answer", "found", "sources", "searches", "steps"}.
     """
-    site = site_asked_for(question)
-    if site and "site:" not in query:
-        query = f"{query} site:{site}"
+    start = time.perf_counter()
+    results: List[Dict[str, Any]] = []  # every result seen; the model refers to them by number
     searches: List[str] = []
-    seen: set = set()
-    answer, found, sources, material = "", False, [], ""
-    for round_no in range(rounds):
-        t0 = time.perf_counter()
-        searches.append(query)
-        results = await _search(query)
-        t_search = time.perf_counter() - t0
-        if not results and site and "site:" in query:
-            # Some sites aren't indexed well; look in the whole web instead.
-            query = query.split("site:")[0].strip()
-            results = await _search(query)
-        ranked = _rank([r for r in results if r.get("url") not in seen], question, site)
-        chosen = ranked[:pages]
-        seen.update(r["url"] for r in chosen)
-        texts = await asyncio.gather(*(_read(r["url"], question, page_chars) for r in chosen))
-        t_read = time.perf_counter() - t0
-        listing = "\n".join(f"[{i}] {r['title']} ({_domain(r['url'])})\n    {r['content'][:300]}"
-                            for i, r in enumerate(ranked[:5], 1))
-        pages_text = "\n\n".join(f"Page {_domain(r['url'])} ({r['title']}):\n{t}" for r, t in zip(chosen, texts) if t)
-        material = f"Search results for {query!r}:\n{listing}" + (f"\n\n{pages_text}" if pages_text else "")
+    sources: List[str] = []
+    transcript: List[str] = []
+    opened: set = set()
+    system = _SYSTEM.format(today=datetime.date.today().strftime("%d %B %Y"))
+
+    async def run_search(q: str, kind: str) -> str:
+        if q in searches:
+            return f"{kind} {q!r}: already searched; try different words or open a result."
+        if searches and notify:
+            notify("web_search_more")  # "hmm, not there, let me check somewhere else"
+        searches.append(q)
+        found = [r for r in await _search(q, kind) if r.get("url") not in {x["url"] for x in results}]
+        first = len(results) + 1
+        results.extend(found)
+        return f"{kind} {q!r}:\n" + (_listing(found, first) if found else "no results")
+
+    async def run_open(target: str) -> str:
+        urls = []
+        for token in re.split(r"[,\s]+", target.strip()):
+            if token.isdigit() and 1 <= int(token) <= len(results):
+                urls.append(results[int(token) - 1]["url"])
+            elif token.startswith("http"):
+                urls.append(token)
+        urls = list(dict.fromkeys(urls))[:3]
+        if not urls:
+            return f"open {target!r}: give result numbers from the lists above, or a URL."
+        # The 4B model opened the same result again hoping for more; reading it twice gives the same text.
+        again = [u for u in urls if u in opened]
+        urls = [u for u in urls if u not in opened]
+        if not urls:
+            return f"open {target}: already read above. Open a different result, search again, or answer."
+        opened.update(urls)
+        texts = await asyncio.gather(*(_read(u, question, page_chars) for u in urls))
+        out = []
+        for url, text in zip(urls, texts):
+            if text:
+                sources.append(_domain(url))
+            out.append(f"Page {_domain(url)}:\n{text or '(could not be read)'}")
+        skipped = f" (already read: {', '.join(_domain(u) for u in again)})" if again else ""
+        return f"open {target}{skipped}:\n" + "\n\n".join(out)
+
+    transcript.append(await run_search(query, first_kind))
+    answer, found, steps = "", False, 0
+    while True:
+        steps += 1
+        last_step = steps >= max_steps or time.perf_counter() - start > time_budget
+        actions = ["answer", "give_up"] if last_step else _ACTIONS
         prompt = (f"Question: {question}\n" + (f"Said before: {earlier}\n" if earlier else "")
-                  + (f"Notes from the earlier search: {answer}\n" if answer else "") + f"\n{material}")
+                  + f"\nSteps so far:\n{_clip(transcript, 7000)}\n\n"
+                  + ("No more steps: answer from what you read, or give up." if last_step else "Next step?"))
         try:
             step = await asyncio.to_thread(
-                json_completion, [{"role": "system", "content": _SYSTEM}, {"role": "user", "content": prompt}],
-                _SCHEMA, 0.1, 220)
+                json_completion, [{"role": "system", "content": system}, {"role": "user", "content": prompt}],
+                _schema(actions), 0.2, 260)
         except Exception as e:
             print(f"   researcher failed: {e}")
             break
-        answer = str(step.get("answer") or answer).strip()
-        found = bool(step.get("found")) and bool(answer)
-        sources = [_domain(r["url"]) for r, t in zip(chosen, texts) if t] or [_domain(r["url"]) for r in ranked[:2]]
-        print(f"🔬 search {round_no + 1} {query!r}: read {', '.join(_domain(r['url']) for r in chosen) or 'nothing'} "
-              f"in {time.perf_counter() - t0:.1f}s (search {t_search:.1f}, read {t_read - t_search:.1f}) -> {'found' if found else 'not found'}: {answer[:160]!r}")
-        next_query = str(step.get("search_again") or "").strip()
-        if found or not next_query or next_query in searches or round_no + 1 >= rounds:
+        action, arg = step.get("action"), str(step.get("input") or "").strip()
+        print(f"🔬 step {steps}: {action} {arg[:120]!r}  ({step.get('thought', '')[:100]})")
+        if action in ("answer", "give_up"):
+            answer, found = arg, action == "answer" and bool(arg)
             break
-        query = next_query
-        if notify:
-            notify("web_search_more")
-    return {"answer": answer, "found": found, "sources": sources, "searches": searches, "material": material}
+        if action in ("search", "news"):
+            transcript.append(await run_search(arg, "news" if action == "news" else "text"))
+        elif action == "open":
+            transcript.append(await run_open(arg))
+    print(f"🔬 {'found' if found else 'not found'} in {time.perf_counter() - start:.1f}s, {steps} step(s): {answer[:160]!r}")
+    return {"answer": answer, "found": found, "sources": list(dict.fromkeys(sources)) or [_domain(r["url"]) for r in results[:1]],
+            "searches": searches, "steps": steps}
 
 
 def format_brief(result: Dict[str, Any], question: str) -> str:

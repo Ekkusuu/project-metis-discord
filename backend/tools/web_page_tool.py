@@ -151,6 +151,56 @@ def relevant_passages(text: str, question: str, max_chars: int = 1500, size: int
     return out.strip()
 
 
+_JINA_READER = "https://r.jina.ai/"
+_page_cache: Dict[str, Tuple[float, str]] = {}  # url -> (fetched at, full text); a page is often opened twice
+
+
+def _rendered_text(url: str) -> str:
+    """The page as a browser shows it, through Jina Reader (free, no key; it runs the page's JavaScript).
+    For apps that send an empty shell and build the page in the browser."""
+    import primp
+
+    client = primp.Client(impersonate="chrome_133", timeout=12)
+    response = client.get(_JINA_READER + url, headers={"X-Return-Format": "text"})
+    if response.status_code >= 400:
+        raise ValueError(f"reader returned HTTP {response.status_code}")
+    return response.text.strip()
+
+
+def read_page(url: str, question: str, max_chars: int = 1500) -> str:
+    """
+    The parts of a page about `question`, like a coding agent's web fetch (synchronous). Pages with almost no
+    text in their HTML (built by JavaScript) are read through a renderer instead (tools.fetch_webpage.renderer:
+    "jina" or "none"; the URL is sent to r.jina.ai).
+    """
+    import time
+
+    cached = _page_cache.get(url)
+    if cached and time.time() - cached[0] < 600:
+        text = cached[1]
+    else:
+        text, error = "", None
+        try:
+            text = fetch_page_text(url, full=True)["text"]
+        except UnsafeURLError:
+            raise
+        except Exception as e:
+            error = e
+        renderer = (get_config().get("tools", {}).get("fetch_webpage") or {}).get("renderer", "jina")
+        if len(text) < 500 and renderer == "jina":
+            _check_public(url)
+            try:
+                text = _rendered_text(url) or text
+            except Exception as e:
+                print(f"   renderer couldn't read {url}: {e}")
+        if not text:
+            raise ValueError(f"no readable text ({error or 'empty page'})")
+        if len(_page_cache) > 30:
+            _page_cache.clear()
+        _page_cache[url] = (time.time(), text)
+    return relevant_passages(text, question, max_chars)
+
+
 class WebPageTool(BaseTool):
     @property
     def definition(self) -> ToolDefinition:

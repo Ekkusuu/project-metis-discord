@@ -6,86 +6,94 @@ import asyncio
 import pytest
 
 import backend.research as research_mod
-from backend.research import format_brief, research, site_asked_for
+from backend.research import format_brief, research, site_in
 from backend.routers.chat import ChatRequest, Message, _sentence_end, _sentence_limit
 from backend.tool_manager import _CORRECTION
 from backend.tools import web_page_tool
 
 
-@pytest.mark.parametrize("message, site", [
-    ("search uh the web for in the site u.g what is the best jungler right now", "u.gg"),
-    ("look it up on op gg", "op.gg"),
-    ("check on reddit.com what people think", "reddit.com"),
-    ("what does it say on imdb.com", "imdb.com"),
-    ("search the web for the best jungler", None),
-    ("what is 3.5 times 2", None),
+@pytest.mark.parametrize("query, site", [
+    ("best budget laptop site:notebookcheck.net", "notebookcheck.net"),
+    ("dune reviews site:www.rottentomatoes.com", "rottentomatoes.com"),
+    ("best budget laptop", None),
 ])
-def test_site_asked_for(message, site):
-    assert site_asked_for(message) == site
+def test_site_in(query, site):
+    assert site_in(query) == site
 
 
 def _fake_results(*domains):
     return [{"title": f"Page on {d}", "url": f"https://{d}/page", "content": f"snippet from {d}"} for d in domains]
 
 
-def _run(monkeypatch, steps, results):
-    """research() with canned search results and researcher answers; returns (result, searches, notifications)."""
-    searches, notes, steps = [], [], list(steps)
+def _step(action, arg=""):
+    return {"thought": "", "action": action, "input": arg}
 
-    async def fake_search(query, count=6):
-        searches.append(query)
+
+def _run(monkeypatch, steps, results, max_steps=5):
+    """research() with canned searches, pages and model steps; returns (result, searches, pages read, notifications)."""
+    searches, opened, notes, steps, prompts = [], [], [], list(steps), []
+
+    async def fake_search(query, kind="text", count=6):
+        searches.append((kind, query))
         return results.pop(0) if results else []
 
     async def fake_read(url, question, max_chars):
+        opened.append(url)
         return f"text of {url}"
+
+    def fake_model(messages, schema, *args):
+        prompts.append((messages[-1]["content"], schema["properties"]["action"]["enum"]))
+        return steps.pop(0)
 
     monkeypatch.setattr(research_mod, "_search", fake_search)
     monkeypatch.setattr(research_mod, "_read", fake_read)
-    monkeypatch.setattr(research_mod, "_rank", lambda results, question, site: results)
-    monkeypatch.setattr(research_mod, "json_completion", lambda *args: steps.pop(0))
-    found = asyncio.run(research("what is the best jungler on u.gg", "best jungler", rounds=3, notify=notes.append))
-    return found, searches, notes
+    monkeypatch.setattr(research_mod, "json_completion", fake_model)
+    found = asyncio.run(research("what is the best budget laptop on notebookcheck",
+                                 "best budget laptop site:notebookcheck.net", max_steps=max_steps, notify=notes.append))
+    return found, searches, opened, notes, prompts
 
 
-def test_research_stops_when_found(monkeypatch):
-    found, searches, notes = _run(
-        monkeypatch, [{"answer": "Master Yi, 51.2% win rate (u.gg)", "found": True, "search_again": ""}],
-        [_fake_results("u.gg", "metasrc.com", "jungler.gg")])
-    assert found["found"] and found["answer"].startswith("Master Yi")
-    assert searches == ["best jungler site:u.gg"]  # the site they asked for is searched
-    assert found["sources"] == ["u.gg", "metasrc.com"]  # two pages read
+def test_search_open_answer(monkeypatch):
+    found, searches, opened, notes, prompts = _run(
+        monkeypatch, [_step("open", "1,2"), _step("answer", "The Acer Swift Go 14 (notebookcheck.net)")],
+        [_fake_results("notebookcheck.net", "rtings.com", "pcmag.com")])
+    assert searches == [("text", "best budget laptop site:notebookcheck.net")]  # first search needs no model step
+    assert opened == ["https://notebookcheck.net/page", "https://rtings.com/page"]  # two pages at once
+    assert "[3] Page on pcmag.com" in prompts[0][0]  # the model sees numbered results
+    assert "text of https://rtings.com/page" in prompts[1][0]  # and what it read
+    assert found["found"] and found["sources"] == ["notebookcheck.net", "rtings.com"]
     assert notes == []
 
 
-def test_research_searches_again_and_says_so(monkeypatch):
-    found, searches, notes = _run(monkeypatch, [
-        {"answer": "", "found": False, "search_again": "jungle tier list patch 26.21 site:u.gg"},
-        {"answer": "Master Yi", "found": True, "search_again": ""},
-    ], [_fake_results("u.gg"), _fake_results("u.gg")])
-    assert searches == ["best jungler site:u.gg", "jungle tier list patch 26.21 site:u.gg"]
-    assert notes == ["web_search_more"]  # the voice bot says "still looking" between searches
-    assert found["found"]
+def test_searches_again_and_says_so(monkeypatch):
+    found, searches, opened, notes, _ = _run(monkeypatch, [
+        _step("search", "budget laptop review"), _step("news", "budget laptop launch"), _step("open", "3"),
+        _step("answer", "x")], [_fake_results("a.com"), _fake_results("b.com"), _fake_results("c.com")])
+    assert [k for k, _ in searches] == ["text", "text", "news"]
+    assert opened == ["https://c.com/page"]  # result numbers continue across searches
+    assert notes == ["web_search_more", "web_search_more"]  # "still looking" in voice
 
 
-def test_research_gives_up_after_the_rounds(monkeypatch):
-    not_found = {"answer": "", "found": False, "search_again": "another try"}
-    found, searches, _ = _run(monkeypatch, [not_found, {**not_found, "search_again": "third try"}, not_found],
-                              [_fake_results("a.com"), _fake_results("b.com"), _fake_results("c.com")])
-    assert len(searches) == 3 and not found["found"]
-    assert "couldn't find" in format_brief(found, "q")
+def test_last_step_must_answer(monkeypatch):
+    found, _, _, _, prompts = _run(monkeypatch, [_step("search", "a"), _step("search", "b"), _step("give_up", "")],
+                                   [_fake_results("a.com"), [], []], max_steps=3)
+    assert prompts[-1][1] == ["answer", "give_up"]
+    assert not found["found"] and "couldn't find" in format_brief(found, "q")
 
 
-def test_research_drops_site_when_it_has_no_results(monkeypatch):
-    found, searches, _ = _run(monkeypatch, [{"answer": "x", "found": True, "search_again": ""}],
-                              [[], _fake_results("metasrc.com")])
-    assert searches == ["best jungler site:u.gg", "best jungler"]
+def test_repeated_search_and_bad_open_are_explained(monkeypatch):
+    _, searches, opened, _, prompts = _run(monkeypatch, [
+        _step("search", "best budget laptop site:notebookcheck.net"), _step("open", "9"), _step("answer", "x")],
+        [_fake_results("a.com")])
+    assert len(searches) == 1 and opened == []
+    assert "already searched" in prompts[1][0] and "give result numbers" in prompts[2][0]
 
 
 def test_visible_text_used_for_data_pages(monkeypatch):
     rows = "".join(f"<div><span>Champion {i}</span><span>5{i}.0% WR</span></div>" for i in range(40))
     page = f"<html><head><title>Tier List</title></head><body><p>The only tier list you need.</p>{rows}</body></html>"
     monkeypatch.setattr(web_page_tool, "_download", lambda url: (url, "text/html", page))
-    got = web_page_tool.fetch_page_text("https://u.gg/x", 10_000, full=True)
+    got = web_page_tool.fetch_page_text("https://stats.example.com/x", 10_000, full=True)
     assert got["title"] == "Tier List"
     assert "Champion 7 57.0% WR" in got["text"]
 
@@ -114,3 +122,50 @@ def test_correction_after_a_search():
     assert _CORRECTION.search("No, I meant the best jungle champion right now.")
     assert _CORRECTION.search("nah I mean the one from last year")
     assert not _CORRECTION.search("no way, that's crazy")
+
+
+def test_site_search_falls_back_to_whole_web(monkeypatch):
+    from backend.tools import web_search_tool
+
+    tried = []
+
+    def fake_sync(self, query, count, kind, backend="auto"):
+        tried.append((query, backend))
+        return [] if "site:" in query else _fake_results("a.com")
+
+    monkeypatch.setattr(web_search_tool.WebSearchTool, "_search_sync", fake_sync)
+    got = asyncio.run(research_mod._search("dune reviews site:rottentomatoes.com"))
+    assert got and tried[-1] == ("dune reviews", "auto")
+    assert tried[0] == ("dune reviews site:rottentomatoes.com", "bing")
+
+
+def test_read_page_renders_javascript_pages(monkeypatch):
+    web_page_tool._page_cache.clear()
+    calls = []
+    monkeypatch.setattr(web_page_tool, "fetch_page_text",
+                        lambda url, *a, **k: {"url": url, "title": "", "text": "Loading..."})
+    monkeypatch.setattr(web_page_tool, "_check_public", lambda url: None)
+    monkeypatch.setattr(web_page_tool, "_rendered_text", lambda url: calls.append(url) or "Rendered table " * 20)
+    assert web_page_tool.read_page("https://app.example.com/x", "table", 5000).startswith("Rendered table")
+    web_page_tool.read_page("https://app.example.com/x", "table", 5000)
+    assert calls == ["https://app.example.com/x"]  # the second read comes from the cache
+
+
+def test_opening_a_page_again_is_refused(monkeypatch):
+    _, _, opened, _, prompts = _run(monkeypatch, [_step("open", "1"), _step("open", "1"), _step("answer", "x")],
+                                    [_fake_results("a.com", "b.com")])
+    assert opened == ["https://a.com/page"]
+    assert "already read above" in prompts[2][0]
+
+
+@pytest.mark.parametrize("query, message, kept", [
+    ("Dune reviews site:rottentomatoes.com", "check on the site rotten tomatoes how good dune is", True),
+    ("best jungler site:u.gg", "search the web in the site u.g what is the best jungler", True),
+    ("laptop review site:notebookcheck.net", "what does notebookcheck say about it", True),
+    ("cheapest camera phone site:rottentomatoes.com", "No, I meant the cheapest phone with a really good camera.", False),
+    ("cheapest camera phone", "no site here", True),
+])
+def test_site_kept_only_when_named(query, message, kept):
+    from backend.tool_manager import keep_named_site
+
+    assert (keep_named_site(query, message) == query) is kept

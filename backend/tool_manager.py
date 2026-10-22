@@ -153,16 +153,19 @@ Answer with one option."""
 
 _QUERY_PROMPT = ("Write a short web search query (2-6 keywords) for what the latest message wants to know. If it "
                  "refers back ('it', 'that', 'the date', 'search for it', 'do it'), the topic is in the earlier "
-                 "messages: put that topic in the query. Output only the query.")
+                 "messages: put that topic in the query. If they name a website to use, add site: and its domain "
+                 "(speech-to-text mangles names, so write the real domain). Output only the query.")
 # Follow-ups like "tell me the exact date" were searched literally ("what is the exact date").
 _QUERY_EXAMPLES = [
     ("Earlier messages:\n[Robin]: when was the tesla roadster released?\n\n"
      "Latest message: [Robin]: but can't you just search for the date?", "Tesla Roadster release date"),
     ("Earlier messages:\n[Sam]: who won the f1 race yesterday\n\nLatest message: [Sam]: then do it", "F1 race winner"),
     ("Latest message: [Ana]: what's the price of a ps5 right now", "PS5 price"),
+    ("Latest message: [Lee]: check on rotten tomatoes how good the new dune movie is",
+     "Dune movie reviews site:rottentomatoes.com"),
     # A correction replaces the earlier search instead of adding to it.
-    ("Earlier messages:\n[Kai]: search the web for what is the best jungler right now\n\n"
-     "Latest message: [Kai]: no, I meant the best jungle champion in league", "best jungle champion League of Legends"),
+    ("Earlier messages:\n[Kai]: search what's the best phone right now\n\n"
+     "Latest message: [Kai]: no, I meant the best phone camera", "best phone camera"),
 ]
 # "Do it" / "go ahead" after Metis offered to look something up.
 _GO_AHEAD = re.compile(r"^\W*(then |so |ok(ay)? |yes |yeah |sure |please )*(do it|do that|go ahead|go for it|"
@@ -226,6 +229,29 @@ def grounded_query(query: str, said_by_people: str, said_by_metis: str, fallback
         return fallback
     borrowed = (_words(query) & _words(said_by_metis)) - _words(said_by_people)
     return fallback if borrowed else query
+
+
+def keep_named_site(query: str, message: str) -> str:
+    """
+    The query without its "site:" if the latest message doesn't name that site. The query writer carried a
+    site from an earlier question into an unrelated one. Names are matched loosely: speech-to-text writes
+    "rotten tomatoes" or "u.g" for rottentomatoes.com and u.gg.
+    """
+    from difflib import SequenceMatcher
+
+    match = re.search(r"\s*\bsite:(\S+)", query)
+    if not match:
+        return query
+    labels = match.group(1).lower().removeprefix("www.").split(".")
+    letters = re.sub(r"[^a-z0-9]", "", message.lower())
+    for target in {"".join(labels), "".join(labels[:-1]) or labels[0]}:
+        if len(target) < 2:
+            continue
+        for size in (len(target), len(target) - 1):
+            for i in range(max(1, len(letters) - size + 1)):
+                if SequenceMatcher(None, target, letters[i:i + size]).ratio() >= 0.75:
+                    return query
+    return (query[:match.start()] + query[match.end():]).strip()
 
 
 def _first_string_param(tool: BaseTool) -> Optional[str]:
@@ -327,7 +353,7 @@ async def decide_tools(
             )
             written = query.strip().strip('"').splitlines()[0].strip() if query.strip() else ""
             metis_said = " ".join(m["content"][:200] for m in recent if m["role"] == "assistant")
-            query = grounded_query(written, f"{said} {text}", metis_said, text)
+            query = keep_named_site(grounded_query(written, f"{said} {text}", metis_said, text), text)
             arguments: Dict[str, Any] = {_first_string_param(decidable[choice]): query}
             if choice == "web_search" and _NEWS.search(text):
                 arguments["search_type"] = "news"

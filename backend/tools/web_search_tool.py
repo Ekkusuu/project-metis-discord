@@ -161,14 +161,15 @@ class WebSearchTool(BaseTool):
             return {"success": True, "result": weather,
                     "metadata": {"query": query, "num_results": 1, "search_type": "weather"}}
         cfg = get_config().get("tools", {}).get("web_search") or {}
-        if search_type != "news" and cfg.get("research", True):
+        if cfg.get("research", True):
             from backend.research import format_brief, research
 
             question = re.sub(r"^\[[^\]]+\]:?\s*", "", kwargs.get("message", "")).strip() or query
             found = await research(
                 question, query, kwargs.get("conversation_context", ""),
-                rounds=int(cfg.get("research_rounds_voice", 2) if voice_mode else cfg.get("research_rounds", 3)),
-                pages=int(cfg.get("research_pages", 2)), notify=kwargs.get("notify"))
+                max_steps=int(cfg.get("research_steps_voice", 5) if voice_mode else cfg.get("research_steps", 8)),
+                time_budget=float(cfg.get("research_seconds_voice", 20) if voice_mode else cfg.get("research_seconds", 60)),
+                first_kind="news" if search_type == "news" else "text", notify=kwargs.get("notify"))
             return {"success": True, "result": format_brief(found, question),
                     "metadata": {"query": query, "searches": found["searches"], "found": found["found"],
                                  "search_type": "research"}}
