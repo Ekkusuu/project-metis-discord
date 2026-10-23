@@ -254,3 +254,11 @@ def test_question_after_someone_else_spoke_is_not_a_lone_question():
     """okeida's "what does that mean?" was about ekkusu's line, not for Metis."""
     turns = [t(EKK, "look at this weird thing", 20), t(None, "huh, weird", 10, to=EKK), t(SAVA, "what does that mean?")]
     assert verdict(turns, settings=Settings(voice=True, continuation_window=30)) == ASK
+
+
+def test_question_during_group_talk_goes_to_the_model_in_voice():
+    """"Admit it, Aatrox is a terrible champion, right?" was for her, but group questions were always skipped."""
+    turns = [t(EKK, "aatrox is useless", 10), t(SAVA, "yeah he doesn't even heal", 5),
+             t(SAVA, "Admit this, Aatrox is a terrible champion, right?")]
+    assert verdict(turns, settings=Settings(voice=True)) == ASK
+    assert verdict(turns, settings=Settings(voice=True, engagement="reserved")) == SKIP

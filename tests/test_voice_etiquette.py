@@ -31,13 +31,29 @@ class FakeVoiceClient:
         self._after = after
         self.frames = []
 
+        self.paused = False
+        self.pauses = 0
+
         async def player():
-            while frame := source.read():
+            while True:
+                if self.paused:
+                    await asyncio.sleep(0.02)
+                    continue
+                frame = source.read()
+                if not frame:
+                    break
                 self.frames.append(frame)
                 await asyncio.sleep(0.02)
             after(None)
 
         self._task = asyncio.get_running_loop().create_task(player())
+
+    def pause(self):
+        self.paused = True
+        self.pauses += 1
+
+    def resume(self):
+        self.paused = False
 
     def stop(self):
         self.stopped = True
@@ -50,7 +66,7 @@ class FakeVoiceClient:
 @pytest.fixture
 def receiver(monkeypatch):
     monkeypatch.setattr(bot_mod, "etiquette", lambda voice: {
-        "barge_in": True, "barge_in_seconds": 0.3, "floor_gap": 0.2, "max_floor_wait": 0.8, "barge_in_min_rms": 0.03,
+        "barge_in": True, "barge_in_seconds": 0.3, "barge_in_confirm": 0.8, "floor_gap": 0.2, "max_floor_wait": 0.8, "barge_in_min_rms": 0.03,
     })
     r = bot_mod.VoiceReceiver(FakeVoiceClient(), text_channel=None)
     return r
@@ -110,26 +126,62 @@ async def test_gives_up_the_turn_if_people_keep_talking(receiver):
     talker.cancel()
 
 
-async def test_gives_up_the_turn_when_someone_says_something_new(receiver):
-    seq = receiver._utterance_seq
-    receiver._utterance_seq += 1
+def _said(r, user_id, text):
+    r._utterance_seq += 1
+    r._said[r._utterance_seq] = (user_id, text)
+    return r._utterance_seq
+
+
+async def test_gives_up_the_turn_when_the_same_person_says_more(receiver):
+    seq = _said(receiver, 1, "what's the best jungler")
+    _said(receiver, 1, "actually for emerald plus")
     assert not await receiver.wait_for_floor(seq)
+
+
+async def test_gives_up_the_turn_when_someone_talks_to_metis(receiver):
+    seq = _said(receiver, 1, "what's the best jungler")
+    _said(receiver, 2, "Metis, wait, answer me first")
+    assert not await receiver.wait_for_floor(seq)
+
+
+async def test_keeps_the_turn_when_someone_else_remarks(receiver):
+    """ "Which is true." from the other person dropped her answer; in a group she rarely got a word in."""
+    seq = _said(receiver, 1, "aatrox is useless right")
+    _said(receiver, 2, "Which is true.")
+    assert await receiver.wait_for_floor(seq)
 
 
 async def test_stops_talking_when_talked_over(receiver):
     async def interrupt():
         await asyncio.sleep(0.2)
-        for _ in range(20):
-            speak(receiver, 1, seconds_ago_started=0.5)
+        start = time.monotonic()
+        for _ in range(40):
+            receiver._activity[1] = [start, time.monotonic()]  # one long stretch of talking
             await asyncio.sleep(0.05)
 
     task = asyncio.create_task(interrupt())
     t0 = time.monotonic()
-    finished = await receiver._play(speech(3.0))
+    finished = await receiver._play(speech(4.0))
     task.cancel()
     assert finished is False
     assert receiver.voice_client.stopped
-    assert time.monotonic() - t0 < 1.5  # stopped well before the 3 s sentence ended
+    assert time.monotonic() - t0 < 2.5  # stopped well before the 4 s sentence ended
+
+
+async def test_short_reaction_pauses_then_carries_on(receiver):
+    """A laugh or "yeah" while she talks stopped her answer for good; now she pauses and carries on."""
+    async def laugh():
+        await asyncio.sleep(0.2)
+        start = time.monotonic()
+        for _ in range(8):  # 0.4 s of "ha ha"
+            receiver._activity[1] = [start, time.monotonic()]
+            await asyncio.sleep(0.05)
+
+    task = asyncio.create_task(laugh())
+    finished = await receiver._play(speech(1.5))
+    task.cancel()
+    assert finished is True
+    assert receiver.voice_client.pauses == 1 and not receiver.voice_client.stopped
 
 
 async def test_plays_to_the_end_when_nobody_interrupts(receiver):

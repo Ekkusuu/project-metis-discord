@@ -49,7 +49,8 @@ from backend.text_utils import (
 )
 from backend.turn_taking import (
     ADDRESSEE_CHOICES, ADDRESSEE_PROMPT, ASK, RESPOND, WAIT_OPEN, Settings, Turn, decide, transcript_for_model,
-    verdict_from_addressee, LEAVE_CHOICES, LEAVE_PROMPT, clearly_asks_to_leave, is_acknowledgement, might_ask_to_leave,
+    verdict_from_addressee, LEAVE_CHOICES, LEAVE_PROMPT, addressed_by_name, clearly_asks_to_leave, is_acknowledgement,
+    might_ask_to_leave, name_variants, spoken_names,
 )
 from backend.voice_service import TTS_SAMPLE_RATE, get_voice_service
 from backend import voice_compat
@@ -697,6 +698,9 @@ class VoiceReceiver:
         ecfg = etiquette(True)
         self.barge_in = bool(ecfg.get("barge_in", True))
         self.barge_in_seconds = float(ecfg.get("barge_in_seconds", 0.6))
+        # Talking over her pauses her; she only stops if they keep talking this long (laughter, "yeah" or
+        # "ha ha" during her answer stopped it for good).
+        self.barge_in_confirm = float(ecfg.get("barge_in_confirm", 1.5))
         self.barge_in_rms = float(ecfg.get("barge_in_min_rms", 0.03)) * 32768
         self.floor_gap = float(ecfg.get("floor_gap", 0.5))
         self.max_floor_wait = float(ecfg.get("max_floor_wait", 4.0))
@@ -705,6 +709,7 @@ class VoiceReceiver:
         # Voice activity per user: user id -> [start of current stretch of speech, last loud packet]
         self._activity: Dict[int, List[float]] = {}
         self._utterance_seq = 0  # bumps whenever someone finishes saying something
+        self._said: Dict[int, Tuple[int, str]] = {}  # seq -> (user id, text) of recent utterances
         self._buffer_lock = threading.Lock()
         self._respond_lock = asyncio.Lock()  # one spoken reply at a time
         self._speaking = False
@@ -755,6 +760,19 @@ class VoiceReceiver:
         with self._buffer_lock:
             return any(now - last < 0.3 and last - start >= for_at_least for start, last in self._activity.values())
 
+    def _superseded(self, seq: int) -> bool:
+        """
+        Should the reply to utterance `seq` be dropped for something said since? Only if the same person said
+        more (their newer turn is answered instead) or someone spoke to Metis. Any new line from anyone
+        dropped it before ("Which is true." from the other person), and in a group she rarely got a word in.
+        """
+        if self._utterance_seq == seq:
+            return False
+        to_user = self._said.get(seq, (None, ""))[0]
+        names = [v for n in bot_names() for v in name_variants(n)]
+        return any(user == to_user or addressed_by_name(spoken_names(text, names), names)
+                   for later, (user, text) in self._said.items() if later > seq)
+
     async def wait_for_floor(self, my_seq: int) -> bool:
         """
         Wait for a natural gap before speaking. Gives up (returns False) if people keep
@@ -763,7 +781,7 @@ class VoiceReceiver:
         deadline = time.monotonic() + self.max_floor_wait
         quiet_since = None
         while time.monotonic() < deadline:
-            if self._utterance_seq != my_seq:
+            if self._superseded(my_seq):
                 return False
             if self.someone_speaking():
                 quiet_since = None
@@ -816,6 +834,8 @@ class VoiceReceiver:
             # backchannel did, and she gave up nearly every turn.
             if not is_acknowledgement(text):
                 self._utterance_seq += 1
+                self._said[self._utterance_seq] = (utt.user.id, text)
+                self._said.pop(self._utterance_seq - 30, None)
             await self._respond(utt.user, text, t0, timings, self._utterance_seq)
         except Exception as e:
             import traceback
@@ -852,7 +872,7 @@ class VoiceReceiver:
         }))
 
         async with self._respond_lock:
-            if not self._active or self._utterance_seq != seq:
+            if not self._active or self._superseded(seq):
                 return  # someone already said something newer; that turn is handled instead
             t = time.perf_counter()
             alone = len(self.present_members()) <= 1
@@ -1089,9 +1109,14 @@ class VoiceReceiver:
             # Safety net: stop if the voice model stalls (no audio for 10 s) before finishing the sentence.
             while not done.is_set() and (source.finished or time.monotonic() - source.last_fed < 10):
                 if self.barge_in and self.someone_speaking(for_at_least=self.barge_in_seconds):
-                    interrupted = True  # someone is talking over her: stop, like a person would
-                    self.voice_client.stop()
-                    break
+                    # Someone talks over her: pause, and stop only if they keep talking, like a person would.
+                    self.voice_client.pause()
+                    if await self._keeps_talking():
+                        interrupted = True
+                        self.voice_client.stop()
+                        break
+                    print("⏯️ just a short reaction; carrying on")
+                    self.voice_client.resume()
                 try:
                     await asyncio.wait_for(done.wait(), timeout=0.05)
                 except asyncio.TimeoutError:
@@ -1108,6 +1133,23 @@ class VoiceReceiver:
                   f"({'she stopped' if interrupted else 'not enough to stop her'}; she stops after "
                   f"{self.barge_in_seconds}s at {self.barge_in_rms / 32768:.3f} or louder)")
         return not interrupted
+
+    async def _keeps_talking(self) -> bool:
+        """After someone talked over her: True if they keep going (a real interruption), False if it was a
+        short reaction (a laugh, "yeah", "wait what") and they went quiet again."""
+        deadline = time.monotonic() + self.barge_in_confirm + 2.5
+        quiet_since = None
+        while time.monotonic() < deadline:
+            if self.someone_speaking(for_at_least=self.barge_in_confirm):
+                return True
+            if self.someone_speaking():
+                quiet_since = None
+            else:
+                quiet_since = quiet_since or time.monotonic()
+                if time.monotonic() - quiet_since >= 0.5:
+                    return False
+            await asyncio.sleep(0.05)
+        return True
 
     @staticmethod
     def _print_timings(timings: Dict[str, float], stats: Dict[str, Any], total: float) -> None:

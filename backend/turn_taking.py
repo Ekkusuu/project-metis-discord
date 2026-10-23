@@ -284,6 +284,10 @@ def decide(
     if len(humans) >= 2:
         if mentions_name(text, metis_names):
             return Decision(ASK, "people are talking and mention Metis")
+        if is_question(text) and s.voice and s.engagement != "reserved":
+            # "Admit it, Aatrox is a terrible champion, right?" was for her, but every question in a group was
+            # skipped. The model looks at who it's for (a question to the other person stays theirs).
+            return Decision(ASK, "a question while people are talking")
         # Joining in now and then, like a friend in the call. Skipping all of it kept her silent for
         # minutes while two people talked, until they asked why she never says anything.
         quiet_since = before[metis_idx].ts if metis_idx is not None else (since_metis[0].ts if since_metis else now)
