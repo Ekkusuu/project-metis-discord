@@ -77,8 +77,10 @@ async def test_small_talk_runs_only_knowledge_search(fake_model):
     state, calls = fake_model
     result = await select_tools([], "[Sava]: lol nice", 2)
     assert [(c.tool_name, c.arguments) for c in result] == [("knowledge_search", {"query": "lol nice"})]
-    assert calls["decide"][0] == {"enum": ["none", "remember", "web_search"]}
+    assert calls["decide"] == []  # a plain statement doesn't even ask the model (it cost 0.2-0.7 s per line)
     assert calls["query"] == []
+    await select_tools([], "[Sava]: who is the best support?", 2)
+    assert calls["decide"][0] == {"enum": ["none", "remember", "web_search"]}
 
 
 async def test_web_search_choice_gets_a_generated_query(fake_model):

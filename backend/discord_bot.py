@@ -805,16 +805,15 @@ class VoiceReceiver:
         talking, or if someone said something new meanwhile (that gets its own turn).
         """
         deadline = time.monotonic() + self.max_floor_wait
-        quiet_since = None
         while time.monotonic() < deadline:
             if self._superseded(my_seq):
                 return False
-            if self.someone_speaking():
-                quiet_since = None
-            else:
-                quiet_since = quiet_since or time.monotonic()
-                if time.monotonic() - quiet_since >= self.floor_gap:
-                    return True
+            # Quiet since the last sound anyone made, not since this check started: counting from here added
+            # half a second to every reply even when everyone had long gone quiet.
+            with self._buffer_lock:
+                last_sound = max((last for _, last in self._activity.values()), default=0.0)
+            if time.monotonic() - last_sound >= self.floor_gap:
+                return True
             await asyncio.sleep(0.05)
         return False
 

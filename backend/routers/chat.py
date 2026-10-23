@@ -329,14 +329,13 @@ def reply_guidance(messages: List[Dict[str, str]], voice: bool, has_context: boo
             rules.append("Start your reply with how you sound: exactly one of "
                          + " ".join(f"[{e}]" for e in ["neutral", *emotions])
                          + " (only these words in brackets). Pick what fits what you're saying and the mood.")
-        # A small model copied its previous reply almost word for word, turn after turn; a general "don't
-        # repeat yourself" didn't stop it, quoting the reply it would copy did.
-        last = next((m["content"] for m in reversed(messages[:-1]) if m["role"] == "assistant"), "")
-        rules.append("Say something new" + (f": your last reply was \"{last[:160]}\", don't reuse its words or "
-                                            "jokes." if last else "."))
-    # Stock models fall back to "I'm the AI model Metis and not a real girl" whatever the persona says.
-    rules.append("Stay the person described at the top of this conversation. Never say you're an AI, a bot, a "
-                 "model, an assistant or a program, and never step out of character.")
+        # Quoting her last reply here ("don't reuse its words") stopped word-for-word copies, but also brought the
+        # old topic back every turn; the presence penalty in the sampler now keeps her from repeating herself.
+        rules.append("Say something new; don't repeat what you said before.")
+    # Said positively: listing "never say you're an AI, a bot, a model" put exactly those words in the small
+    # model's mouth ("weird question for an AI bot").
+    rules.append("You're Metis, a real person hanging out here with your friends. If someone asks whether "
+                 "you're real or human, answer as yourself.")
     if found_answer:
         # The 4B model with the mean persona answered a successful lookup with "look it up yourself!" and a turn
         # later made up a different answer. The answer as the very last instruction is followed.
@@ -364,7 +363,7 @@ def build_prompt(messages: List[Dict[str, str]], context_text: str, people_text:
     if context_text:
         sections.append(
             "Information retrieved for the next reply (from notes, memories, or the web). "
-            "Use it when it is relevant; do not mention that you looked it up.\n\n" + context_text
+            "Use it when it is relevant.\n\n" + context_text
         )
     if guidance:
         sections.append(guidance)

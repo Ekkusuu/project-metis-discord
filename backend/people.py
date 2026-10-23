@@ -229,16 +229,21 @@ class PeopleStore:
             people = json.loads(json.dumps(list(self.people.values())))
         return sorted(people, key=lambda p: p.get("last_seen", ""), reverse=True)
 
-    def profile_block(self, person_ids: Iterable[str], max_facts: int = 15) -> str:
-        """Prompt text describing the given people (most recent facts first)."""
+    def profile_block(self, person_ids: Iterable[str], max_facts: int = 8, others_max_facts: int = 4) -> str:
+        """
+        Prompt text describing the given people, most recent facts first. The first person (the one Metis is
+        answering) gets `max_facts`, the others fewer: 15 facts for everyone in a group call buried a small
+        model in trivia it then brought up out of nowhere.
+        """
         lines = []
         with self._lock:
-            for pid in dict.fromkeys(str(p) for p in person_ids):
+            for i, pid in enumerate(dict.fromkeys(str(p) for p in person_ids)):
                 person = self.people.get(pid)
                 if not person:
                     continue
                 aka = f" (also known as {', '.join(person['aliases'][-3:])})" if person.get("aliases") else ""
-                facts = [f["text"] for f in person["facts"][-max_facts:]]
+                limit = max_facts if i == 0 else others_max_facts
+                facts = [f["text"] for f in reversed(person["facts"][-limit:])]
                 body = "; ".join(facts) if facts else "nothing known yet"
                 lines.append(f"- {person['name']}{aka}: {body}")
         return "\n".join(lines)

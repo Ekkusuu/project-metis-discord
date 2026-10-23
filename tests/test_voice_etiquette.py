@@ -110,9 +110,18 @@ async def test_loud_packets_are_tracked_as_speech(receiver):
 
 async def test_waits_for_a_gap_before_speaking(receiver):
     seq = receiver._utterance_seq
+    speak(receiver, 1, seconds_ago_started=1.0, seconds_ago_last=0.05)  # just stopped talking
     t0 = time.monotonic()
     assert await receiver.wait_for_floor(seq)
-    assert time.monotonic() - t0 >= 0.2  # waited for the floor gap
+    assert 0.1 <= time.monotonic() - t0 < 0.4  # waited out the rest of the 0.2 s gap
+
+
+async def test_no_wait_when_everyone_is_already_quiet(receiver):
+    """Counting the gap from the start of the wait added half a second to every reply."""
+    speak(receiver, 1, seconds_ago_started=3.0, seconds_ago_last=2.0)
+    t0 = time.monotonic()
+    assert await receiver.wait_for_floor(receiver._utterance_seq)
+    assert time.monotonic() - t0 < 0.1
 
 
 async def test_gives_up_the_turn_if_people_keep_talking(receiver):
@@ -121,6 +130,7 @@ async def test_gives_up_the_turn_if_people_keep_talking(receiver):
             speak(receiver, 1, seconds_ago_started=1.0)
             await asyncio.sleep(0.05)
 
+    speak(receiver, 1, seconds_ago_started=1.0)
     talker = asyncio.create_task(keep_talking())
     assert not await receiver.wait_for_floor(receiver._utterance_seq)
     talker.cancel()

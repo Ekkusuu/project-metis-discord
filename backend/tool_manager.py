@@ -355,6 +355,13 @@ async def decide_tools(
     query_prompt = ((f"Last search: {last_query}\n\n" if follow_up else "")
                     + (f"Earlier messages:\n{said}\n\n" if said else "") + f"Latest message: {last_user_message}")
 
+    # A statement that isn't a question and matches none of the patterns below never gets a tool; asking the
+    # model anyway added 0.2-0.7 s to every line of a group call (about 40 times per search it picked).
+    if not (is_question_like(text) or _GO_AHEAD.match(text) or any(
+            p.search(text) for p in (_SEARCH_REQUEST, _FRESH_INFO, _FACT_ASK, _REMEMBER, _FOLLOW_UP, _NUDGE,
+                                     _CORRECTION))):
+        return calls
+
     try:
         choice = await asyncio.to_thread(
             json_completion,
