@@ -950,6 +950,8 @@ class VoiceReceiver:
         audio: asyncio.Queue[Optional[Tuple[str, SpeechStream]]] = asyncio.Queue()
         stats: Dict[str, Any] = {}
         state = {"outcome": "done", "spoken": []}
+        fillers: set = set()  # filler lines said while tools run ("one sec, I'll check")
+        filler_times: List[float] = []
 
         def stopped() -> bool:
             return state["outcome"] != "done"
@@ -993,7 +995,10 @@ class VoiceReceiver:
                 if not await self._play(speech):
                     state["outcome"] = "interrupted"
                     continue
-                state["spoken"].append(sentence)
+                if sentence not in fillers:
+                    # Fillers stay out of the history: with "One sec, I'll check. Okay, reading this." in her
+                    # past replies, the model started saying "I'll check" without anything being looked up.
+                    state["spoken"].append(sentence)
 
         synth_task = asyncio.create_task(synthesize())
         play_task = asyncio.create_task(play())
@@ -1002,22 +1007,31 @@ class VoiceReceiver:
         reply = ""
         emotion: Optional[str] = None  # "[teasing]" before a sentence sets the voice for the rest of the reply
 
-        async def say(sentence: str) -> None:
+        async def say(sentence: str, filler: bool = False) -> None:
             nonlocal emotion
             tagged, sentence = take_emotion(strip_name_prefix(sentence), service.emotions)
             emotion = tagged or emotion
             spoken = clean_for_speech(sentence)
             if len(spoken) > 1:
+                if filler:
+                    fillers.add(spoken)
                 await sentences.put((spoken, emotion))
 
         async def think_aloud(tool: str) -> None:
             # Remembering or searching takes a second or two: say so instead of going quiet, like a person would.
             if not sentences.empty():
                 return  # the last filler hasn't even been voiced yet; don't pile them up
+            # One per research step made six in 14 s ("Okay, reading this. Ooh, this looks right. Hmm, not
+            # there..."): space them out, and only a few per reply.
+            now = time.perf_counter()
+            gap = float(self.cfg.get("thinking_min_gap", 5))
+            if len(filler_times) >= int(self.cfg.get("thinking_max", 3)) or (filler_times and now - filler_times[-1] < gap):
+                return
             line = self._thinking_line(tool)
             if line:
+                filler_times.append(now)
                 print(f"🤔 {tool}: saying {line!r} while it runs")
-                await say(line)
+                await say(line, filler=True)
 
         try:
             async for delta in stream_reply(chat_payload(conversation, True, self.present_members()), stats,

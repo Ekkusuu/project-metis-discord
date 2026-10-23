@@ -67,6 +67,7 @@ def fake_model(monkeypatch):
 
     monkeypatch.setattr(tm, "json_completion", fake_json)
     monkeypatch.setattr(tm, "chat_completion", fake_chat)
+    monkeypatch.setattr(tm, "_last_search", {"time": 0.0, "query": ""})  # no search from an earlier test
     return state, calls
 
 
@@ -215,3 +216,42 @@ async def test_chat_stays_without_a_search(fake_model, message):
 
     result = await select_tools([], f"[Sava]: {message}", 2)
     assert "web_search" not in [c.tool_name for c in result]
+
+
+@pytest.mark.parametrize("message", ["Uh could you double-check, but this time for Emerald Plus?",
+                                     "Uh could you use u.g as reference?"])
+async def test_follow_ups_redo_the_last_search_with_its_site(fake_model, monkeypatch, message):
+    """The model said "none" to these and Metis kept saying "I'm pulling up u.gg" without searching."""
+    import time
+    import backend.tool_manager as tm
+    from backend.tool_manager import select_tools
+
+    state, calls = fake_model
+    state["query"] = "best champion win rate emerald plus site:u.gg"
+    monkeypatch.setitem(tm._last_search, "time", time.time())
+    monkeypatch.setitem(tm._last_search, "query", "best champion win rate site:u.gg")
+    result = await select_tools([], f"[Sava]: {message}", 2)
+    searches = [c.arguments["query"] for c in result if c.tool_name == "web_search"]
+    assert searches == ["best champion win rate emerald plus site:u.gg"]
+    assert "Last search: best champion win rate site:u.gg" in calls["query"][0][-1]["content"]
+
+
+async def test_no_follow_up_search_without_an_earlier_one(fake_model, monkeypatch):
+    import backend.tool_manager as tm
+    from backend.tool_manager import select_tools
+
+    monkeypatch.setitem(tm._last_search, "time", 0.0)
+    result = await select_tools([], "[Sava]: what about you?", 2)
+    assert "web_search" not in [c.tool_name for c in result]
+
+
+@pytest.mark.parametrize("metis, searches", [("I'll check u.gg for Emerald Plus right now.", True),
+                                             ("Thresh has the best win rate in Emerald Plus.", False)])
+async def test_nudges_search_only_after_a_promise(fake_model, metis, searches):
+    """"So are we checking?" after she said she'd check runs the search; after she answered, it doesn't."""
+    from backend.tool_manager import select_tools
+
+    messages = [{"role": "user", "content": "[Sava]: best champion for emerald plus on u.gg?"},
+                {"role": "assistant", "content": metis}, {"role": "user", "content": "[Sava]: So are we checking?"}]
+    result = await select_tools(messages, messages[-1]["content"], 2)
+    assert ("web_search" in [c.tool_name for c in result]) == searches

@@ -169,7 +169,25 @@ _QUERY_EXAMPLES = [
     # A correction replaces the earlier search instead of adding to it.
     ("Earlier messages:\n[Kai]: search what's the best phone right now\n\n"
      "Latest message: [Kai]: no, I meant the best phone camera", "best phone camera"),
+    # A follow-up changes one detail of the last search and keeps the rest (and its site).
+    ("Last search: best phone camera site:gsmarena.com\n\nEarlier messages:\n[Kai]: what's the best phone camera "
+     "on gsmarena\n\nLatest message: [Kai]: could you double-check, but this time under 300 dollars?",
+     "best phone camera under 300 dollars site:gsmarena.com"),
 ]
+# Refining or nudging the last search: "double-check, but this time for Emerald Plus", "so are we checking?",
+# "then do so". The model said "none" to all three and Metis kept promising to check without checking.
+_FOLLOW_UP = re.compile(
+    r"\b(double[- ]?check|check again|search again|look again|this time|instead|what about|how about|and for|"
+    r"same (thing|search|question)|(use|using|with) [\w.' -]{1,30} as (a |the )?(reference|source))\b", re.IGNORECASE)
+# Nudges ("so are we checking?", "then do so") only mean "search" if her last reply promised to check;
+# after she had already answered, "so are we checking?" searched the same thing again.
+_NUDGE = re.compile(r"\b(do (so|it|that)|go ahead|are (we|you) (still )?(checking|searching|looking)|"
+                    r"did you (check|find|look|search)|(any|the) results?|what did you find)\b", re.IGNORECASE)
+# Metis's reply said she'd look something up (she can't mid-reply; the next message should do it).
+_PROMISED = re.compile(r"\b(I'?ll|I will|let me|I'?m (going to|gonna|already)?\s*)\s*(check|look|search|pull|find|dig)"
+                       r"|\b(checking|searching|pulling (it |that )?up|looking (it |that )?up)\b", re.IGNORECASE)
+_SEARCH_MEMORY_SECONDS = 600
+_last_search: Dict[str, Any] = {"time": 0.0, "query": ""}
 # "Do it" / "go ahead" after Metis offered to look something up.
 _GO_AHEAD = re.compile(r"^\W*(then |so |ok(ay)? |yes |yeah |sure |please )*(do it|do that|go ahead|go for it|"
                        r"please do|yes please|search( it| for it)?|look it up|check)\W*$", re.IGNORECASE)
@@ -329,7 +347,11 @@ async def decide_tools(
     # a query built from it searches for her mistake ("roadster" when asked about news in France).
     # Further back than the decision context: "tell me the exact date" can come a few turns after the question.
     said = "\n".join(m["content"][:200] for m in [m for m in messages[:-1] if m.get("role") == "user"][-3:])
-    query_prompt = (f"Earlier messages:\n{said}\n\n" if said else "") + f"Latest message: {last_user_message}"
+    last_query = _last_search["query"] if time.time() - _last_search["time"] < _SEARCH_MEMORY_SECONDS else ""
+    # Only for follow-ups: shown for a new question, "Yasuo counter" became "Yasuo counter Emerald Plus".
+    follow_up = bool(last_query and (_FOLLOW_UP.search(text) or _NUDGE.search(text) or _CORRECTION.search(text)))
+    query_prompt = ((f"Last search: {last_query}\n\n" if follow_up else "")
+                    + (f"Earlier messages:\n{said}\n\n" if said else "") + f"Latest message: {last_user_message}")
 
     try:
         choice = await asyncio.to_thread(
@@ -348,6 +370,9 @@ async def decide_tools(
         if choice == "none" and "web_search" in decidable and _CORRECTION.search(text) and (
                 _SEARCH_REQUEST.search(said) or (is_question_like(said) and _FRESH_INFO.search(said))):
             choice = "web_search"
+        if choice == "none" and "web_search" in decidable and (
+                (_FOLLOW_UP.search(text) and last_query) or (_NUDGE.search(text) and _PROMISED.search(last_metis))):
+            choice = "web_search"
         if choice == "none" and "remember" in decidable and _REMEMBER.search(text):
             choice = "remember"
         if choice == "remember":
@@ -365,8 +390,11 @@ async def decide_tools(
             )
             written = query.strip().strip('"').splitlines()[0].strip() if query.strip() else ""
             metis_said = " ".join(m["content"][:200] for m in recent if m["role"] == "assistant")
-            grounded = grounded_query(written, f"{said} {text}", metis_said, text)
-            query = keep_named_site(grounded, text)
+            grounded = grounded_query(written, f"{said} {text} {last_query}", metis_said, text)
+            # A follow-up ("this time for Emerald Plus") keeps the site the last search was limited to.
+            query = keep_named_site(grounded, f"{text} {last_query}" if follow_up else text)
+            if choice == "web_search":
+                _last_search.update(time=time.time(), query=query)
             arguments: Dict[str, Any] = {_first_string_param(decidable[choice]): query}
             if choice == "web_search" and _NEWS.search(text):
                 arguments["search_type"] = "news"

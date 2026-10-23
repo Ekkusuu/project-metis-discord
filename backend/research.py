@@ -30,7 +30,9 @@ dates, and which site says so
 Rules:
 - Snippets are short and often outdated. Open pages before answering with numbers, prices, rankings, \
 dates or lists, unless a snippet states the answer plainly.
-- If the pages don't have it, search again with different words or open other results.
+- If a page could not be read, open a different result; don't answer numbers or rankings from snippets.
+- If the pages don't have it, search again with different words or open other results. After 2-3 tries \
+that find nothing, give up with the closest thing you found.
 - Don't open a result you already read; it gives the same text.
 - If they asked about a particular website, answer with what that website says.
 - Use only what you read. Never guess or fill in from memory.
@@ -116,7 +118,15 @@ async def _search(query: str, kind: str = "text", count: int = 6) -> List[Dict[s
     # Both at once: waiting for a misheard site: search to fail first cost 3 s.
     exact, loose = await asyncio.gather(_search_once(query, kind, count),
                                         _search_once(re.sub(r"\bsite:\S+", site, query).strip(), kind, count))
-    return exact or loose
+    if exact:
+        return exact
+    # The misheard site is probably the closest domain among the plain results ("u.g" -> u.gg): put its pages first.
+    from difflib import SequenceMatcher
+
+    def closeness(r: Dict[str, Any]) -> float:
+        return SequenceMatcher(None, site, _domain(r["url"])).ratio()
+
+    return sorted(loose, key=lambda r: -closeness(r) if closeness(r) >= 0.75 else 0)
 
 
 async def _read(url: str, question: str, max_chars: int) -> str:
@@ -171,8 +181,12 @@ async def research(question: str, query: str, earlier: str = "", *, max_steps: i
     system = _SYSTEM.format(today=datetime.date.today().strftime("%d %B %Y"))
 
     async def run_search(q: str, kind: str) -> str:
-        if q in searches:
-            return f"{kind} {q!r}: already searched; try different words or open a result."
+        # Adding a word to the last search ("... Patch 26.20" then "... Patch 26.20 tier list") gave the same
+        # results twice and used up the steps.
+        words = set(re.findall(r"\w+", q.lower()))
+        if any(len(words & set(re.findall(r"\w+", s.lower()))) >= 0.75 * len(words) for s in searches):
+            return (f"{kind} {q!r}: almost the same as an earlier search, it gives the same results. "
+                    "Open a result you haven't read, search for something different, or answer.")
         if searches and notify:
             notify("web_search_more")  # "hmm, not there, let me check somewhere else"
         searches.append(q)
@@ -205,7 +219,7 @@ async def research(question: str, query: str, earlier: str = "", *, max_steps: i
         for url, text in zip(urls, texts):
             if text:
                 sources.append(_domain(url))
-            out.append(f"Page {_domain(url)}:\n{text or '(could not be read)'}")
+            out.append(f"Page {_domain(url)}:\n{text or '(could not be read: the site blocks readers. Open a different result.)'}")
         skipped = f" (already read: {', '.join(_domain(u) for u in again)})" if again else ""
         return f"open {target}{skipped}:\n" + "\n\n".join(out)
 

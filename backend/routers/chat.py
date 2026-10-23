@@ -295,6 +295,12 @@ def reply_guidance(messages: List[Dict[str, str]], voice: bool, has_context: boo
         rules.append("You can search the web, and you already did for this message: the results are above. "
                      "Say what they found (the date, number, name or event). Don't offer to search, and don't "
                      "say you can't look things up. If the results don't answer it, say you couldn't find it.")
+    else:
+        # Metis searches by itself before she replies; she can't start a search mid-reply. Without this she said
+        # "I'm already pulling up u.gg for Emerald Plus" three turns in a row and made up what "Esports.gg" says.
+        rules.append("You did not look anything up for this message. Never say you are checking, will check or "
+                     "checked a website or the web, and never say what a site says. If they want something "
+                     "looked up, ask what exactly to look up.")
     if voice:
         # Personas that roleplay replied with only "*checks phone, rolls her eyes*", which the voice
         # can't say, and the mean one wrapped every reply in quotes.

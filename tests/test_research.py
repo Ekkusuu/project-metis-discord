@@ -86,7 +86,7 @@ def test_repeated_search_and_bad_open_are_explained(monkeypatch):
         _step("search", "best budget laptop site:notebookcheck.net"), _step("open", "9"), _step("answer", "x")],
         [_fake_results("a.com")])
     assert len(searches) == 1 and opened == []
-    assert "already searched" in prompts[1][0] and "give result numbers" in prompts[2][0]
+    assert "almost the same as an earlier search" in prompts[1][0] and "give result numbers" in prompts[2][0]
 
 
 def test_visible_text_used_for_data_pages(monkeypatch):
@@ -201,3 +201,11 @@ def test_video_pages_are_not_opened(monkeypatch):
                                     [_fake_results("youtube.com", "a.com")])
     assert opened == ["https://a.com/page"]
     assert "(video/social, can't be read)" in prompts[0][0]
+
+
+def test_near_duplicate_search_is_refused(monkeypatch):
+    """"... Patch 26.20" then "... Patch 26.20 tier list" gave the same results and used up the steps."""
+    _, searches, _, _, prompts = _run(monkeypatch, [
+        _step("search", "best budget laptop notebookcheck"), _step("search", "best chess opening"),
+        _step("answer", "x")], [_fake_results("a.com"), _fake_results("b.com")])
+    assert len(searches) == 2 and "almost the same" in prompts[1][0] and prompts[2][0].count("almost the same") == 1
