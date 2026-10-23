@@ -40,9 +40,15 @@ const CONTEXT_SIZE = modelCfg.n_ctx || 8192;
 // Set to 0 to share the main context (saves VRAM).
 const AUX_CONTEXT_SIZE = serviceCfg.aux_context_size ?? 4096;
 
+// Qwen3.5's recommended non-thinking sampling: temperature 0.7, top_p 0.8, top_k 20, presence penalty 1.5,
+// no repetition penalty. The old repetition penalty of 1.15 made a 4B model avoid the words it needed and
+// drift into odd phrasing.
 const DEFAULTS = {
   temperature: chatCfg.temperature ?? 0.7,
-  topP: chatCfg.top_p ?? 0.95,
+  topP: chatCfg.top_p ?? 0.8,
+  topK: chatCfg.top_k ?? 20,
+  presencePenalty: chatCfg.presence_penalty ?? 1.5,
+  repeatPenalty: chatCfg.repeat_penalty ?? 1.0,
   maxTokens: chatCfg.max_tokens ?? 512,
 };
 
@@ -219,11 +225,11 @@ function samplingOptions(body) {
   return {
     temperature: body.temperature ?? DEFAULTS.temperature,
     topP: body.top_p ?? DEFAULTS.topP,
+    topK: body.top_k ?? DEFAULTS.topK,
     maxTokens: body.max_tokens ?? DEFAULTS.maxTokens,
     repeatPenalty: {
-      penalty: body.repeat_penalty ?? 1.15,
-      frequencyPenalty: 0.1,
-      presencePenalty: 0.1,
+      penalty: body.repeat_penalty ?? DEFAULTS.repeatPenalty,
+      presencePenalty: body.presence_penalty ?? DEFAULTS.presencePenalty,
     },
   };
 }

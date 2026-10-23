@@ -369,7 +369,7 @@ def _sampling(req: ChatRequest) -> Dict[str, Any]:
     chat_cfg = get_config().get("chat", {})
     return {
         "temperature": req.temperature if req.temperature is not None else chat_cfg.get("temperature", 0.7),
-        "top_p": req.top_p if req.top_p is not None else chat_cfg.get("top_p", 0.95),
+        "top_p": req.top_p if req.top_p is not None else chat_cfg.get("top_p", 0.8),
         "max_tokens": req.max_tokens if req.max_tokens is not None else chat_cfg.get("max_tokens", 512),
     }
 

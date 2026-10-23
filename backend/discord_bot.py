@@ -210,6 +210,10 @@ class Conversation:
         async with self.lock:
             snapshot = self.prompt()
             budget = context_budget() - 1536  # leave room for people memory + tool context
+            if self.mode == "voice":
+                # A 4B model loses the thread in thousands of tokens of group chatter (tangents, old topics
+                # coming back); a call only needs the last few minutes.
+                budget = min(budget, int(config.get("voice", {}).get("history_tokens", 3000)))
             if await asyncio.to_thread(count_message_tokens, snapshot) <= budget:
                 return
             _, removed = await asyncio.to_thread(split_to_fit, snapshot, int(budget * 0.7))
@@ -458,7 +462,7 @@ def chat_payload(conversation: Conversation, voice_mode: bool, present: Optional
         "participants": conversation.participants(),
         "present": present or [],
         "temperature": chat_cfg.get("temperature", 0.7),
-        "top_p": chat_cfg.get("top_p", 0.95),
+        "top_p": chat_cfg.get("top_p", 0.8),
         "max_tokens": (voice_cfg if voice_mode else chat_cfg).get("max_tokens", chat_cfg.get("max_tokens", 512)),
         "voice_mode": voice_mode,
         "chiming_in": conversation.chiming_in,
@@ -867,6 +871,7 @@ class VoiceReceiver:
         conversation = self.conversation
         async with conversation.lock:
             entry = conversation.add_user(user, text)
+        asyncio.create_task(conversation.compact())  # side chatter grows the history too, not only her replies
         await asyncio.to_thread(remember_speaker, user)
         conversation.maybe_learn()
         channel_label = self.voice_client.channel.name  # the dashboard shows a voice badge

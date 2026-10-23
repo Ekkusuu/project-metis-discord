@@ -193,7 +193,7 @@ def test_personalities_can_be_added_edited_and_deleted(prompts_copy):
     from backend.personality_store import delete, raw_prompt, save
 
     original = yaml.safe_load(prompts_copy.read_text(encoding="utf-8"))
-    assert raw_prompt("casual", "voice_chat").startswith("You are Metis, a casual")
+    assert raw_prompt("casual", "voice_chat").startswith("You are Metis, a girl")
 
     save("pirate", {"text_chat": "You are Metis, a pirate.\nSay arr.", "voice_chat": "You are Metis, a pirate.\n\n  No emoji."})
     data = yaml.safe_load(prompts_copy.read_text(encoding="utf-8"))
