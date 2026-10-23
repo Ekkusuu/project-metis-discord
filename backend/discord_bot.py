@@ -48,9 +48,9 @@ from backend.text_utils import (
     take_emotion,
 )
 from backend.turn_taking import (
-    ADDRESSEE_CHOICES, ADDRESSEE_PROMPT, ASK, RESPOND, WAIT_OPEN, Settings, Turn, decide, transcript_for_model,
-    verdict_from_addressee, LEAVE_CHOICES, LEAVE_PROMPT, addressed_by_name, clearly_asks_to_leave, is_acknowledgement,
-    might_ask_to_leave, name_variants, spoken_names,
+    ADDRESSEE_CHOICES, ADDRESSEE_PROMPT, ASK, RESPOND, SKIP, WAIT_OPEN, Decision, Settings, Turn, decide,
+    transcript_for_model, verdict_from_addressee, LEAVE_CHOICES, LEAVE_PROMPT, addressed_by_name,
+    clearly_asks_to_leave, is_acknowledgement, might_ask_to_leave, name_variants, spoken_names,
 )
 from backend.voice_service import TTS_SAMPLE_RATE, get_voice_service
 from backend import voice_compat
@@ -291,12 +291,13 @@ def bot_names() -> List[str]:
     return [n for n in names if n]
 
 
-async def ask_addressee(conversation: Conversation) -> str:
+async def ask_addressee(conversation: Conversation, turns: Optional[List[Turn]] = None) -> str:
     """One constrained model call: who is the last message meant for? (ambiguous cases only)"""
+    turns = turns if turns is not None else conversation.turns()
     payload = {
         "messages": [
             {"role": "system", "content": ADDRESSEE_PROMPT},
-            {"role": "user", "content": "Chat:\n" + transcript_for_model(conversation.turns(), conversation.names_by_id())
+            {"role": "user", "content": "Chat:\n" + transcript_for_model(turns, conversation.names_by_id())
                                         + "\n\nWho is the LAST message meant for?"},
         ],
         "json_schema": {"enum": ADDRESSEE_CHOICES},
@@ -360,15 +361,20 @@ async def is_metis_turn(conversation: Conversation, *, is_dm: bool = False, voic
     if settings.engagement == "always":
         return True
     turns = conversation.turns()
+    replied_since = False
     while turns and turns[-1].is_metis:
+        replied_since = True
         # A message said while she was replying is judged after her reply was added; judged as it was, the
         # newest line was hers ("nothing new from a person") and "Metis, can you search ..." was dropped.
         turns = turns[:-1]
     decision = decide(turns, bot.user.id if bot.user else 0, bot_names(), conversation.names_by_id(),
                       is_dm=is_dm, alone_with_metis=alone_with_metis, settings=settings)
     if decision.verdict == ASK:
-        addressee = await ask_addressee(conversation)
+        addressee = await ask_addressee(conversation, turns)
         decision = verdict_from_addressee(addressee, settings, turns[-1].text)
+    if replied_since and decision.verdict == RESPOND and decision.signals.get("chime"):
+        # Lines said while she was talking: she just spoke, so she isn't "joining in" again (three chimes in a row).
+        decision = Decision(SKIP, "she just spoke")
     conversation.chiming_in = bool(decision.signals.get("chime"))
     icon = {RESPOND: "✅", WAIT_OPEN: "⏳"}.get(decision.verdict, "🤐")
     print(f"{icon} [{turns[-1].name}] {decision.verdict}: {decision.reason}")

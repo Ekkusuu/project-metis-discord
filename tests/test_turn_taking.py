@@ -270,3 +270,18 @@ def test_anyone_answering_her_question_gets_a_reply():
     assert verdict(turns, settings=Settings(voice=True, continuation_window=30)) == RESPOND
     statement = [t(EKK, "Hello, Metis.", 10), t(None, "Hey there.", 6, to=EKK), t(SAVA, "Pretty good.")]
     assert verdict(statement, settings=Settings(voice=True, continuation_window=30)) != RESPOND
+
+
+def test_talking_about_her_as_she_goes_to_the_model_and_she_reacts():
+    """"She's actually right" and "she really likes Shaco counters" were about Metis but skipped or misread."""
+    from backend.turn_taking import verdict_from_addressee
+    turns = [t(EKK, "is shaco good", 20), t(None, "Shaco counters Kindred best.", 15, to=EKK),
+             t(SAVA, "no way", 10), t(EKK, "Wait, she's actually right.")]
+    assert verdict(turns, settings=Settings(voice=True)) == ASK
+    assert verdict_from_addressee("talking about Metis", Settings(voice=True)).verdict == RESPOND
+    assert verdict_from_addressee("talking about Metis", Settings(voice=True, engagement="reserved")).verdict == SKIP
+
+
+def test_name_set_off_by_commas_mid_sentence_addresses_metis():
+    assert addressed_by_name("Also, Metis, please do talk with Whimsy.", ["metis"])
+    assert not addressed_by_name("I told metis, and she laughed", ["metis"])

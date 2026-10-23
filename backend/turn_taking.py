@@ -162,6 +162,9 @@ def addressed_by_name(text: str, names: Iterable[str]) -> bool:
         n = re.escape(name)
         if re.search(rf"@{n}(?![\w'’])", low):
             return True
+        # Set off by commas mid-sentence: "Also, Metis, please do talk with Whimsy."
+        if re.search(rf"(?:^|[,;]\s*|\b(?:also|and|so|but|ok|okay|well|yo)\s+){n}\s*,", low):
+            return True
         if re.search(rf"^\W*{_GREETING}[\s,!]+{n}(?![\w'’])", low):
             return True
         if re.search(rf"^\W*{n}(?![\w'’]){_AFTER_VOCATIVE}", low):
@@ -184,6 +187,9 @@ _QUESTION_START = re.compile(
     r"can|could|would|will|should|shall|have|has|any)\b",
     re.IGNORECASE,
 )
+
+
+_ABOUT_HER = re.compile(r"\b(she|she's|shes|her|hers|herself)\b", re.IGNORECASE)
 
 
 def is_question(text: str) -> bool:
@@ -289,6 +295,9 @@ def decide(
     if len(humans) >= 2:
         if mentions_name(text, metis_names):
             return Decision(ASK, "people are talking and mention Metis")
+        if s.voice and _ABOUT_HER.search(text) and metis_idx is not None and now - before[metis_idx].ts <= 90:
+            # "She's actually right", "she really likes Shaco counters": talking about her, without her name.
+            return Decision(ASK, "people may be talking about Metis")
         if is_question(text) and s.voice and s.engagement != "reserved":
             # "Admit it, Aatrox is a terrible champion, right?" was for her, but every question in a group was
             # skipped. The model looks at who it's for (a question to the other person stays theirs).
@@ -332,11 +341,14 @@ def _spoke_just_before(turns: Sequence[Turn], metis_idx: int, speaker_id: Option
 # ---------------------------------------------------------------------------
 # Model fallback for the ambiguous cases
 # ---------------------------------------------------------------------------
-ADDRESSEE_CHOICES = ["Metis", "another person in the chat", "everyone in the chat", "nobody in particular"]
+ADDRESSEE_CHOICES = ["Metis", "talking about Metis", "another person in the chat", "everyone in the chat",
+                     "nobody in particular"]
 
 ADDRESSEE_PROMPT = """You read a Discord chat that includes an AI companion called Metis.
 Decide who the LAST message is meant for.
 - Metis: it talks to Metis, asks her something, or continues a conversation with her.
+- talking about Metis: people talk about Metis to each other, often as "she" or "her" ("she's right", \
+"she really likes that"). In a voice chat "she" or "her" without a name usually means Metis.
 - another person in the chat: it continues a conversation between people, or answers someone.
 - everyone in the chat: it is said to the whole group.
 - nobody in particular: thinking out loud, a status update, a reaction.
@@ -423,6 +435,9 @@ def verdict_from_addressee(addressee: str, settings: Optional[Settings] = None, 
     s = settings or Settings()
     if addressee == "Metis":
         return Decision(RESPOND, "the model thinks it's for Metis")
+    if addressee == "talking about Metis" and s.engagement != "reserved":
+        # Like a person hearing friends talk about her, she reacts ("she's actually right" got no reply).
+        return Decision(RESPOND, "people are talking about Metis")
     if addressee == "everyone in the chat":
         if s.engagement == "reserved":
             return Decision(SKIP, "said to everyone (reserved mode)")

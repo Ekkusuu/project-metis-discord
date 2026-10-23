@@ -131,7 +131,9 @@ def recent_lookups_text() -> str:
     fresh = [(q, a) for t, q, a in _recent_lookups if time.time() - t < _LOOKUP_MEMORY_SECONDS]
     if not fresh:
         return ""
-    return "What you looked up on the web in the last few minutes:\n" + "\n".join(
+    # "Only if asked": with the Shaco counters here she steered every reply back to them for ten minutes.
+    return ("What you looked up on the web in the last few minutes (only bring it up if they ask about it "
+            "again):\n") + "\n".join(
         f"- {q[:150]} -> {a}" for q, a in fresh)
 
 
@@ -253,6 +255,10 @@ def people_context(req: ChatRequest) -> str:
             "else, and don't start your reply with a name in brackets."
             # In voice an @ is read out (and she started pinging herself: "@Metis it's 13 degrees").
             + ("" if req.voice_mode else " To ping someone, write @ and their name.")
+            # Told "she really likes Shaco counters", she answered "Yeah, she's pretty obsessed with those
+            # stats", and "she's actually right" got an argument: she didn't see they meant her.
+            + (' When people in the call say "she" or "her" without another name, they usually mean you, '
+               'Metis. Talk about yourself as "I" and "me", never as "she" or "Metis".' if req.voice_mode else "")
         )
     if req.present:
         parts.append("In the voice channel right now: " + ", ".join(req.present))
@@ -322,6 +328,9 @@ def reply_guidance(messages: List[Dict[str, str]], voice: bool, has_context: boo
         last = next((m["content"] for m in reversed(messages[:-1]) if m["role"] == "assistant"), "")
         rules.append("Say something new" + (f": your last reply was \"{last[:160]}\", don't reuse its words or "
                                             "jokes." if last else "."))
+    # Stock models fall back to "I'm the AI model Metis and not a real girl" whatever the persona says.
+    rules.append("Stay the person described at the top of this conversation. Never say you're an AI, a bot, a "
+                 "model, an assistant or a program, and never step out of character.")
     if found_answer:
         # The 4B model with the mean persona answered a successful lookup with "look it up yourself!" and a turn
         # later made up a different answer. The answer as the very last instruction is followed.
