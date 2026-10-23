@@ -270,6 +270,11 @@ def decide(
             if is_acknowledgement(text):
                 return Decision(SKIP, "acknowledgement that needs no answer")
             return Decision(RESPOND, "continuing an exchange with Metis")
+        # The first answer to a question she just asked, whoever gives it: she asked ekkusu "how's your day?",
+        # okeida said "Pretty good." and the model thought that was for someone else.
+        if (not since and metis_turn.text.rstrip().endswith("?") and now - metis_turn.ts <= s.continuation_window
+                and not is_acknowledgement(text)):
+            return Decision(RESPOND, "answering Metis's question")
 
     # 4. Questions to the whole room: humans get the first chance
     if is_room_question(text):

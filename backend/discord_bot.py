@@ -360,6 +360,10 @@ async def is_metis_turn(conversation: Conversation, *, is_dm: bool = False, voic
     if settings.engagement == "always":
         return True
     turns = conversation.turns()
+    while turns and turns[-1].is_metis:
+        # A message said while she was replying is judged after her reply was added; judged as it was, the
+        # newest line was hers ("nothing new from a person") and "Metis, can you search ..." was dropped.
+        turns = turns[:-1]
     decision = decide(turns, bot.user.id if bot.user else 0, bot_names(), conversation.names_by_id(),
                       is_dm=is_dm, alone_with_metis=alone_with_metis, settings=settings)
     if decision.verdict == ASK:
@@ -978,6 +982,7 @@ class VoiceReceiver:
         stats: Dict[str, Any] = {}
         state = {"outcome": "done", "spoken": []}
         fillers: set = set()  # filler lines said while tools run ("one sec, I'll check")
+        to_user = self._said.get(seq, (None, ""))[0]  # who she's answering
         filler_times: List[float] = []
 
         def stopped() -> bool:
@@ -1019,7 +1024,7 @@ class VoiceReceiver:
                         continue
                     timings["first_audio"] = time.perf_counter() - t0
                     first = False
-                if not await self._play(speech):
+                if not await self._play(speech, can_interrupt=sentence not in fillers, to_user=to_user):
                     state["outcome"] = "interrupted"
                     continue
                 if sentence not in fillers:
@@ -1083,7 +1088,7 @@ class VoiceReceiver:
         stats["raw_reply"] = reply
         return " ".join(state["spoken"]), stats, state["outcome"]
 
-    async def _play(self, source: SpeechStream) -> bool:
+    async def _play(self, source: SpeechStream, can_interrupt: bool = True, to_user: Optional[int] = None) -> bool:
         """
         Play speech, also while it's still being generated (no temp files or FFmpeg process).
         Returns False if a person talked over Metis and she stopped (barge-in).
@@ -1108,10 +1113,11 @@ class VoiceReceiver:
             self.voice_client.play(source, after=after)
             # Safety net: stop if the voice model stalls (no audio for 10 s) before finishing the sentence.
             while not done.is_set() and (source.finished or time.monotonic() - source.last_fed < 10):
-                if self.barge_in and self.someone_speaking(for_at_least=self.barge_in_seconds):
+                # A filler ("hold on...") isn't interrupted: stopping it cancelled the answer that was coming.
+                if can_interrupt and self.barge_in and self.someone_speaking(for_at_least=self.barge_in_seconds):
                     # Someone talks over her: pause, and stop only if they keep talking, like a person would.
                     self.voice_client.pause()
-                    if await self._keeps_talking():
+                    if await self._keeps_talking(to_user):
                         interrupted = True
                         self.voice_client.stop()
                         break
@@ -1134,13 +1140,18 @@ class VoiceReceiver:
                   f"{self.barge_in_seconds}s at {self.barge_in_rms / 32768:.3f} or louder)")
         return not interrupted
 
-    async def _keeps_talking(self) -> bool:
+    async def _keeps_talking(self, to_user: Optional[int] = None) -> bool:
         """After someone talked over her: True if they keep going (a real interruption), False if it was a
-        short reaction (a laugh, "yeah", "wait what") and they went quiet again."""
-        deadline = time.monotonic() + self.barge_in_confirm + 2.5
+        short reaction (a laugh, "yeah", "wait what") and they went quiet again. Someone other than the person
+        she's answering has to talk twice as long: a side comment stopped her answer to someone else."""
+        deadline = time.monotonic() + 2 * self.barge_in_confirm + 2.5
         quiet_since = None
         while time.monotonic() < deadline:
-            if self.someone_speaking(for_at_least=self.barge_in_confirm):
+            now = time.monotonic()
+            with self._buffer_lock:
+                stretches = list(self._activity.items())
+            if any(now - last < 0.3 and last - start >= self.barge_in_confirm * (1 if to_user in (None, uid) else 2)
+                   for uid, (start, last) in stretches):
                 return True
             if self.someone_speaking():
                 quiet_since = None

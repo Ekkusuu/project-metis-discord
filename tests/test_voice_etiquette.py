@@ -247,3 +247,32 @@ async def test_text_reply_goes_ahead_when_nobody_types(monkeypatch):
     conv = bot_mod.Conversation(mode="text")
     conv.latest_id = 1
     assert await bot_mod.wait_until_quiet(556, 1, conv) is True
+
+
+async def test_filler_is_not_interrupted(receiver):
+    """okeida talking over "Hold on..." cancelled the answer that had just been found."""
+    async def talk():
+        start = time.monotonic()
+        for _ in range(30):
+            receiver._activity[1] = [start, time.monotonic()]
+            await asyncio.sleep(0.05)
+
+    task = asyncio.create_task(talk())
+    finished = await receiver._play(speech(1.0), can_interrupt=False)
+    task.cancel()
+    assert finished is True and receiver.voice_client.pauses == 0
+
+
+async def test_side_comment_from_someone_else_needs_longer(receiver):
+    """Talking over her answer to someone else stops her only after twice as long."""
+    async def comment():
+        await asyncio.sleep(0.1)
+        start = time.monotonic()
+        for _ in range(22):  # ~1.1 s: past barge_in_confirm (0.8) but short of 2x
+            receiver._activity[2] = [start, time.monotonic()]
+            await asyncio.sleep(0.05)
+
+    task = asyncio.create_task(comment())
+    finished = await receiver._play(speech(2.5), to_user=1)
+    task.cancel()
+    assert finished is True and receiver.voice_client.pauses == 1

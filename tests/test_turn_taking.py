@@ -262,3 +262,11 @@ def test_question_during_group_talk_goes_to_the_model_in_voice():
              t(SAVA, "Admit this, Aatrox is a terrible champion, right?")]
     assert verdict(turns, settings=Settings(voice=True)) == ASK
     assert verdict(turns, settings=Settings(voice=True, engagement="reserved")) == SKIP
+
+
+def test_anyone_answering_her_question_gets_a_reply():
+    """She asked ekkusu "how's your day going?", okeida said "Pretty good." and she skipped it."""
+    turns = [t(EKK, "Hello, Metis.", 10), t(None, "Hey there! How's your day going?", 6, to=EKK), t(SAVA, "Pretty good.")]
+    assert verdict(turns, settings=Settings(voice=True, continuation_window=30)) == RESPOND
+    statement = [t(EKK, "Hello, Metis.", 10), t(None, "Hey there.", 6, to=EKK), t(SAVA, "Pretty good.")]
+    assert verdict(statement, settings=Settings(voice=True, continuation_window=30)) != RESPOND
