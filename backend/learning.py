@@ -22,6 +22,9 @@ from backend.people import get_people
 _SYSTEM = (
     "You help an AI companion remember people. Given the messages one person wrote, list the lasting facts "
     "they reveal about themselves, one short phrase per line, without their name. Only what they actually said. "
+    "Only things a friend would still remember next week: their job or studies, where they live, family, pets, "
+    "hobbies, games they play, what they like or dislike. Not what they mention, think or claim about the topic "
+    "of the moment. "
     "Skip greetings, moods and small talk, and skip what they asked about or asked Metis to do: a question "
     "is not a fact about the person, and asking about something once doesn't mean they love it. Don't exaggerate "
     "what they said. If there is nothing worth remembering, write NONE."
@@ -93,8 +96,28 @@ def _speakers(messages: List[Dict[str, Any]]) -> Dict[str, str]:
     return speakers
 
 
+# Passing remarks the model turns into "facts": "mentions Emerald Plus", "thinks Claude hoarded something",
+# "suggests using a subscription API", "claims to be behaving sober". In voice, with misheard words, they also
+# go wrong ("develops a TTS model named Gwen" for Qwen), and Metis then brought them up as if they mattered.
+_PASSING_REMARK = re.compile(
+    r"^(mentions?|mentioned|thinks|thought|believes?|claims?|claimed|suggests?|suggested|says|said|talks? about|"
+    r"talked about|found|finds|knows about|is talking|was talking|agrees?|disagrees?|notes?|noticed|"
+    r"wonders?|hopes?|guesses|expects?|assumes?|wants to try|is concerned|is planning|enjoys discussing|"
+    r"likes (to talk|talking|discussing) about)\b",
+    re.IGNORECASE,
+)
+
+
+_ABOUT_SELF = re.compile(r"\b(i|i'm|im|i've|ive|i'd|i'll|my|me|mine|myself)\b", re.IGNORECASE)
+
+
+def is_lasting(fact: str) -> bool:
+    """False for remarks about the moment rather than the person (see _PASSING_REMARK, _TRANSIENT, _NOT_ABOUT_THEM)."""
+    return not (_TRANSIENT.match(fact) or _NOT_ABOUT_THEM.search(fact) or _PASSING_REMARK.match(fact))
+
+
 def person_view(messages: List[Dict[str, Any]], name: str) -> Tuple[str, str]:
-    """(prompt view of `name`'s messages with one line of context each, their own text lowercased)."""
+    """(prompt view of `name`'s messages with one line of context each, what they said about themselves, lowercased)."""
     lines: List[str] = []
     own: List[str] = []
     for i, m in enumerate(messages):
@@ -107,7 +130,11 @@ def person_view(messages: List[Dict[str, Any]], name: str) -> Tuple[str, str]:
                 lines.append(f"(context) {prev_name}: {_text(prev)[:300]}")
         text = _text(m)
         lines.append(f"{name}: {text}")
-        own.append(text.lower())
+        # Only what they say about themselves counts as evidence. Reading out someone else's list ("okeida
+        # trains voice models, owns a device running Gemini") or teasing Metis ("you do like ...") became
+        # facts about the speaker.
+        if _ABOUT_SELF.search(text):
+            own.append(text.lower())
     return "\n".join(lines), " ".join(own)
 
 
@@ -146,8 +173,7 @@ def extract_facts(messages: List[Dict[str, Any]], name: str) -> List[str]:
     facts = []
     for line in response.splitlines():
         fact = _clean_fact(line, name)
-        if (not fact or fact.upper() == "NONE" or len(fact) > 160 or _TRANSIENT.match(fact)
-                or _NOT_ABOUT_THEM.search(fact)):
+        if not fact or fact.upper() == "NONE" or len(fact) > 160 or not is_lasting(fact):
             continue
         if is_grounded(fact, own):
             facts.append(fact)

@@ -222,3 +222,27 @@ def test_bad_personality_names_and_empty_prompts_are_refused(prompts_copy):
         save("Bad Name!", {"text_chat": "x", "voice_chat": "y"})
     with pytest.raises(PersonalityError):
         save("ok", {"text_chat": "x", "voice_chat": "  "})
+
+
+def test_passing_remarks_are_not_remembered():
+    """"mentions Emerald Plus", "thinks Claude hoarded something" came back in replies as if they mattered."""
+    from backend.learning import is_lasting
+
+    for fact in ["mentions Emerald Plus", "thinks Aatrox is useless", "suggests using a subscription API",
+                 "claims to be behaving sober", "found the purchase to be useless", "enjoys discussing Shaco counters"]:
+        assert not is_lasting(fact), fact
+    for fact in ["works as a nurse", "plays jungle in League of Legends", "trains voice models", "has a cat named Pixel"]:
+        assert is_lasting(fact), fact
+
+
+def test_only_what_they_say_about_themselves_counts(monkeypatch):
+    """Reading out someone else's list ("okeida trains voice models ...") became facts about the reader."""
+    import backend.learning as learning
+
+    convo = [{"role": "user", "content": "[Ekkusu]: okeida trains voice models and owns a device running Gemini",
+              "user_id": 2, "name": "Ekkusu"},
+             {"role": "user", "content": "[Ekkusu]: and i play jungle mostly, my main is Kindred",
+              "user_id": 2, "name": "Ekkusu"}]
+    monkeypatch.setattr(learning, "chat_completion", lambda *a, **k: (
+        "trains voice models\nowns a device running Gemini\nplays jungle with Kindred as main"))
+    assert extract_facts(convo, "Ekkusu") == ["plays jungle with Kindred as main"]

@@ -275,9 +275,12 @@ def test_anyone_answering_her_question_gets_a_reply():
 def test_talking_about_her_as_she_goes_to_the_model_and_she_reacts():
     """"She's actually right" and "she really likes Shaco counters" were about Metis but skipped or misread."""
     from backend.turn_taking import verdict_from_addressee
-    turns = [t(EKK, "is shaco good", 20), t(None, "Shaco counters Kindred best.", 15, to=EKK),
+    soon = [t(EKK, "is shaco good", 20), t(None, "Shaco counters Kindred best.", 15, to=EKK),
+            t(SAVA, "no way", 10), t(EKK, "Wait, she's actually right.")]
+    assert verdict(soon, settings=Settings(voice=True)) == RESPOND  # right after she spoke: it's her
+    later = [t(EKK, "is shaco good", 70), t(None, "Shaco counters Kindred best.", 60, to=EKK),
              t(SAVA, "no way", 10), t(EKK, "Wait, she's actually right.")]
-    assert verdict(turns, settings=Settings(voice=True)) == ASK
+    assert verdict(later, settings=Settings(voice=True)) == ASK  # a minute later the model decides
     assert verdict_from_addressee("talking about Metis", Settings(voice=True)).verdict == RESPOND
     assert verdict_from_addressee("talking about Metis", Settings(voice=True, engagement="reserved")).verdict == SKIP
 
@@ -285,3 +288,10 @@ def test_talking_about_her_as_she_goes_to_the_model_and_she_reacts():
 def test_name_set_off_by_commas_mid_sentence_addresses_metis():
     assert addressed_by_name("Also, Metis, please do talk with Whimsy.", ["metis"])
     assert not addressed_by_name("I told metis, and she laughed", ["metis"])
+
+
+def test_someone_elses_yeah_doesnt_end_an_exchange_with_metis():
+    """With okeida's "Yeah." in between, "Huh? What are you talking about?" to Metis was judged for someone else."""
+    turns = [t(EKK, "Hello Metis.", 20), t(None, "Did Gwen do anything interesting?", 10, to=EKK),
+             t(SAVA, "Yeah.", 5), t(EKK, "Huh? What the fuck are you talking about?")]
+    assert verdict(turns, settings=Settings(voice=True, continuation_window=30)) == RESPOND

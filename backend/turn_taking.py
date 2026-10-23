@@ -267,7 +267,9 @@ def decide(
     # 3. An exchange Metis is already part of
     if metis_idx is not None:
         metis_turn = before[metis_idx]
-        since = before[metis_idx + 1:]
+        # "Yeah." or "Hmm." from someone else doesn't make it their conversation: with okeida's "Yeah." in
+        # between, ekkusu's "Huh? What are you talking about?" to Metis was judged to be for someone else.
+        since = [t for t in before[metis_idx + 1:] if not is_acknowledgement(t.text)]
         other_humans_since = {t.speaker_id for t in since if t.speaker_id not in (None, last.speaker_id)}
         talking_to_speaker = (metis_turn.to == last.speaker_id
                               or (metis_turn.to is None and _spoke_just_before(before, metis_idx, last.speaker_id)))
@@ -291,12 +293,17 @@ def decide(
     # 5. People talking among themselves: two or more people have spoken since Metis last did
     #    (or recently, if she hasn't spoken at all).
     since_metis = before[metis_idx + 1:] if metis_idx is not None else before[-6:]
-    humans = {t.speaker_id for t in since_metis[-6:] if not t.is_metis} | {last.speaker_id}
+    humans = ({t.speaker_id for t in since_metis[-6:] if not t.is_metis and not is_acknowledgement(t.text)}
+              | {last.speaker_id})
     if len(humans) >= 2:
         if mentions_name(text, metis_names):
             return Decision(ASK, "people are talking and mention Metis")
         if s.voice and _ABOUT_HER.search(text) and metis_idx is not None and now - before[metis_idx].ts <= 90:
             # "She's actually right", "she really likes Shaco counters": talking about her, without her name.
+            # Right after she spoke that's almost always her ("What did she learn?" 29 s later, the model
+            # said it was for someone else); later on the model decides.
+            if now - before[metis_idx].ts <= 30 and s.engagement != "reserved":
+                return Decision(RESPOND, "people are talking about Metis")
             return Decision(ASK, "people may be talking about Metis")
         if is_question(text) and s.voice and s.engagement != "reserved":
             # "Admit it, Aatrox is a terrible champion, right?" was for her, but every question in a group was
