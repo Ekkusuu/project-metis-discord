@@ -67,7 +67,7 @@ def fake_model(monkeypatch):
 
     monkeypatch.setattr(tm, "json_completion", fake_json)
     monkeypatch.setattr(tm, "chat_completion", fake_chat)
-    monkeypatch.setattr(tm, "_last_search", {"time": 0.0, "query": ""})  # no search from an earlier test
+    monkeypatch.setattr(tm, "_last_search", {})  # no search from an earlier test
     return state, calls
 
 
@@ -189,11 +189,12 @@ def test_found_answer_is_the_last_instruction():
 def test_recent_lookups_are_remembered_for_a_while(monkeypatch):
     import backend.routers.chat as chat
 
-    monkeypatch.setattr(chat, "_recent_lookups", [])
-    chat.remember_lookup("best jungler?", "Master Yi (u.gg)")
-    assert "best jungler? -> Master Yi (u.gg)" in chat.recent_lookups_text()
+    monkeypatch.setattr(chat, "_recent_lookups", {})
+    chat.remember_lookup("best jungler?", "Master Yi (u.gg)", "voice-1")
+    assert "best jungler? -> Master Yi (u.gg)" in chat.recent_lookups_text("voice-1")
+    assert chat.recent_lookups_text("voice-2") == ""  # another channel doesn't see it
     monkeypatch.setattr(chat, "_LOOKUP_MEMORY_SECONDS", -1)
-    assert chat.recent_lookups_text() == ""
+    assert chat.recent_lookups_text("voice-1") == ""
 
 
 @pytest.mark.parametrize("message", [
@@ -228,8 +229,7 @@ async def test_follow_ups_redo_the_last_search_with_its_site(fake_model, monkeyp
 
     state, calls = fake_model
     state["query"] = "best champion win rate emerald plus site:u.gg"
-    monkeypatch.setitem(tm._last_search, "time", time.time())
-    monkeypatch.setitem(tm._last_search, "query", "best champion win rate site:u.gg")
+    monkeypatch.setitem(tm._last_search, "", {"time": time.time(), "query": "best champion win rate site:u.gg"})
     result = await select_tools([], f"[Sava]: {message}", 2)
     searches = [c.arguments["query"] for c in result if c.tool_name == "web_search"]
     assert searches == ["best champion win rate emerald plus site:u.gg"]
@@ -240,7 +240,7 @@ async def test_no_follow_up_search_without_an_earlier_one(fake_model, monkeypatc
     import backend.tool_manager as tm
     from backend.tool_manager import select_tools
 
-    monkeypatch.setitem(tm._last_search, "time", 0.0)
+    monkeypatch.setitem(tm._last_search, "", {"time": 0.0, "query": "old"})
     result = await select_tools([], "[Sava]: what about you?", 2)
     assert "web_search" not in [c.tool_name for c in result]
 
@@ -255,3 +255,14 @@ async def test_nudges_search_only_after_a_promise(fake_model, metis, searches):
                 {"role": "assistant", "content": metis}, {"role": "user", "content": "[Sava]: So are we checking?"}]
     result = await select_tools(messages, messages[-1]["content"], 2)
     assert ("web_search" in [c.tool_name for c in result]) == searches
+
+
+async def test_last_search_is_per_conversation(fake_model, monkeypatch):
+    """A search in one channel isn't a "last search" for a follow-up in another."""
+    import time
+    import backend.tool_manager as tm
+
+    monkeypatch.setitem(tm._last_search, "voice-1", {"time": time.time(), "query": "best champion site:u.gg"})
+    calls = await tm.decide_tools([], "[Sava]: could you double-check, but this time for Emerald Plus?", 2,
+                                  conversation_id="voice-2")
+    assert "web_search" not in [c.tool_name for c in calls]

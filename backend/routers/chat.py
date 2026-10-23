@@ -70,6 +70,7 @@ class ChatRequest(BaseModel):
     max_tools: Optional[int] = Field(default=None, description="Maximum tools to select")
     voice_mode: bool = Field(default=False, description="Favour latency over recall (voice chat)")
     chiming_in: bool = Field(default=False, description="Metis joins a conversation between other people")
+    conversation_id: str = Field(default="", description="Which conversation (channel) this is, for per-channel state")
     participants: List[Participant] = Field(
         default_factory=list, description="Recent speakers; what Metis knows about them is added to the prompt"
     )
@@ -118,17 +119,21 @@ SLOW_TOOLS = ("remember", "web_search")
 
 # What web lookups found in the last few minutes. A follow-up ("give me an actual answer") doesn't search
 # again, and the answer was only in the reply that missed it, so the model made up a different one.
-_recent_lookups: List[Tuple[float, str, str]] = []  # (time, question, answer)
-_LOOKUP_MEMORY_SECONDS = 600
+# Per conversation: a search in one server showed up in another's replies.
+_recent_lookups: Dict[str, List[Tuple[float, str, str]]] = {}  # conversation -> [(time, question, answer)]
+# Three minutes, not ten: kept longer, one lookup ("Shaco counters") came back in reply after reply.
+_LOOKUP_MEMORY_SECONDS = 180
 
 
-def remember_lookup(question: str, answer: str) -> None:
-    _recent_lookups.append((time.time(), question, answer))
-    del _recent_lookups[:-3]
+def remember_lookup(question: str, answer: str, conversation: str = "") -> None:
+    lookups = _recent_lookups.setdefault(conversation, [])
+    lookups.append((time.time(), question, answer))
+    del lookups[:-3]
 
 
-def recent_lookups_text() -> str:
-    fresh = [(q, a) for t, q, a in _recent_lookups if time.time() - t < _LOOKUP_MEMORY_SECONDS]
+def recent_lookups_text(conversation: str = "") -> str:
+    fresh = [(q, a) for t, q, a in _recent_lookups.get(conversation, [])
+             if time.time() - t < _LOOKUP_MEMORY_SECONDS]
     if not fresh:
         return ""
     # "Only if asked": with the Shaco counters here she steered every reply back to them for ten minutes.
@@ -154,7 +159,8 @@ async def _run_tools(messages: List[Dict[str, str]], req: ChatRequest, timings: 
     t0 = time.perf_counter()
     immediate = immediate_calls(last_user)
     immediate_task = asyncio.create_task(execute_tools(immediate, extra)) if immediate else None
-    decided = await decide_tools(messages, last_user, max_tools=req.max_tools or int(tools_cfg.get("max_tools", 3)))
+    decided = await decide_tools(messages, last_user, max_tools=req.max_tools or int(tools_cfg.get("max_tools", 3)),
+                                 conversation_id=req.conversation_id)
     timings["tool_selection"] = round(time.perf_counter() - t0, 3)
     calls = immediate + decided
     print(f"Tool selection: {[c.tool_name for c in calls] or 'none'}")
@@ -340,7 +346,7 @@ def reply_guidance(messages: List[Dict[str, str]], voice: bool, has_context: boo
 
 
 def build_prompt(messages: List[Dict[str, str]], context_text: str, people_text: str = "",
-                 guidance: str = "") -> List[Dict[str, str]]:
+                 guidance: str = "", conversation: str = "") -> List[Dict[str, str]]:
     """
     Insert people memory, gathered information and reply guidance as a system message right
     before the latest user message. Keeping the system prompt and earlier history
@@ -352,7 +358,7 @@ def build_prompt(messages: List[Dict[str, str]], context_text: str, people_text:
     sections = [f"Current date and time: {now}"]
     if people_text:
         sections.append(people_text)
-    lookups = recent_lookups_text()
+    lookups = recent_lookups_text(conversation)
     if lookups:
         sections.append(lookups)
     if context_text:
@@ -381,9 +387,11 @@ async def _prepare(req: ChatRequest, notify: Optional[Callable[[str], None]] = N
     found = re.search(r"What you found: (.+)", context_text)
     guidance = reply_guidance(messages, req.voice_mode, bool(context_text), "[web_search]" in context_text,
                               found.group(1).strip() if found else "", chiming_in=req.chiming_in)
-    final = trim_messages_to_context(build_prompt(messages, context_text, people_context(req), guidance))
+    final = trim_messages_to_context(build_prompt(messages, context_text, people_context(req), guidance,
+                                                  req.conversation_id))
     if found:  # for the next few turns (it's in this prompt already)
-        remember_lookup(re.sub(r"^\[[^\]]+\]:?\s*", "", messages[-1]["content"]), found.group(1).strip())
+        remember_lookup(re.sub(r"^\[[^\]]+\]:?\s*", "", messages[-1]["content"]), found.group(1).strip(),
+                        req.conversation_id)
     stamp = datetime.datetime.now().isoformat()
     state.context = [{**m, "timestamp": stamp} for m in final]
     return final, {"tool_timings": tool_timings, "rag_timings": rag_timings}

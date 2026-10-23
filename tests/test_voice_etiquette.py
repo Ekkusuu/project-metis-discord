@@ -276,3 +276,15 @@ async def test_side_comment_from_someone_else_needs_longer(receiver):
     finished = await receiver._play(speech(2.5), to_user=1)
     task.cancel()
     assert finished is True and receiver.voice_client.pauses == 1
+
+
+
+def test_reply_goes_right_after_the_line_it_answers():
+    """Appended at the end, a line said while she was talking ended up before her reply; the next turn was
+    refused ("the last message must be from the user") and 14 lines went unanswered in one call."""
+    conv = bot_mod.Conversation(mode="voice")
+    a = conv.add_user(SimpleNamespace(id=1, name="A", display_name="A", bot=False), "what's up Metis")
+    conv.add_user(SimpleNamespace(id=2, name="B", display_name="B", bot=False), "said while she talked")
+    conv.add_assistant("Not much!", to=1, after=a)
+    assert [m["role"] for m in conv.messages] == ["user", "assistant", "user"]
+    assert conv.prompt()[-1]["role"] == "user"

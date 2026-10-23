@@ -95,6 +95,7 @@ class Conversation:
     """
 
     mode: str  # "text" | "voice"
+    key: str = ""  # "voice-<channel id>": per-conversation state in the backend (web lookups)
     messages: List[Dict[str, Any]] = field(default_factory=list)
     latest_id: int = 0  # id of the newest user message; older in-flight replies abort
     chiming_in: bool = False  # the reply being made joins a conversation between other people
@@ -141,8 +142,18 @@ class Conversation:
         self.messages.append(msg)
         return msg
 
-    def add_assistant(self, text: str, to: Optional[int] = None) -> None:
-        self.messages.append({"role": "assistant", "content": text, "to": to, "ts": time.time(), "learned": False})
+    def add_assistant(self, text: str, to: Optional[int] = None, after: Optional[Dict[str, Any]] = None) -> None:
+        """
+        Add a reply of Metis. `after`: the message it answers; the reply goes right after it. Appended at the
+        end, a line said while she was talking ended up before her reply, the history ended with her, and the
+        next turn was refused ("the last message must be from the user"): 14 lines went unanswered in a call.
+        """
+        msg = {"role": "assistant", "content": text, "to": to, "ts": time.time(), "learned": False}
+        index = next((i for i, m in enumerate(self.messages) if m is after), None) if after is not None else None
+        if index is None:
+            self.messages.append(msg)
+        else:
+            self.messages.insert(index + 1, msg)
 
     def turns(self, limit: int = 30) -> List[Turn]:
         """The recent conversation in the form the etiquette logic understands."""
@@ -276,7 +287,7 @@ def link_mentions(text: str, conversation: Conversation) -> str:
 def get_conversation(channel_id: int, mode: str = "text") -> Conversation:
     key = (mode, channel_id)
     if key not in conversations:
-        conversations[key] = Conversation(mode=mode)
+        conversations[key] = Conversation(mode=mode, key=f"{mode}-{channel_id}")
     return conversations[key]
 
 
@@ -466,6 +477,7 @@ def chat_payload(conversation: Conversation, voice_mode: bool, present: Optional
         "max_tokens": (voice_cfg if voice_mode else chat_cfg).get("max_tokens", chat_cfg.get("max_tokens", 512)),
         "voice_mode": voice_mode,
         "chiming_in": conversation.chiming_in,
+        "conversation_id": conversation.key,
     }
     if voice_mode:
         payload.update({
@@ -598,7 +610,7 @@ async def on_message(message: discord.Message):
 
     print(f"💬 Metis → {message.author.display_name}: {reply}")
     async with conversation.lock:
-        conversation.add_assistant(reply, to=message.author.id)
+        conversation.add_assistant(reply, to=message.author.id, after=entry)
     await publish({
         "id": str(sent.id) if sent else f"ai-{message.id}",
         "text": reply,
@@ -915,7 +927,7 @@ class VoiceReceiver:
                 reply += " —"
             print(f"💬 Metis → {user.display_name}: {reply}")
             async with conversation.lock:
-                conversation.add_assistant(reply, to=user.id)
+                conversation.add_assistant(reply, to=user.id, after=entry)
 
         await publish({
             "id": f"voice-ai-{time.time_ns()}",

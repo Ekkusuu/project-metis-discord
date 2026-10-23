@@ -187,7 +187,7 @@ _NUDGE = re.compile(r"\b(do (so|it|that)|go ahead|are (we|you) (still )?(checkin
 _PROMISED = re.compile(r"\b(I'?ll|I will|let me|I'?m (going to|gonna|already)?\s*)\s*(check|look|search|pull|find|dig)"
                        r"|\b(checking|searching|pulling (it |that )?up|looking (it |that )?up)\b", re.IGNORECASE)
 _SEARCH_MEMORY_SECONDS = 600
-_last_search: Dict[str, Any] = {"time": 0.0, "query": ""}
+_last_search: Dict[str, Dict[str, Any]] = {}  # conversation -> {"time", "query"} of the last web search
 # "Do it" / "go ahead" after Metis offered to look something up.
 _GO_AHEAD = re.compile(r"^\W*(then |so |ok(ay)? |yes |yeah |sure |please )*(do it|do that|go ahead|go for it|"
                        r"please do|yes please|search( it| for it)?|look it up|check)\W*$", re.IGNORECASE)
@@ -324,6 +324,7 @@ async def decide_tools(
     messages: List[Dict[str, str]],
     last_user_message: str,
     max_tools: int = 3,
+    conversation_id: str = "",
 ) -> List[ToolCall]:
     """Tools the model chooses for this message (one constrained choice, then a query)."""
     enabled = get_tool_registry().get_all_enabled()
@@ -347,7 +348,8 @@ async def decide_tools(
     # a query built from it searches for her mistake ("roadster" when asked about news in France).
     # Further back than the decision context: "tell me the exact date" can come a few turns after the question.
     said = "\n".join(m["content"][:200] for m in [m for m in messages[:-1] if m.get("role") == "user"][-3:])
-    last_query = _last_search["query"] if time.time() - _last_search["time"] < _SEARCH_MEMORY_SECONDS else ""
+    previous = _last_search.get(conversation_id) or {"time": 0.0, "query": ""}
+    last_query = previous["query"] if time.time() - previous["time"] < _SEARCH_MEMORY_SECONDS else ""
     # Only for follow-ups: shown for a new question, "Yasuo counter" became "Yasuo counter Emerald Plus".
     follow_up = bool(last_query and (_FOLLOW_UP.search(text) or _NUDGE.search(text) or _CORRECTION.search(text)))
     query_prompt = ((f"Last search: {last_query}\n\n" if follow_up else "")
@@ -394,7 +396,7 @@ async def decide_tools(
             # A follow-up ("this time for Emerald Plus") keeps the site the last search was limited to.
             query = keep_named_site(grounded, f"{text} {last_query}" if follow_up else text)
             if choice == "web_search":
-                _last_search.update(time=time.time(), query=query)
+                _last_search[conversation_id] = {"time": time.time(), "query": query}
             arguments: Dict[str, Any] = {_first_string_param(decidable[choice]): query}
             if choice == "web_search" and _NEWS.search(text):
                 arguments["search_type"] = "news"
