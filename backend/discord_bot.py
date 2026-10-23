@@ -363,7 +363,7 @@ async def is_metis_turn(conversation: Conversation, *, is_dm: bool = False, voic
                       is_dm=is_dm, alone_with_metis=alone_with_metis, settings=settings)
     if decision.verdict == ASK:
         addressee = await ask_addressee(conversation)
-        decision = verdict_from_addressee(addressee, settings)
+        decision = verdict_from_addressee(addressee, settings, turns[-1].text)
     conversation.chiming_in = bool(decision.signals.get("chime"))
     icon = {RESPOND: "✅", WAIT_OPEN: "⏳"}.get(decision.verdict, "🤐")
     print(f"{icon} [{turns[-1].name}] {decision.verdict}: {decision.reason}")

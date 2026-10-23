@@ -527,8 +527,20 @@ def main() -> int:
             s.show_output = True
 
         # 5. Keep an eye on the services
+        llm_crashes: List[float] = []
         while not stopping.is_set():
             for s in services:
+                if s is llm and not s.running and not stopping.is_set():
+                    # A CUDA error in llama.cpp (the GPU is shared with a game and the voice) took all of Metis
+                    # down. The model is back in a few seconds; only give up if it keeps crashing.
+                    llm_crashes = [t for t in llm_crashes if time.time() - t < 600] + [time.time()]
+                    if len(llm_crashes) <= 3:
+                        say()
+                        warn(f"The language model crashed (exit code {s.proc.returncode}); restarting it "
+                             f"({len(llm_crashes)} of 3 in 10 minutes).")
+                        s.show_tail(5)
+                        s.start()
+                        break
                 if s is tts and not s.running and not stopping.is_set():
                     say()
                     warn(f"The voice server stopped (exit code {s.proc.returncode}); voice chat switches to Kokoro.")

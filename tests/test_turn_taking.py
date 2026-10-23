@@ -241,3 +241,16 @@ def test_no_chiming_in_too_soon_off_or_reserved():
 def test_name_starting_a_later_sentence_addresses_metis():
     assert addressed_by_name("Yeah, she said that again. Metis, Metis, I'm talking to you. Hello.", ["metis"])
     assert not addressed_by_name("Yeah. I told metis about it.", ["metis"])
+
+
+def test_remark_to_everyone_is_not_answered_but_a_question_is():
+    """A misheard "Alomed this hoarding" was judged "said to everyone" and got a reply about hoarding."""
+    from backend.turn_taking import verdict_from_addressee
+    assert verdict_from_addressee("everyone in the chat", Settings(voice=True), "Alomed this hoarding").verdict == SKIP
+    assert verdict_from_addressee("everyone in the chat", Settings(voice=True), "anyone know a good pizza place?").verdict == WAIT_OPEN
+
+
+def test_question_after_someone_else_spoke_is_not_a_lone_question():
+    """okeida's "what does that mean?" was about ekkusu's line, not for Metis."""
+    turns = [t(EKK, "look at this weird thing", 20), t(None, "huh, weird", 10, to=EKK), t(SAVA, "what does that mean?")]
+    assert verdict(turns, settings=Settings(voice=True, continuation_window=30)) == ASK

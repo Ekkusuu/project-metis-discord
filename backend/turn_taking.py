@@ -299,8 +299,9 @@ def decide(
     if is_status_update(text):
         return Decision(SKIP, "a status update that doesn't ask for a reply")
 
-    # 6. A lone person with no clear addressee
-    if len(humans) == 1:
+    # 6. A lone person with no clear addressee. "Nobody else around" means nobody else spoke lately, not just
+    #    since Metis: "what does that mean?" right after the other person spoke was for them.
+    if len(humans | {t.speaker_id for t in before if not t.is_metis}) == 1:
         if s.engagement == "chatty":
             return Decision(RESPOND, "someone is talking and nobody else is around (chatty)")
         if is_question(text) and s.engagement != "reserved":
@@ -409,13 +410,17 @@ def transcript_for_model(turns: Sequence[Turn], names_by_id: Dict[int, str], lim
     return "\n".join(lines)
 
 
-def verdict_from_addressee(addressee: str, settings: Optional[Settings] = None) -> Decision:
+def verdict_from_addressee(addressee: str, settings: Optional[Settings] = None, text: str = "") -> Decision:
     s = settings or Settings()
     if addressee == "Metis":
         return Decision(RESPOND, "the model thinks it's for Metis")
     if addressee == "everyone in the chat":
         if s.engagement == "reserved":
             return Decision(SKIP, "said to everyone (reserved mode)")
+        if text and not is_question(text) and s.engagement != "chatty":
+            # A misheard "Alomed this hoarding" counted as said to everyone and got a reply about hoarding.
+            # Remarks to the group are joined in on through chime_in_after instead.
+            return Decision(SKIP, "a remark to everyone, not a question")
         return Decision(WAIT_OPEN, "said to everyone")
     if addressee == "nobody in particular" and s.engagement == "chatty":
         return Decision(RESPOND, "a remark Metis can react to (chatty)")
