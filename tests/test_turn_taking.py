@@ -201,3 +201,43 @@ def test_bare_leave_in_a_group_needs_her_name():
     from backend.turn_taking import clearly_asks_to_leave
     assert not clearly_asks_to_leave("Okay, just leave.", alone_with_metis=False)
     assert clearly_asks_to_leave("Metis, just leave.", alone_with_metis=False)
+
+
+# --- voice: misheard names and joining in --------------------------------------------------
+@pytest.mark.parametrize("text", ["Medy's Hello.", "Matisse, what do you think?", "hey Mattis"])
+def test_misheard_name_still_addresses_metis_in_voice(text):
+    """Speech-to-text wrote "Metis, hello" as "Medy's Hello" and she ignored it."""
+    turns = [t(EKK, "random stuff", 30), t(SAVA, text)]
+    assert verdict(turns, settings=Settings(voice=True)) == RESPOND
+    assert verdict(turns, settings=Settings(voice=False)) != RESPOND  # text chat spells names right
+
+
+def test_sound_alike_words_are_not_her_name():
+    turns = [t(EKK, "random stuff", 30), t(SAVA, "thanks mates")]
+    assert verdict(turns, settings=Settings(voice=True)) != RESPOND
+
+
+def _group_talk(ago_start):
+    lines = ["so what did yours do", "it was the same thing honestly", "but it kept getting overloaded",
+             "yeah the free tier is always overloaded"]
+    return [t(SAVA if i % 2 else EKK, line, ago_start - i * 5) for i, line in enumerate(lines)]
+
+
+def test_metis_chimes_in_after_people_talk_for_a_while():
+    """Skipping every line kept her silent for minutes until they asked why she never talks."""
+    settings = Settings(voice=True, chime_in_after=60)
+    d = decide(_group_talk(90), BOT, ["Metis"], NAMES, now=NOW, settings=settings)
+    assert d.verdict == RESPOND and d.signals.get("chime")
+
+
+def test_no_chiming_in_too_soon_off_or_reserved():
+    assert verdict(_group_talk(30), settings=Settings(voice=True, chime_in_after=60)) == SKIP
+    assert verdict(_group_talk(90), settings=Settings(voice=True, chime_in_after=0)) == SKIP
+    assert verdict(_group_talk(90), settings=Settings(voice=True, chime_in_after=60, engagement="reserved")) == SKIP
+    recent_metis = [t(None, "hi guys", 20)] + _group_talk(15)
+    assert verdict(recent_metis, settings=Settings(voice=True, chime_in_after=60)) == SKIP
+
+
+def test_name_starting_a_later_sentence_addresses_metis():
+    assert addressed_by_name("Yeah, she said that again. Metis, Metis, I'm talking to you. Hello.", ["metis"])
+    assert not addressed_by_name("Yeah. I told metis about it.", ["metis"])

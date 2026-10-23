@@ -69,6 +69,7 @@ class ChatRequest(BaseModel):
     use_tools: Optional[bool] = Field(default=None, description="Override tools.enabled from config")
     max_tools: Optional[int] = Field(default=None, description="Maximum tools to select")
     voice_mode: bool = Field(default=False, description="Favour latency over recall (voice chat)")
+    chiming_in: bool = Field(default=False, description="Metis joins a conversation between other people")
     participants: List[Participant] = Field(
         default_factory=list, description="Recent speakers; what Metis knows about them is added to the prompt"
     )
@@ -274,7 +275,7 @@ def voice_emotions() -> List[str]:
 
 
 def reply_guidance(messages: List[Dict[str, str]], voice: bool, has_context: bool, searched_web: bool = False,
-                   found_answer: str = "") -> str:
+                   found_answer: str = "", chiming_in: bool = False) -> str:
     """
     A short reminder placed right before the latest message. Small models follow the most recent
     instructions far more than a long persona prompt at the top, so without this the personality
@@ -283,8 +284,11 @@ def reply_guidance(messages: List[Dict[str, str]], voice: bool, has_context: boo
     match = re.match(r"^\[([^\]]+)\]", messages[-1]["content"])
     who = match.group(1) if match else "the person"
     rules = [
-        f"Reply to {who}'s last message. If they asked a question or asked you to do something, "
-        "answer or do exactly that in your first sentence.",
+        (f"You're joining a conversation the others are having: add one short comment, joke or question about "
+         "what they're talking about. Don't answer questions they asked each other as if they were for you."
+         if chiming_in else
+         f"Reply to {who}'s last message. If they asked a question or asked you to do something, "
+         "answer or do exactly that in your first sentence."),
         "Your personality is flavour, never a replacement for answering.",
         ("Facts, dates and numbers must come from the information above; if it isn't there, say you don't know "
          "instead of guessing." if has_context else
@@ -367,7 +371,7 @@ async def _prepare(req: ChatRequest, notify: Optional[Callable[[str], None]] = N
     context_text, tool_timings, rag_timings = await gather_context(messages, req, notify)
     found = re.search(r"What you found: (.+)", context_text)
     guidance = reply_guidance(messages, req.voice_mode, bool(context_text), "[web_search]" in context_text,
-                              found.group(1).strip() if found else "")
+                              found.group(1).strip() if found else "", chiming_in=req.chiming_in)
     final = trim_messages_to_context(build_prompt(messages, context_text, people_context(req), guidance))
     if found:  # for the next few turns (it's in this prompt already)
         remember_lookup(re.sub(r"^\[[^\]]+\]:?\s*", "", messages[-1]["content"]), found.group(1).strip())

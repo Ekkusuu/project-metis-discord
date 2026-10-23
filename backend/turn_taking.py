@@ -70,7 +70,7 @@ _ACK = re.compile(rf"^\W*{_ACK_WORD}(?:[\W_]+{_ACK_WORD})*\W*$", re.IGNORECASE)
 # After a name at the start of a message, these mean the person is being spoken TO
 # ("Metis, ...", "metis tell him", "metis can you ..."), not ABOUT ("metis would know").
 _AFTER_VOCATIVE = (
-    r"(?:\s*[,:!?.]|\s*$|\s+(?:(?:can|could|would|will|do|did|are|have|should)\s+(?:you|u)\b|you\b|u\b|ur\b|"
+    r"(?:\s*[,:!?.]|\s*$|\s+(?:hi\b|hello\b|hey\b|(?:can|could|would|will|do|did|are|have|should)\s+(?:you|u)\b|you\b|u\b|ur\b|"
     r"pls\b|please\b|what\b|how\b|why\b|when\b|where\b|who\b|which\b|tell\b|say\b|play\b|sing\b|give\b|show\b|"
     r"help\b|look\b|check\b|remind\b|search\b|find\b|explain\b|stop\b|wait\b|listen\b|guess\b|think\b|"
     r"come\b|join\b|leave\b|answer\b|pick\b|choose\b|rate\b|describe\b|write\b|read\b|recommend\b))"
@@ -119,12 +119,44 @@ def name_variants(name: str) -> List[str]:
     return [v for v in out if len(v) >= 2]
 
 
+def _sound(word: str) -> str:
+    """A rough sound key: consonants only, d/t, z/s, c/k merged, repeats collapsed ("Medy's" ~ "Metis")."""
+    word = re.sub(r"[^a-z]", "", word.lower())
+    word = word.replace("ph", "f").translate(str.maketrans("dzcq", "tskk"))
+    key = word[:1] + re.sub(r"[aeiouyhw]", "", word[1:])
+    return re.sub(r"(.)\1+", r"\1", key)
+
+
+# Real words that sound like "Metis" (m-t-s) and are said in a call.
+_SOUND_ALIKE_WORDS = {"mats", "meets", "mates", "meats", "mitts", "motes", "mutts", "matts", "moots", "mists"}
+
+
+def spoken_names(text: str, names: Iterable[str]) -> str:
+    """
+    `text` with words that sound like one of `names` replaced by the name. Speech-to-text writes "Metis" as
+    "Medy's", "Matisse" or "Mattis"; "Medy's Hello" went unanswered.
+    """
+    keys = {_sound(n): n for n in names if len(n) >= 4 and " " not in n}
+
+    def swap(m: re.Match) -> str:
+        word = m.group(0)
+        if word.lower() in _SOUND_ALIKE_WORDS or not 4 <= len(word) <= 9:
+            return word
+        return keys.get(_sound(word), word)
+
+    return re.sub(r"[A-Za-z][A-Za-z']*", swap, text) if keys else text
+
+
 def addressed_by_name(text: str, names: Iterable[str]) -> bool:
     """
     True if one of `names` is used to *address* someone (vocative), not just talked about:
     'metis, what do you think', 'hey sava!', 'thanks ekkusu', 'right, metis?', '@sava look'.
     'i told sava about it' or "metis's voice is weird" don't count.
     """
+    # Spoken messages run several sentences together: "She said that again. Metis, I'm talking to you."
+    sentences = [s for s in re.split(r"(?<=[.!?])\s+", text.strip()) if s]
+    if len(sentences) > 1:
+        return any(addressed_by_name(s, names) for s in sentences)
     low = text.lower()
     for name in names:
         n = re.escape(name)
@@ -172,6 +204,7 @@ class Settings:
     continuation_window: float = 180.0    # s: how long an exchange with Metis stays "open"
     recent_window: float = 300.0          # s: what counts as the current conversation
     voice: bool = False
+    chime_in_after: float = 0.0           # s of people talking among themselves before Metis joins in (0: never)
 
 
 def decide(
@@ -190,8 +223,8 @@ def decide(
     if not turns or turns[-1].is_metis:
         return Decision(SKIP, "nothing new from a person")
     last = turns[-1]
-    text = last.text.strip()
     metis_names = [v for n in bot_names for v in name_variants(n)]
+    text = spoken_names(last.text.strip(), metis_names) if s.voice else last.text.strip()
     others = {uid: name_variants(n) for uid, n in names_by_id.items() if uid not in (bot_id, last.speaker_id)}
 
     if is_dm:
@@ -251,6 +284,14 @@ def decide(
     if len(humans) >= 2:
         if mentions_name(text, metis_names):
             return Decision(ASK, "people are talking and mention Metis")
+        # Joining in now and then, like a friend in the call. Skipping all of it kept her silent for
+        # minutes while two people talked, until they asked why she never says anything.
+        quiet_since = before[metis_idx].ts if metis_idx is not None else (since_metis[0].ts if since_metis else now)
+        humans_since = sum(1 for t in since_metis if not t.is_metis) + 1
+        if (s.chime_in_after > 0 and s.engagement != "reserved" and humans_since >= 4
+                and now - quiet_since >= s.chime_in_after and not is_acknowledgement(text)
+                and len(text.split()) >= 4):
+            return Decision(RESPOND, "chiming in after people talked for a while", {"chime": True})
         return Decision(SKIP, "people are talking among themselves")
 
     if is_acknowledgement(text):

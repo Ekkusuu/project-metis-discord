@@ -49,7 +49,7 @@ from backend.text_utils import (
 )
 from backend.turn_taking import (
     ADDRESSEE_CHOICES, ADDRESSEE_PROMPT, ASK, RESPOND, WAIT_OPEN, Settings, Turn, decide, transcript_for_model,
-    verdict_from_addressee, LEAVE_CHOICES, LEAVE_PROMPT, clearly_asks_to_leave, might_ask_to_leave,
+    verdict_from_addressee, LEAVE_CHOICES, LEAVE_PROMPT, clearly_asks_to_leave, is_acknowledgement, might_ask_to_leave,
 )
 from backend.voice_service import TTS_SAMPLE_RATE, get_voice_service
 from backend import voice_compat
@@ -96,6 +96,7 @@ class Conversation:
     mode: str  # "text" | "voice"
     messages: List[Dict[str, Any]] = field(default_factory=list)
     latest_id: int = 0  # id of the newest user message; older in-flight replies abort
+    chiming_in: bool = False  # the reply being made joins a conversation between other people
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     @property
@@ -353,6 +354,7 @@ async def is_metis_turn(conversation: Conversation, *, is_dm: bool = False, voic
         engagement=str(cfg.get("engagement", "balanced")),
         continuation_window=float(cfg.get("continuation_window", 30 if voice else 180)),
         voice=voice,
+        chime_in_after=float(cfg.get("chime_in_after", 60 if voice else 0)),
     )
     if settings.engagement == "always":
         return True
@@ -362,6 +364,7 @@ async def is_metis_turn(conversation: Conversation, *, is_dm: bool = False, voic
     if decision.verdict == ASK:
         addressee = await ask_addressee(conversation)
         decision = verdict_from_addressee(addressee, settings)
+    conversation.chiming_in = bool(decision.signals.get("chime"))
     icon = {RESPOND: "✅", WAIT_OPEN: "⏳"}.get(decision.verdict, "🤐")
     print(f"{icon} [{turns[-1].name}] {decision.verdict}: {decision.reason}")
 
@@ -447,6 +450,7 @@ def chat_payload(conversation: Conversation, voice_mode: bool, present: Optional
         "top_p": chat_cfg.get("top_p", 0.95),
         "max_tokens": (voice_cfg if voice_mode else chat_cfg).get("max_tokens", chat_cfg.get("max_tokens", 512)),
         "voice_mode": voice_mode,
+        "chiming_in": conversation.chiming_in,
     }
     if voice_mode:
         payload.update({
@@ -808,7 +812,10 @@ class VoiceReceiver:
             if not text:
                 return
             print(f"📝 [{utt.user.display_name}] {text}")
-            self._utterance_seq += 1
+            # "Yeah", "uh", "okay" don't take the turn away from a reply she's about to give: in a group every
+            # backchannel did, and she gave up nearly every turn.
+            if not is_acknowledgement(text):
+                self._utterance_seq += 1
             await self._respond(utt.user, text, t0, timings, self._utterance_seq)
         except Exception as e:
             import traceback
