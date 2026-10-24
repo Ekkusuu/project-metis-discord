@@ -44,7 +44,10 @@ _ACTIONS = ["search", "news", "open", "answer", "give_up"]
 def _schema(actions: List[str]) -> Dict[str, Any]:
     return {
         "type": "object",
-        "properties": {"thought": {"type": "string"}, "action": {"enum": actions}, "input": {"type": "string"}},
+        # Lengths capped: with no limit a long "thought" ran past the token limit, the JSON was cut off
+        # mid-string and the whole lookup failed ("incomplete JSON").
+        "properties": {"thought": {"type": "string", "maxLength": 200}, "action": {"enum": actions},
+                       "input": {"type": "string", "maxLength": 600}},
         "required": ["thought", "action", "input"],
     }
 
@@ -249,7 +252,7 @@ async def research(question: str, query: str, earlier: str = "", *, max_steps: i
             # A step normally takes 1-2 s. With no limit, one call never returned and Metis went silent.
             step = await asyncio.to_thread(
                 json_completion, [{"role": "system", "content": system}, {"role": "user", "content": prompt}],
-                _schema(actions), 0.2, 260, max(6.0, min(20.0, left + 6)))
+                _schema(actions), 0.2, 320, max(6.0, min(20.0, left + 6)))
         except Exception as e:
             print(f"   researcher step {steps} failed after {time.perf_counter() - t:.1f}s: {e}")
             break
