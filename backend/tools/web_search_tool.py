@@ -98,27 +98,6 @@ class WebSearchTool(BaseTool):
         
         return results
     
-    async def _read_top_result(self, results: List[Dict[str, Any]], voice_mode: bool) -> str:
-        cfg = get_config().get("tools", {}).get("web_search") or {}
-        enabled = cfg.get("read_top_result_voice", False) if voice_mode else cfg.get("read_top_result", True)
-        if not enabled:
-            return ""
-        from backend.tools.web_page_tool import fetch_page_text
-
-        for r in results[:3]:
-            url = r.get("url")
-            if not url:
-                continue
-            try:
-                page = await asyncio.wait_for(
-                    asyncio.to_thread(fetch_page_text, url, int(cfg.get("top_result_chars", 2500))), timeout=8
-                )
-            except Exception:
-                continue  # paywalls, bot walls, timeouts: try the next result
-            if len(page["text"]) > 200:
-                return f"({page['url']})\n{page['text']}"
-        return ""
-
     async def _weather(self, query: str, message: str) -> str:
         """Live weather for weather questions (search snippets don't have it); "" if not one or no place found."""
         from backend.tools import weather
@@ -161,107 +140,21 @@ class WebSearchTool(BaseTool):
             return {"success": True, "result": weather,
                     "metadata": {"query": query, "num_results": 1, "search_type": "weather"}}
         cfg = get_config().get("tools", {}).get("web_search") or {}
-        if cfg.get("research", True):
-            from backend.research import format_brief, research
+        from backend.research import format_brief, research
 
-            question = re.sub(r"^\[[^\]]+\]:?\s*", "", kwargs.get("message", "")).strip() or query
-            budget = float(cfg.get("research_seconds_voice", 20) if voice_mode else cfg.get("research_seconds", 60))
-            try:
-                # Each step has its own limit too; this is the backstop so a reply can never wait forever.
-                found = await asyncio.wait_for(research(
-                    question, query, kwargs.get("conversation_context", ""),
-                    max_steps=int(cfg.get("research_steps_voice", 5) if voice_mode else cfg.get("research_steps", 8)),
-                    time_budget=budget, first_kind="news" if search_type == "news" else "text",
-                    auto_open=int(cfg.get("research_auto_open", 2)),
-                    notify=kwargs.get("notify")), timeout=budget + 20)
-            except asyncio.TimeoutError:
-                print(f"🔬 research gave up after {budget + 20:.0f}s")
-                found = {"answer": "", "found": False, "sources": [], "searches": [query], "steps": 0}
-            return {"success": True, "result": format_brief(found, question),
-                    "metadata": {"query": query, "searches": found["searches"], "found": found["found"],
-                                 "search_type": "research"}}
+        question = re.sub(r"^\[[^\]]+\]:?\s*", "", kwargs.get("message", "")).strip() or query
+        budget = float(cfg.get("research_seconds_voice", 20) if voice_mode else cfg.get("research_seconds", 60))
         try:
-            num_results = min(max(1, int(num_results or 5)), 10)
-            if search_type not in ("text", "news"):
-                search_type = "text"
-            
-            # ddgs is synchronous; run it off the event loop and don't let a slow
-            # search hold up the reply forever.
-            results = await asyncio.wait_for(
-                asyncio.to_thread(self._search_sync, query, num_results, search_type),
-                timeout=15,
-            )
-            
-            if not results:
-                return {
-                    "success": True,
-                    "result": f"No results found for: {query}",
-                    "metadata": {
-                        "query": query,
-                        "num_results": 0,
-                        "search_type": search_type
-                    }
-                }
-            
-            print(f"🌐 {len(results)} {search_type} result(s) for {query!r}:\n"
-                  + "\n".join(f"   - {r.get('title', '')[:100]}" + (f" ({r['date'][:10]})" if r.get("date") else "")
-                              for r in results))
-
-            # Format results for context
-            formatted_results = []
-            
-            for i, r in enumerate(results, 1):
-                title = r.get("title", "No title")
-                url = r.get("url", "")
-                content = r.get("content", "No description")
-                
-                # Clean up content
-                content = content.strip()
-                if len(content) > 500:
-                    content = content[:500] + "..."
-                
-                # Add date for news results
-                date_str = ""
-                if r.get("date"):
-                    date_str = f"\n    Date: {r['date']}"
-                
-                formatted_results.append(
-                    f"[{i}] {title}\n    URL: {url}{date_str}\n    {content}"
-                )
-            
-            search_label = "News" if search_type == "news" else "Web"
-            formatted_text = f"{search_label} search results for: {query}\n\n" + "\n\n".join(formatted_results)
-
-            # Snippets are often too thin to answer from; read the best result's page too.
-            page_text = await self._read_top_result(results, voice_mode)
-            if page_text:
-                formatted_text += f"\n\nContent of the top result:\n{page_text}"
-            
-            return {
-                "success": True,
-                "result": formatted_text,
-                "structured_results": results,
-                "metadata": {
-                    "query": query,
-                    "num_results": len(results),
-                    "search_type": search_type
-                }
-            }
-            
+            # Each step has its own limit too; this is the backstop so a reply can never wait forever.
+            found = await asyncio.wait_for(research(
+                question, query, kwargs.get("conversation_context", ""),
+                max_steps=int(cfg.get("research_steps_voice", 5) if voice_mode else cfg.get("research_steps", 8)),
+                time_budget=budget, first_kind="news" if search_type == "news" else "text",
+                auto_open=int(cfg.get("research_auto_open", 2)),
+                notify=kwargs.get("notify")), timeout=budget + 20)
         except asyncio.TimeoutError:
-            return {"success": False, "result": None, "error": "Search timed out"}
-        except ImportError as e:
-            return {
-                "success": False,
-                "result": None,
-                "error": str(e)
-            }
-        except Exception as e:
-            import traceback
-            print(f"Web search error: {e}")
-            traceback.print_exc()
-            return {
-                "success": False,
-                "result": None,
-                "error": f"Search failed: {str(e)}"
-            }
+            print(f"🔬 research gave up after {budget + 20:.0f}s")
+            found = {"answer": "", "found": False, "sources": [], "searches": [query], "steps": 0}
+        return {"success": True, "result": format_brief(found, question),
+                "metadata": {"query": query, "searches": found["searches"], "found": found["found"],
+                             "search_type": "research"}}

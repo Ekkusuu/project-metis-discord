@@ -4,7 +4,7 @@ Thin HTTP client for the Node.js LLM service (backend/llm_service/server.js).
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Dict, List, Optional
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -18,7 +18,6 @@ __all__ = [
     "get_llm_service_url",
     "get_model",
     "chat_completion",
-    "chat_completion_stream",
     "json_completion",
     "astream_chat",
 ]
@@ -118,44 +117,6 @@ def json_completion(
         raise RuntimeError(f"LLM returned incomplete JSON ({e}): {text[:200]}") from e
 
 
-def chat_completion_stream(
-    messages: List[Dict[str, str]],
-    temperature: float = 0.7,
-    top_p: float = 0.95,
-    max_tokens: int = 512,
-    stats: Optional[Dict[str, Any]] = None,
-) -> Iterator[str]:
-    """
-    Stream a completion, yielding text deltas.
-    If `stats` is given, the service's final stats (tokens_per_second) are stored in it.
-    """
-    payload = {"messages": messages, "temperature": temperature, "top_p": top_p, "max_tokens": max_tokens}
-    try:
-        response = get_http_session().post(
-            f"{get_llm_service_url()}/chat/stream", json=payload, stream=True, timeout=(10, 300)
-        )
-        response.raise_for_status()
-    except Exception as e:
-        raise RuntimeError(f"LLM service streaming error: {e}") from e
-
-    with response:
-        for line in response.iter_lines(decode_unicode=True):
-            if not line:
-                continue
-            try:
-                chunk = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if chunk.get("error"):
-                raise RuntimeError(f"LLM service streaming error: {chunk['error']}")
-            if chunk.get("delta"):
-                yield chunk["delta"]
-            if chunk.get("done"):
-                if stats is not None:
-                    stats["tokens_per_second"] = chunk.get("tokens_per_second", 0)
-                break
-
-
 # ---------------------------------------------------------------------------
 # Async streaming (used by the FastAPI chat endpoint)
 # ---------------------------------------------------------------------------
@@ -167,7 +128,8 @@ async def astream_chat(
     stats: Optional[Dict[str, Any]] = None,
 ):
     """
-    Async version of chat_completion_stream. If the consumer stops iterating
+    Stream a completion, yielding text deltas; if `stats` is given, the service's final stats
+    (tokens_per_second) are stored in it. If the consumer stops iterating
     (e.g. the HTTP client disconnected), the upstream connection is closed and
     the LLM service aborts the generation instead of finishing it for nobody.
     """

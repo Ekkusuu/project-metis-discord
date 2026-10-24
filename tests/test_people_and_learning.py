@@ -199,7 +199,7 @@ def test_personalities_can_be_added_edited_and_deleted(prompts_copy):
     data = yaml.safe_load(prompts_copy.read_text(encoding="utf-8"))
     assert data["text_chat"]["pirate"].strip() == "You are Metis, a pirate.\nSay arr."
     assert data["voice_chat"]["pirate"].strip() == "You are Metis, a pirate.\n\n  No emoji."
-    assert data["rag"] == original["rag"] and data["text_chat"]["flirty"] == original["text_chat"]["flirty"]
+    assert data["text_chat"]["flirty"] == original["text_chat"]["flirty"]
     assert raw_prompt("pirate", "voice_chat") == "You are Metis, a pirate.\n\n  No emoji."
 
     save("casual", {"text_chat": "edited text", "voice_chat": "edited voice"})
@@ -210,7 +210,7 @@ def test_personalities_can_be_added_edited_and_deleted(prompts_copy):
     delete("pirate")
     data = yaml.safe_load(prompts_copy.read_text(encoding="utf-8"))
     assert "pirate" not in data["text_chat"] and "pirate" not in data["voice_chat"]
-    assert data["rag"] == original["rag"] and len(data["text_chat"]) == len(original["text_chat"])
+    assert len(data["text_chat"]) == len(original["text_chat"])
     assert "# Voice Chat Prompts" in prompts_copy.read_text(encoding="utf-8")
     assert prompts_copy.with_suffix(".yaml.bak").exists()
 

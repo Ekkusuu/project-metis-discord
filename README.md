@@ -166,7 +166,7 @@ Everything lives in `config.yaml` (prompts in `system_prompts.yaml`, see
 - `rag.*` — indexed folders, chunking, distance/rerank thresholds. `reranker_top_k` is how many chunks reach the prompt.
 - `tools.*` — enable tools individually; `knowledge_search.expand_queries` trades one extra LLM call for better recall in text chat.
 - `memory.learn_every_messages` — how often Metis learns from the conversation.
-- `tools.web_search.read_top_result` / `tools.fetch_webpage` — reading full pages (private/local addresses are always refused). Weather questions are answered with live data from Open-Meteo (free, no key) instead of a text search.
+- `tools.fetch_webpage` — reading full pages (private/local addresses are always refused). Weather questions are answered with live data from Open-Meteo (free, no key) instead of a text search.
 - `voice.*` — voice, pause length before replying, input gain, noise floor.
 
 Adding a tool is a single file — see [TOOLS_GUIDE.md](TOOLS_GUIDE.md).

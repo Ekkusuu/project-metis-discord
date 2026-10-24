@@ -189,13 +189,6 @@ Tools are converted to MCP/OpenAI-style JSON schemas:
 }
 ```
 
-## API Endpoints
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/tools/available` | GET | List all available tools with schemas |
-| `/tools/last-execution` | GET | Get last tool execution results |
-
 ## Debugging
 
 The dashboard's **Tools** tab shows every selection live (arguments, success, execution time),
@@ -216,5 +209,4 @@ Voice requests send `voice_mode: true`, which:
 
 If the tool system fails:
 1. Logs the error
-2. Falls back to legacy RAG mode (if RAG is enabled)
-3. Continues with no tool context if both fail
+2. Continues with no tool context

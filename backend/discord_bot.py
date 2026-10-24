@@ -480,12 +480,7 @@ def chat_payload(conversation: Conversation, voice_mode: bool, present: Optional
         "conversation_id": conversation.key,
     }
     if voice_mode:
-        payload.update({
-            "max_tools": 1,
-            "rag_query_count": 1,
-            "rag_system_prompt": "@rag.query_generation_voice_system",
-            "rag_user_prompt": "@rag.query_generation_voice_user",
-        })
+        payload["max_tools"] = 1
     return payload
 
 

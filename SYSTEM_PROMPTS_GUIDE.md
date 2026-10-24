@@ -21,7 +21,6 @@ Contains all reusable prompts organized by category:
 - `voice_chat`: Prompts for Discord voice channels (default, casual, therapist)
 - `judgment`: Prompts for deciding when to respond (text, voice, selective, active)
 - `memory`: Prompts for memory summarization
-- `rag`: Prompts for RAG query generation
 
 ### `config.yaml`
 Set personality once at the top:

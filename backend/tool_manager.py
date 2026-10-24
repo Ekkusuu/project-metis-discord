@@ -114,9 +114,6 @@ class ToolRegistry:
     def get_all_enabled(self) -> Dict[str, BaseTool]:
         return {name: self._tools[name] for name in sorted(self._enabled)}
 
-    def get_tools_schema(self) -> List[Dict[str, Any]]:
-        return [tool.definition.to_json_schema() for tool in self.get_all_enabled().values()]
-
 
 _tool_registry: Optional[ToolRegistry] = None
 

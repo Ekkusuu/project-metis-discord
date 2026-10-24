@@ -1,5 +1,5 @@
 """
-Chat pipeline: (tools | legacy RAG) -> prompt assembly -> streamed LLM reply.
+Chat pipeline: tools -> prompt assembly -> streamed LLM reply.
 
 Also exposes the "what did the bot just do" state the dashboard shows:
 the last retrieval, the last tool execution and the exact prompt sent to the LLM.
@@ -75,14 +75,6 @@ class ChatRequest(BaseModel):
         default_factory=list, description="Recent speakers; what Metis knows about them is added to the prompt"
     )
     present: List[str] = Field(default_factory=list, description="People currently in the voice channel")
-    # Legacy RAG options (used when the tool system is disabled)
-    rag_query_count: Optional[int] = None
-    rag_system_prompt: Optional[str] = None
-    rag_user_prompt: Optional[str] = None
-
-
-class ChatResponse(BaseModel):
-    reply: str
 
 
 # ---------------------------------------------------------------------------
@@ -202,51 +194,20 @@ async def _run_tools(messages: List[Dict[str, str]], req: ChatRequest, timings: 
     return format_tool_results_for_context(results)
 
 
-def _run_legacy_rag(messages: List[Dict[str, str]], req: ChatRequest, timings: Dict[str, float]) -> str:
-    from backend.rag_engine import format_context_for_prompt, generate_rag_queries, results_for_ui, search
-
-    last_user = messages[-1]["content"]
-    t0 = time.perf_counter()
-    queries = generate_rag_queries(
-        messages, last_user,
-        num_queries=req.rag_query_count,
-        system_prompt_override=req.rag_system_prompt,
-        user_prompt_override=req.rag_user_prompt,
-    )
-    timings["query_generation"] = round(time.perf_counter() - t0, 3)
-    print(f"📚 Knowledge queries: {queries}\n   made from: {last_user!r}")
-
-    t0 = time.perf_counter()
-    found = search(queries)
-    timings["retrieval"] = round(time.perf_counter() - t0, 3)
-
-    state.update(rag=results_for_ui(found, last_user))
-    return format_context_for_prompt(found["accepted"])
-
-
 async def gather_context(messages: List[Dict[str, str]], req: ChatRequest,
-                         notify: Optional[Callable[[str], None]] = None) -> Tuple[str, Dict[str, float], Dict[str, float]]:
-    """Run tools (or legacy RAG). Returns (context_text, tool_timings, rag_timings)."""
-    config = get_config()
+                         notify: Optional[Callable[[str], None]] = None) -> Tuple[str, Dict[str, float]]:
+    """Run the tools. Returns (context_text, tool_timings); no context if the tool system fails."""
     tool_timings: Dict[str, float] = {}
-    rag_timings: Dict[str, float] = {}
-    use_tools = req.use_tools if req.use_tools is not None else config.get("tools", {}).get("enabled", False)
+    use_tools = req.use_tools if req.use_tools is not None else get_config().get("tools", {}).get("enabled", False)
 
     if use_tools:
         try:
-            return await _run_tools(messages, req, tool_timings, notify), tool_timings, rag_timings
+            return await _run_tools(messages, req, tool_timings, notify), tool_timings
         except Exception as e:
             import traceback
-            print(f"Tool system error, falling back to plain RAG: {e}")
+            print(f"Tool system error: {e}")
             traceback.print_exc()
-
-    if config.get("rag", {}).get("enabled", False):
-        try:
-            text = await asyncio.to_thread(_run_legacy_rag, messages, req, rag_timings)
-            return text, tool_timings, rag_timings
-        except Exception as e:
-            print(f"RAG error: {e}")
-    return "", tool_timings, rag_timings
+    return "", tool_timings
 
 
 def people_context(req: ChatRequest) -> str:
@@ -382,7 +343,7 @@ def _sampling(req: ChatRequest) -> Dict[str, Any]:
 async def _prepare(req: ChatRequest, notify: Optional[Callable[[str], None]] = None
                    ) -> Tuple[List[Dict[str, str]], Dict[str, Any]]:
     messages = _base_messages(req)
-    context_text, tool_timings, rag_timings = await gather_context(messages, req, notify)
+    context_text, tool_timings = await gather_context(messages, req, notify)
     found = re.search(r"What you found: (.+)", context_text)
     guidance = reply_guidance(messages, req.voice_mode, bool(context_text), "[web_search]" in context_text,
                               found.group(1).strip() if found else "", chiming_in=req.chiming_in)
@@ -393,7 +354,7 @@ async def _prepare(req: ChatRequest, notify: Optional[Callable[[str], None]] = N
                         req.conversation_id)
     stamp = datetime.datetime.now().isoformat()
     state.context = [{**m, "timestamp": stamp} for m in final]
-    return final, {"tool_timings": tool_timings, "rag_timings": rag_timings}
+    return final, {"tool_timings": tool_timings}
 
 
 _OPENING_CHARS = 30
@@ -443,7 +404,7 @@ def _sentence_end(text: str, count: int) -> int:
 async def chat_stream(req: ChatRequest, request: Request):
     """
     Stream a reply as NDJSON: {"delta": "..."} lines, then a final
-    {"done": true, "tokens_per_second", "llm_generation_time", "ttft", "tool_timings", "rag_timings"}.
+    {"done": true, "tokens_per_second", "llm_generation_time", "ttft", "tool_timings"}.
     Before the reply, {"thinking": "<tool>"} when a slow tool (SLOW_TOOLS) is about to run, so the voice
     bot can fill the pause.
     """
@@ -533,14 +494,6 @@ async def chat_stream(req: ChatRequest, request: Request):
     return StreamingResponse(generate(), media_type="application/x-ndjson")
 
 
-@router.post("/chat", response_model=ChatResponse)
-async def chat(req: ChatRequest):
-    """Non-streaming variant of /chat/stream."""
-    final, _ = await _prepare(req)
-    parts = [delta async for delta in astream_chat(final, **_sampling(req))]
-    return ChatResponse(reply="".join(parts).strip())
-
-
 # ---------------------------------------------------------------------------
 # Knowledge base management
 # ---------------------------------------------------------------------------
@@ -589,29 +542,6 @@ async def clear_rag_database():
 # ---------------------------------------------------------------------------
 # Dashboard endpoints
 # ---------------------------------------------------------------------------
-@router.get("/rag/last-retrieval")
-async def get_last_rag_retrieval():
-    return {"results": state.rag}
-
-
-@router.get("/tools/last-execution")
-async def get_last_tool_execution():
-    return {"results": state.tools}
-
-
-@router.get("/tools/available")
-async def get_available_tools():
-    from backend.tool_manager import get_tool_registry
-
-    tools = get_tool_registry().get_all_enabled()
-    return {
-        "tools": [
-            {"name": t.definition.name, "description": t.definition.description, "schema": t.definition.to_json_schema()}
-            for t in tools.values()
-        ]
-    }
-
-
 @router.get("/rag/stream")
 async def stream_rag_updates(request: Request):
     """SSE feed of {"results": <last retrieval>, "tools": <last tool execution>} whenever either changes."""

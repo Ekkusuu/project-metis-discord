@@ -11,7 +11,6 @@ from chromadb.config import Settings
 
 from backend.config import PROJECT_ROOT, get_config, resolve_path
 from backend.llama_engine import chat_completion
-from backend.prompt_loader import resolve_prompt
 
 # Bump when the way documents/queries are embedded changes; an index built with an
 # older scheme is rebuilt automatically on startup.
@@ -380,13 +379,8 @@ def reindex_path_if_tracked(path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Query generation (legacy pipeline; the tool system has its own entry point)
+# Query generation (knowledge_search and remember tools)
 # ---------------------------------------------------------------------------
-def _conversation_context(messages: List[Dict[str, str]], count: int) -> str:
-    recent = [m for m in messages[-count - 1:] if m.get("role") in ("user", "assistant")] if count > 0 else []
-    return "\n".join(f"{'User' if m['role'] == 'user' else 'AI'}: {m['content']}" for m in recent[:-1])
-
-
 def _parse_query_lines(text: str, limit: int) -> List[str]:
     queries = []
     for line in text.splitlines():
@@ -396,42 +390,6 @@ def _parse_query_lines(text: str, limit: int) -> List[str]:
         if len(queries) >= limit:
             break
     return queries
-
-
-def generate_rag_queries(
-    messages: List[Dict[str, str]],
-    last_user_message: str,
-    num_queries: Optional[int] = None,
-    system_prompt_override: Optional[str] = None,
-    user_prompt_override: Optional[str] = None,
-) -> List[str]:
-    """Ask the LLM for search queries that take the recent conversation into account."""
-    rag_cfg = _rag_cfg()
-    count = num_queries if num_queries is not None else int(rag_cfg.get("query_generation_count", 1))
-    count = max(1, count)
-    context = _conversation_context(messages, int(rag_cfg.get("query_context_messages", 0)))
-    if count == 1 and not context:
-        return [last_user_message]
-
-    system_prompt = resolve_prompt(system_prompt_override or rag_cfg.get("query_generation_system_prompt", ""))
-    template = resolve_prompt(user_prompt_override or rag_cfg.get("query_generation_user_prompt", ""))
-    user_prompt = template.format(
-        conversation_context=context or "(No previous conversation)",
-        last_user_message=last_user_message,
-    )
-    if count > 1:
-        user_prompt += f"\n\nPlease output {count} queries, one per line."
-
-    try:
-        generated = chat_completion(
-            [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
-            temperature=0.4, top_p=0.9, max_tokens=60 * count,
-        )
-        queries = _parse_query_lines(generated, count)
-    except Exception as e:
-        print(f"Error generating RAG queries: {e}")
-        queries = []
-    return queries or [last_user_message]
 
 
 # A small model follows worked examples far better than a list of rules (the old prompt mostly got
@@ -661,7 +619,6 @@ __all__ = [
     "search",
     "results_for_ui",
     "format_context_for_prompt",
-    "generate_rag_queries",
     "generate_optimized_queries",
     "get_file_metadata_path",
 ]
