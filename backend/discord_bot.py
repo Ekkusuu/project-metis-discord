@@ -108,8 +108,16 @@ class Conversation:
         return resolve_prompt(cfg.get("system_prompt", default))
 
     def prompt(self) -> List[Dict[str, str]]:
+        # In voice, people's "Yeah.", "Okay.", "Mm-hmm." between each other are noise for the model; kept only
+        # when answering Metis ("Do you want ...?" "Yeah.") and as the newest line.
+        def keep(i: int, m: Dict[str, Any]) -> bool:
+            if self.mode != "voice" or m["role"] != "user" or i == len(self.messages) - 1:
+                return True
+            return (not is_acknowledgement(m.get("text", m["content"]))
+                    or (i > 0 and self.messages[i - 1]["role"] == "assistant"))
+
         return [{"role": "system", "content": self.system_prompt},
-                *({"role": m["role"], "content": m["content"]} for m in self.messages)]
+                *({"role": m["role"], "content": m["content"]} for i, m in enumerate(self.messages) if keep(i, m))]
 
     # -- speakers ---------------------------------------------------------
     def label_for(self, user: discord.abc.User) -> str:
@@ -1182,14 +1190,11 @@ class VoiceReceiver:
     @staticmethod
     def _print_timings(timings: Dict[str, float], stats: Dict[str, Any], total: float) -> None:
         tool = stats.get("tool_timings") or {}
-        rag = stats.get("rag_timings") or {}
         rows = [
             ("Transcription", timings.get("transcription")),
             ("Judgment", timings.get("judgment")),
             ("Tool selection", tool.get("tool_selection")),
             ("Tool execution", tool.get("tool_execution")),
-            ("RAG queries", rag.get("query_generation")),
-            ("RAG retrieval", rag.get("retrieval")),
             ("LLM first token", stats.get("ttft")),
             ("LLM generation", stats.get("llm_generation_time")),
             ("TTS first audio", timings.get("tts_first")),

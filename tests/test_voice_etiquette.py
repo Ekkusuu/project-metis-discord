@@ -298,3 +298,18 @@ def test_reply_goes_right_after_the_line_it_answers():
     conv.add_assistant("Not much!", to=1, after=a)
     assert [m["role"] for m in conv.messages] == ["user", "assistant", "user"]
     assert conv.prompt()[-1]["role"] == "user"
+
+
+def test_backchannel_between_people_is_left_out_of_the_prompt():
+    conv = bot_mod.Conversation(mode="voice")
+    a = SimpleNamespace(id=1, name="A", display_name="A", bot=False)
+    b = SimpleNamespace(id=2, name="B", display_name="B", bot=False)
+    conv.add_user(a, "aatrox is useless now")
+    conv.add_user(b, "Yeah.")                      # between people: left out
+    q = conv.add_user(a, "Metis, want to play later?")
+    conv.add_assistant("Sure, after dinner?", to=1, after=q)
+    conv.add_user(a, "Yeah.")                      # answering her: kept
+    conv.add_user(b, "Mm-hmm.")                    # newest line: kept
+    texts = [m["content"] for m in conv.prompt()[1:]]
+    assert texts == ["[A]: aatrox is useless now", "[A]: Metis, want to play later?", "Sure, after dinner?",
+                     "[A]: Yeah.", "[B]: Mm-hmm."]

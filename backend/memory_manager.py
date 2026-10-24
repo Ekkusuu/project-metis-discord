@@ -39,9 +39,17 @@ def _safe(fn, *args):
 
 def _learn(messages: List[Dict[str, Any]]) -> Dict[str, int]:
     from backend.learning import learn
+    from backend.llama_engine import wait_until_ready
 
     try:
-        result = learn(messages)
+        try:
+            result = learn(messages)
+        except RuntimeError:
+            # The LLM service was restarting (after a crash). The messages are already marked as learned, so
+            # without a second try what they said would be lost.
+            if not wait_until_ready(60):
+                raise
+            result = learn(messages)
     finally:
         with _stats_lock:
             stats["pending"] -= 1
