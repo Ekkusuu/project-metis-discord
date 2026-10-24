@@ -81,6 +81,7 @@ class Lane {
     this.chat = new LlamaChat({ contextSequence: sequence, chatWrapper, autoDisposeSequence: false });
     this._queues = { interactive: [], background: [] };
     this._busy = false;
+    this._current = null; // { job, preempt } while a job runs
   }
 
   get pending() {
@@ -88,12 +89,16 @@ class Lane {
   }
 
   /**
-   * Queue a task. "interactive" work (someone is waiting for a reply) always runs before
-   * "background" work (learning), so a learning pass never delays an addressee check or tool decision.
+   * Queue a task: task(chat, signal). "interactive" work (someone is waiting for a reply) always runs before
+   * "background" work (learning). It also interrupts a background job that is already running (signal is
+   * aborted), which is queued again: waiting for a learning pass to finish delayed addressee checks and tool
+   * decisions by 1-3 s.
    */
   run(task, priority = "interactive") {
     return new Promise((resolve, reject) => {
-      this._queues[priority === "background" ? "background" : "interactive"].push({ task, resolve, reject });
+      const background = priority === "background";
+      this._queues[background ? "background" : "interactive"].push({ task, resolve, reject, background });
+      if (!background && this._current?.job.background) this._current.preempt.abort();
       this._next();
     });
   }
@@ -103,11 +108,17 @@ class Lane {
     const job = this._queues.interactive.shift() ?? this._queues.background.shift();
     if (!job) return;
     this._busy = true;
+    const preempt = new AbortController();
+    this._current = { job, preempt };
     Promise.resolve()
-      .then(() => job.task(this.chat))
-      .then(job.resolve, job.reject)
+      .then(() => job.task(this.chat, preempt.signal))
+      .then(
+        (value) => (preempt.signal.aborted ? this._queues.background.unshift(job) : job.resolve(value)),
+        (error) => (preempt.signal.aborted ? this._queues.background.unshift(job) : job.reject(error))
+      )
       .finally(() => {
         this._busy = false;
+        this._current = null;
         this._next();
       });
   }
@@ -278,11 +289,11 @@ app.post("/chat/completion", async (req, res) => {
   const controller = abortOnDisconnect(req, res);
   try {
     const result = await auxLane.run(
-      (chat) =>
+      (chat, preempted) =>
         chat.generateResponse(toChatHistory(messages), {
           ...samplingOptions(req.body),
           ...(grammar ? { grammar, repeatPenalty: false } : {}),
-          signal: controller.signal,
+          signal: AbortSignal.any([controller.signal, preempted]),
         }),
       req.body.priority
     );
