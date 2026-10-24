@@ -51,68 +51,113 @@ def test_format_tool_results_empty_list():
 
 # --- select_tools (model calls mocked) -------------------------------------------------------
 @pytest.fixture
-def fake_model(monkeypatch):
+def planner(monkeypatch):
+    """The planning model call, replaced: returns state["plan"] and records what it was shown."""
     import backend.tool_manager as tm
 
-    calls = {"decide": [], "query": []}
-    state = {"choice": "none", "query": None}  # None: the query is the latest message (on topic, like a real one)
+    seen = {"calls": []}
+    state = {"plan": {"standalone": "", "action": "none", "query": "", "recent": False}}
 
     def fake_json(messages, schema, *args, **kwargs):
-        calls["decide"].append(schema)
-        return state["choice"]
-
-    def fake_chat(messages, *args, **kwargs):
-        calls["query"].append(messages)
-        if state["query"] is not None:
-            return state["query"]
-        return messages[-1]["content"].split("Latest message:")[-1].split("]:", 1)[-1].strip()
+        seen["calls"].append({"messages": messages, "schema": schema})
+        return dict(state["plan"])
 
     monkeypatch.setattr(tm, "json_completion", fake_json)
-    monkeypatch.setattr(tm, "chat_completion", fake_chat)
     monkeypatch.setattr(tm, "_last_search", {})  # no search from an earlier test
-    return state, calls
+    return state, seen
 
 
-async def test_small_talk_runs_only_knowledge_search(fake_model):
+def plan(state, action, query="", standalone="", recent=False):
+    state["plan"] = {"standalone": standalone, "action": action, "query": query, "recent": recent}
+
+
+async def test_backchannel_skips_the_planner(planner):
     from backend.tool_manager import select_tools
 
-    state, calls = fake_model
+    state, seen = planner
     result = await select_tools([], "[Sava]: lol nice", 2)
     assert [(c.tool_name, c.arguments) for c in result] == [("knowledge_search", {"query": "lol nice"})]
-    assert calls["decide"] == []  # a plain statement doesn't even ask the model (it cost 0.2-0.7 s per line)
-    assert calls["query"] == []
+    assert seen["calls"] == []
     await select_tools([], "[Sava]: who is the best support?", 2)
-    assert calls["decide"][0] == {"enum": ["none", "remember", "web_search"]}
+    assert seen["calls"][0]["schema"]["properties"]["action"] == {"enum": ["none", "remember", "web_search"]}
 
 
-async def test_web_search_choice_gets_a_generated_query(fake_model):
+async def test_web_search_plan_becomes_a_search(planner):
+    import backend.tool_manager as tm
     from backend.tool_manager import select_tools
 
-    state, _ = fake_model
-    state["choice"] = "web_search"
-    state["query"] = "f1 race winner"
-    result = await select_tools([], "[Sava]: who won the f1 race yesterday?", 2)
+    state, _ = planner
+    plan(state, "web_search", "f1 race winner", "Who won the F1 race yesterday?", recent=True)
+    result = await select_tools([], "[Sava]: who won the f1 race yesterday?", 2, )
     assert ("web_search", {"query": "f1 race winner", "search_type": "news"}) in [(c.tool_name, c.arguments) for c in result]
+    assert tm._last_search[""]["query"] == "f1 race winner"
 
 
-async def test_links_are_always_fetched(fake_model):
+async def test_none_plan_runs_no_tool(planner):
+    from backend.tool_manager import decide_tools
+
+    state, _ = planner
+    plan(state, "none", "", "How would Metis go about the heist we're imagining?")
+    assert await decide_tools([], "[Sava]: so how would you go about it? what's the best way to do it?") == []
+
+
+async def test_links_are_always_fetched(planner):
     from backend.tool_manager import select_tools
 
     result = await select_tools([], "[Sava]: summarize https://example.com/post please", 2)
     assert ("fetch_webpage", {"url": "https://example.com/post"}) in [(c.tool_name, c.arguments) for c in result]
 
 
-async def test_remember_uses_the_message_without_writing_a_web_query(fake_model):
-    from backend.tool_manager import select_tools
+async def test_remember_gets_the_self_contained_question(planner):
+    from backend.tool_manager import decide_tools
 
-    state, calls = fake_model
-    state["choice"] = "remember"
-    result = await select_tools([], "[Sava]: what did I tell you about my exam?", 2)
-    assert [(c.tool_name, c.arguments) for c in result] == [
-        ("knowledge_search", {"query": "what did I tell you about my exam?"}),
-        ("remember", {"query": "what did I tell you about my exam?"}),
-    ]
-    assert calls["query"] == []  # the remember tool writes its own memory queries
+    state, _ = planner
+    plan(state, "remember", "", "What subject was Max's exam last week?")
+    calls = await decide_tools([], "[Max]: do you remember what subject it was?")
+    assert [(c.tool_name, c.arguments) for c in calls] == [("remember", {"query": "What subject was Max's exam last week?"})]
+
+
+async def test_planner_sees_the_conversation_and_the_last_search(planner, monkeypatch):
+    """Follow-ups ("this time for Emerald Plus", "then do it") are resolved by the planner from this context."""
+    import time
+    import backend.tool_manager as tm
+
+    state, seen = planner
+    monkeypatch.setitem(tm._last_search, "voice-1", {"time": time.time(), "query": "best champion site:u.gg"})
+    messages = [{"role": "user", "content": "[Sava]: best champion on u.gg?"},
+                {"role": "assistant", "content": "Braum, 52.1%."},
+                {"role": "user", "content": "[Sava]: could you double-check, but this time for Emerald Plus?"}]
+    await tm.decide_tools(messages, messages[-1]["content"], conversation_id="voice-1")
+    shown = seen["calls"][0]["messages"][-1]["content"]
+    assert "Last web search: best champion site:u.gg" in shown and "Metis: Braum, 52.1%." in shown
+    assert shown.endswith("Latest message: [Sava]: could you double-check, but this time for Emerald Plus?")
+    await tm.decide_tools(messages, messages[-1]["content"], conversation_id="voice-2")
+    assert "Last web search" not in seen["calls"][1]["messages"][-1]["content"]  # per conversation
+
+
+async def test_site_is_kept_only_when_someone_names_it(planner):
+    from backend.tool_manager import decide_tools
+
+    state, _ = planner
+    plan(state, "web_search", "best support site:u.gg", "Who is the best support right now?")
+    calls = await decide_tools([], "[Sava]: who is the best support right now?")
+    assert calls[0].arguments["query"] == "best support"  # carried over from an older question
+    plan(state, "web_search", "best support site:u.gg", "Who is the best support on u.gg?")
+    calls = await decide_tools([], "[Sava]: who is the best support on u.g?")
+    assert calls[0].arguments["query"] == "best support site:u.gg"
+
+
+async def test_query_made_from_metis_words_is_replaced(planner):
+    """A query built from Metis's own made-up reply searched for 'roadster' when asked about France."""
+    from backend.tool_manager import decide_tools
+
+    state, _ = planner
+    plan(state, "web_search", "roadster date France news", "What happened in France recently?", recent=True)
+    messages = [{"role": "user", "content": "[ekkusu]: hello"},
+                {"role": "assistant", "content": "Are you here for the roadster date today?"},
+                {"role": "user", "content": "[ekkusu]: What happened in France recently that everyone is talking about?"}]
+    calls = await decide_tools(messages, messages[-1]["content"])
+    assert calls[0].arguments == {"query": "What happened in France recently?", "search_type": "news"}
 
 
 def test_quick_search_keeps_only_close_matches(monkeypatch):
@@ -200,102 +245,3 @@ def test_recent_lookups_are_remembered_for_a_while(monkeypatch):
     assert chat.recent_lookups_text("voice-2") == ""  # another channel doesn't see it
     monkeypatch.setattr(chat, "_LOOKUP_MEMORY_SECONDS", -1)
     assert chat.recent_lookups_text("voice-1") == ""
-
-
-@pytest.mark.parametrize("message", [
-    "Could you tell me by win rate what is the best champion",
-    "what's the strongest support right now",
-    "is the new iphone worth it",
-])
-async def test_fact_questions_search_without_being_asked_to(fake_model, message):
-    """People don't say "search": "what is the best champion by win rate" got no search (the model said none)."""
-    from backend.tool_manager import select_tools
-
-    result = await select_tools([], f"[Sava]: {message}", 2)
-    assert "web_search" in [c.tool_name for c in result]
-
-
-@pytest.mark.parametrize("message", ["You're kinda mean. Why are you so mean?", "No, I know about that. I think I'm pretty kind.",
-                                     "Fair enough.", "how are we doing?"])
-async def test_chat_stays_without_a_search(fake_model, message):
-    from backend.tool_manager import select_tools
-
-    result = await select_tools([], f"[Sava]: {message}", 2)
-    assert "web_search" not in [c.tool_name for c in result]
-
-
-@pytest.mark.parametrize("message", ["Uh could you double-check, but this time for Emerald Plus?",
-                                     "Uh could you use u.g as reference?"])
-async def test_follow_ups_redo_the_last_search_with_its_site(fake_model, monkeypatch, message):
-    """The model said "none" to these and Metis kept saying "I'm pulling up u.gg" without searching."""
-    import time
-    import backend.tool_manager as tm
-    from backend.tool_manager import select_tools
-
-    state, calls = fake_model
-    state["query"] = "best champion win rate emerald plus site:u.gg"
-    monkeypatch.setitem(tm._last_search, "", {"time": time.time(), "query": "best champion win rate site:u.gg"})
-    result = await select_tools([], f"[Sava]: {message}", 2)
-    searches = [c.arguments["query"] for c in result if c.tool_name == "web_search"]
-    assert searches == ["best champion win rate emerald plus site:u.gg"]
-    assert "Last search: best champion win rate site:u.gg" in calls["query"][0][-1]["content"]
-
-
-async def test_no_follow_up_search_without_an_earlier_one(fake_model, monkeypatch):
-    import backend.tool_manager as tm
-    from backend.tool_manager import select_tools
-
-    monkeypatch.setitem(tm._last_search, "", {"time": 0.0, "query": "old"})
-    result = await select_tools([], "[Sava]: what about you?", 2)
-    assert "web_search" not in [c.tool_name for c in result]
-
-
-@pytest.mark.parametrize("metis, searches", [("I'll check u.gg for Emerald Plus right now.", True),
-                                             ("Thresh has the best win rate in Emerald Plus.", False)])
-async def test_nudges_search_only_after_a_promise(fake_model, metis, searches):
-    """"So are we checking?" after she said she'd check runs the search; after she answered, it doesn't."""
-    from backend.tool_manager import select_tools
-
-    messages = [{"role": "user", "content": "[Sava]: best champion for emerald plus on u.gg?"},
-                {"role": "assistant", "content": metis}, {"role": "user", "content": "[Sava]: So are we checking?"}]
-    result = await select_tools(messages, messages[-1]["content"], 2)
-    assert ("web_search" in [c.tool_name for c in result]) == searches
-
-
-async def test_last_search_is_per_conversation(fake_model, monkeypatch):
-    """A search in one channel isn't a "last search" for a follow-up in another."""
-    import time
-    import backend.tool_manager as tm
-
-    monkeypatch.setitem(tm._last_search, "voice-1", {"time": time.time(), "query": "best champion site:u.gg"})
-    calls = await tm.decide_tools([], "[Sava]: could you double-check, but this time for Emerald Plus?", 2,
-                                  conversation_id="voice-2")
-    assert "web_search" not in [c.tool_name for c in calls]
-
-
-async def test_search_with_no_word_from_what_was_just_said_is_dropped(fake_model):
-    """"How would you go about it? What's the best way to do it?" (about something else) became a search for an
-    older topic, "Kindred build", and she answered with item builds."""
-    from backend.tool_manager import select_tools
-
-    state, _ = fake_model
-    state["query"] = "Kindred build"
-    messages = [{"role": "user", "content": "[Sava]: what's the best build for Kindred?"},
-                {"role": "assistant", "content": "Kraken Slayer and The Collector."},
-                {"role": "user", "content": "[Sava]: thank you"},
-                {"role": "user", "content": "[Sava]: are you a girl?"},
-                {"role": "user", "content": "[Sava]: let's talk about something completely different"},
-                {"role": "user", "content": "[Sava]: So how would you go about it? What's the best way to do it?"}]
-    result = await select_tools(messages, messages[-1]["content"], 2)
-    assert "web_search" not in [c.tool_name for c in result]
-
-
-async def test_no_web_search_for_people_in_the_chat(fake_model):
-    """"Who's Metis, by the way?" searched the web for "ekkusu", the speaker's own name."""
-    from backend.tool_manager import select_tools
-
-    state, _ = fake_model
-    state["choice"], state["query"] = "web_search", "ekkusu"
-    messages = [{"role": "user", "content": "[ekkusu]: Who's Metis, by the way?"}]
-    result = await select_tools(messages, messages[-1]["content"], 2)
-    assert "web_search" not in [c.tool_name for c in result]

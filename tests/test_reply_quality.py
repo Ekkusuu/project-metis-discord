@@ -2,11 +2,6 @@
 import pytest
 
 from backend.routers.chat import build_prompt, reply_guidance
-from backend.tool_manager import _FRESH_INFO, _SEARCH_REQUEST, is_question_like
-
-
-def wants_web(text):
-    return bool(_SEARCH_REQUEST.search(text) or (is_question_like(text) and _FRESH_INFO.search(text)))
 
 
 def test_guidance_names_the_speaker_and_sits_right_before_their_message():
@@ -22,27 +17,6 @@ def test_text_guidance_has_no_voice_rule():
     assert "spoken aloud" not in reply_guidance([{"role": "user", "content": "[a]: hi"}], voice=False, has_context=False)
 
 
-@pytest.mark.parametrize("text", [
-    "Could you please tell me um when was the Tesla Roadster released?",
-    "No, just tell me the date when it was released, please fi search for it.",
-    "Please give me the date and time when the Tesla Roadster was released.",
-    "can you look it up",
-    "how much does a ps5 cost",
-])
-def test_fact_questions_and_search_requests_use_the_web(text):
-    assert wants_web(text)
-
-
-@pytest.mark.parametrize("text", [
-    "Not much really, I was just sitting in this waste shot.",
-    "You know, I'm actually looking for a girlfriend.",
-    "Okay, then you can leave.",
-    "i wonder what she meant",
-])
-def test_small_talk_does_not_trigger_search(text):
-    assert not wants_web(text)
-
-
 def test_voice_name_aliases():
     import backend.voice_service as vs
 
@@ -50,30 +24,6 @@ def test_voice_name_aliases():
     svc.config, svc._names, svc._aliases = {}, [], {"matthis": "Metis", "mathis": "Metis"}
     assert svc._correct_names("Hello Matthis, how are you") == "Hello Metis, how are you"
     assert svc._correct_names("I bought a new mattress") == "I bought a new mattress"
-
-
-def test_search_query_ignores_metis_replies_and_made_up_words(monkeypatch):
-    """A query built from Metis's own made-up reply searched for 'roadster' when asked about France."""
-    import asyncio
-    import backend.tool_manager as tm
-
-    seen = {}
-
-    def fake_query(messages, *args):
-        seen["prompt"] = messages[-1]["content"]
-        return "roadster date France news"
-
-    monkeypatch.setattr(tm, "json_completion", lambda *a, **k: "web_search")
-    monkeypatch.setattr(tm, "chat_completion", fake_query)
-    messages = [
-        {"role": "user", "content": "[ekkusu]: hello"},
-        {"role": "assistant", "content": "Are you here for the roadster date today?"},
-        {"role": "user", "content": "[ekkusu]: What happened in France recently that everyone is talking about?"},
-    ]
-    calls = asyncio.run(tm.decide_tools(messages, messages[-1]["content"]))
-    assert "roadster" not in seen["prompt"]
-    assert calls[0].arguments["query"] == "What happened in France recently that everyone is talking about?"
-    assert calls[0].arguments["search_type"] == "news"
 
 
 def test_grounded_query_keeps_good_queries():
@@ -93,14 +43,6 @@ def test_weather_place_comes_from_the_question():
     assert place_words("Uh could you please search for me what is the weather in Moldova Right Now?") == ["Moldova"]
     assert place_words("What is the weather in Chisinau right now") == ["Chisinau"]
     assert WEATHER_QUESTION.search("what's the temperature in London") and not WEATHER_QUESTION.search("hi there")
-
-
-def test_go_ahead_after_a_question_searches():
-    from backend.tool_manager import _GO_AHEAD
-
-    for text in ["Then do it.", "go ahead", "yes please", "ok search it"]:
-        assert _GO_AHEAD.match(text), text
-    assert not _GO_AHEAD.match("do it yourself, I'm busy")
 
 
 def test_metis_does_not_ping_herself():

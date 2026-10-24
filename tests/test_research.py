@@ -8,7 +8,6 @@ import pytest
 import backend.research as research_mod
 from backend.research import format_brief, research, site_in
 from backend.routers.chat import ChatRequest, Message, _sentence_end, _sentence_limit
-from backend.tool_manager import _CORRECTION
 from backend.tools import web_page_tool
 
 
@@ -116,12 +115,6 @@ def test_sentence_limit_depends_on_the_question():
     assert _sentence_limit(req("[ekkusu]: hello")) == 3
     assert _sentence_limit(req("[ekkusu]: explain how black holes form")) == 6
     assert _sentence_limit(req("[ekkusu]: hello", voice=False)) == 0
-
-
-def test_correction_after_a_search():
-    assert _CORRECTION.search("No, I meant the best jungle champion right now.")
-    assert _CORRECTION.search("nah I mean the one from last year")
-    assert not _CORRECTION.search("no way, that's crazy")
 
 
 def test_search_races_engines_and_retries_a_misheard_site(monkeypatch):
