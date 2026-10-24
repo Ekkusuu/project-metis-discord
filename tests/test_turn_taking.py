@@ -231,11 +231,13 @@ def test_metis_chimes_in_after_people_talk_for_a_while():
 
 
 def test_no_chiming_in_too_soon_off_or_reserved():
-    assert verdict(_group_talk(30), settings=Settings(voice=True, chime_in_after=60)) == SKIP
-    assert verdict(_group_talk(90), settings=Settings(voice=True, chime_in_after=0)) == SKIP
+    """Not yet time to chime in: in a call the model judges who the line is for; reserved mode stays quiet."""
+    assert verdict(_group_talk(30), settings=Settings(voice=True, chime_in_after=60)) == ASK
+    assert verdict(_group_talk(90), settings=Settings(voice=True, chime_in_after=0)) == ASK
+    assert verdict(_group_talk(90), settings=Settings(voice=False, chime_in_after=0)) == SKIP  # text chat
     assert verdict(_group_talk(90), settings=Settings(voice=True, chime_in_after=60, engagement="reserved")) == SKIP
     recent_metis = [t(None, "hi guys", 20)] + _group_talk(15)
-    assert verdict(recent_metis, settings=Settings(voice=True, chime_in_after=60)) == SKIP
+    assert verdict(recent_metis, settings=Settings(voice=True, chime_in_after=60)) == ASK
 
 
 def test_name_starting_a_later_sentence_addresses_metis():
@@ -275,12 +277,9 @@ def test_anyone_answering_her_question_gets_a_reply():
 def test_talking_about_her_as_she_goes_to_the_model_and_she_reacts():
     """"She's actually right" and "she really likes Shaco counters" were about Metis but skipped or misread."""
     from backend.turn_taking import verdict_from_addressee
-    soon = [t(EKK, "is shaco good", 20), t(None, "Shaco counters Kindred best.", 15, to=EKK),
-            t(SAVA, "no way", 10), t(EKK, "Wait, she's actually right.")]
-    assert verdict(soon, settings=Settings(voice=True)) == RESPOND  # right after she spoke: it's her
-    later = [t(EKK, "is shaco good", 70), t(None, "Shaco counters Kindred best.", 60, to=EKK),
+    turns = [t(EKK, "is shaco good", 20), t(None, "Shaco counters Kindred best.", 15, to=EKK),
              t(SAVA, "no way", 10), t(EKK, "Wait, she's actually right.")]
-    assert verdict(later, settings=Settings(voice=True)) == ASK  # a minute later the model decides
+    assert verdict(turns, settings=Settings(voice=True)) == ASK
     assert verdict_from_addressee("talking about Metis", Settings(voice=True)).verdict == RESPOND
     assert verdict_from_addressee("talking about Metis", Settings(voice=True, engagement="reserved")).verdict == SKIP
 

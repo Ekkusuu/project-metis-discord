@@ -189,9 +189,6 @@ _QUESTION_START = re.compile(
 )
 
 
-_ABOUT_HER = re.compile(r"\b(she|she's|shes|her|hers|herself)\b", re.IGNORECASE)
-
-
 def is_question(text: str) -> bool:
     return "?" in text or bool(_QUESTION_START.match(text))
 
@@ -298,17 +295,6 @@ def decide(
     if len(humans) >= 2:
         if mentions_name(text, metis_names):
             return Decision(ASK, "people are talking and mention Metis")
-        if s.voice and _ABOUT_HER.search(text) and metis_idx is not None and now - before[metis_idx].ts <= 90:
-            # "She's actually right", "she really likes Shaco counters": talking about her, without her name.
-            # Right after she spoke that's almost always her ("What did she learn?" 29 s later, the model
-            # said it was for someone else); later on the model decides.
-            if now - before[metis_idx].ts <= 30 and s.engagement != "reserved":
-                return Decision(RESPOND, "people are talking about Metis")
-            return Decision(ASK, "people may be talking about Metis")
-        if is_question(text) and s.voice and s.engagement != "reserved":
-            # "Admit it, Aatrox is a terrible champion, right?" was for her, but every question in a group was
-            # skipped. The model looks at who it's for (a question to the other person stays theirs).
-            return Decision(ASK, "a question while people are talking")
         # Joining in now and then, like a friend in the call. Skipping all of it kept her silent for
         # minutes while two people talked, until they asked why she never says anything.
         quiet_since = before[metis_idx].ts if metis_idx is not None else (since_metis[0].ts if since_metis else now)
@@ -317,6 +303,11 @@ def decide(
                 and now - quiet_since >= s.chime_in_after and not is_acknowledgement(text)
                 and len(text.split()) >= 4):
             return Decision(RESPOND, "chiming in after people talked for a while", {"chime": True})
+        if s.voice and s.engagement != "reserved" and not is_acknowledgement(text) and not is_status_update(text):
+            # In a call the model reads who each line is for, as group-chat bots do: questions to her, "she's
+            # actually right" about her, or something for the other person. Word rules ("she/her", "?") missed
+            # most of these and misread others.
+            return Decision(ASK, "people are talking; who is this for?")
         return Decision(SKIP, "people are talking among themselves")
 
     if is_acknowledgement(text):
@@ -360,6 +351,28 @@ Decide who the LAST message is meant for.
 - everyone in the chat: it is said to the whole group.
 - nobody in particular: thinking out loud, a status update, a reaction.
 Answer with one option."""
+
+# Worked examples, given as earlier turns: a small model follows examples far better than the definitions.
+ADDRESSEE_EXAMPLES = [
+    ("Chat:\nSam: did you finish the essay?\nAna: almost, one page left\nSam: nice, want to grab food after?\n\n"
+     "Who is the LAST message meant for?", "another person in the chat"),
+    ("Chat:\nSam: is shaco any good?\nMetis (to Sam): He's top tier in the jungle right now.\nAna: no way\n"
+     "Sam: wait, she's actually right\n\nWho is the LAST message meant for?", "talking about Metis"),
+    ("Chat:\nSam: aatrox is useless now\nAna: yeah he doesn't even heal\n"
+     "Ana: admit it, aatrox is a terrible champion, right?\n\nWho is the LAST message meant for?", "Metis"),
+    ("Chat:\nSam: brb getting water\n\nWho is the LAST message meant for?", "nobody in particular"),
+    ("Chat:\nAna: anyone know a good pizza place around here?\n\nWho is the LAST message meant for?",
+     "everyone in the chat"),
+]
+
+
+def addressee_messages(turns: Sequence[Turn], names_by_id: Dict[int, str]) -> List[Dict[str, str]]:
+    """The prompt for the addressee check (answers are JSON strings: the call is constrained to the choices)."""
+    examples = [m for question, answer in ADDRESSEE_EXAMPLES
+                for m in ({"role": "user", "content": question}, {"role": "assistant", "content": f'"{answer}"'})]
+    return [{"role": "system", "content": ADDRESSEE_PROMPT}, *examples,
+            {"role": "user", "content": "Chat:\n" + transcript_for_model(turns, names_by_id)
+                                        + "\n\nWho is the LAST message meant for?"}]
 
 
 # ---------------------------------------------------------------------------

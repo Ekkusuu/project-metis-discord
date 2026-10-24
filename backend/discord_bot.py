@@ -48,7 +48,7 @@ from backend.text_utils import (
     take_emotion,
 )
 from backend.turn_taking import (
-    ADDRESSEE_CHOICES, ADDRESSEE_PROMPT, ASK, RESPOND, SKIP, WAIT_OPEN, Decision, Settings, Turn, decide,
+    ADDRESSEE_CHOICES, ASK, RESPOND, SKIP, WAIT_OPEN, Decision, Settings, Turn, addressee_messages, decide,
     transcript_for_model, verdict_from_addressee, LEAVE_CHOICES, LEAVE_PROMPT, addressed_by_name,
     clearly_asks_to_leave, is_acknowledgement, might_ask_to_leave, name_variants, spoken_names,
 )
@@ -318,11 +318,7 @@ async def ask_addressee(conversation: Conversation, turns: Optional[List[Turn]] 
     """One constrained model call: who is the last message meant for? (ambiguous cases only)"""
     turns = turns if turns is not None else conversation.turns()
     payload = {
-        "messages": [
-            {"role": "system", "content": ADDRESSEE_PROMPT},
-            {"role": "user", "content": "Chat:\n" + transcript_for_model(turns, conversation.names_by_id())
-                                        + "\n\nWho is the LAST message meant for?"},
-        ],
+        "messages": addressee_messages(turns, conversation.names_by_id()),
         "json_schema": {"enum": ADDRESSEE_CHOICES},
         "temperature": 0,
         "max_tokens": 16,
