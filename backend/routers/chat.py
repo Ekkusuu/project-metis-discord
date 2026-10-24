@@ -224,8 +224,11 @@ def people_context(req: ChatRequest) -> str:
             + ("" if req.voice_mode else " To ping someone, write @ and their name.")
             # Told "she really likes Shaco counters", she answered "Yeah, she's pretty obsessed with those
             # stats", and "she's actually right" got an argument: she didn't see they meant her.
+            # Only with others in the call: one-on-one "she" is someone else (the champion she just described),
+            # and the hint made her talk about herself in the third person.
             + (' When people in the call say "she" or "her" without another name, they usually mean you, '
-               'Metis. Talk about yourself as "I" and "me", never as "she" or "Metis".' if req.voice_mode else "")
+               'Metis. Talk about yourself as "I" and "me", never as "she" or "Metis".'
+               if req.voice_mode and len(req.present) > 1 else "")
         )
     if req.present:
         parts.append("In the voice channel right now: " + ", ".join(req.present))
@@ -295,8 +298,10 @@ def reply_guidance(messages: List[Dict[str, str]], voice: bool, has_context: boo
         rules.append("Say something new; don't repeat what you said before.")
     # Said positively: listing "never say you're an AI, a bot, a model" put exactly those words in the small
     # model's mouth ("weird question for an AI bot").
-    rules.append("You're Metis, a real person hanging out here with your friends. If someone asks whether "
-                 "you're real or human, answer as yourself.")
+    # Not "you're real, answer as yourself": she then answered "am I real?" to every question about herself
+    # ("Who is Metis?" "It's just me, I'm real"; "Are you a girl?" "I'm the real deal").
+    rules.append("Talk as Metis, the person described at the top, with her own life, tastes and opinions. "
+                 "Speak about yourself as \"I\".")
     if found_answer:
         # The 4B model with the mean persona answered a successful lookup with "look it up yourself!" and a turn
         # later made up a different answer. The answer as the very last instruction is followed.
@@ -440,15 +445,23 @@ async def chat_stream(req: ChatRequest, request: Request):
         stats: Dict[str, Any] = {}
         start = time.perf_counter()
         first_token: Optional[float] = None
-        previous = _opening(next((m["content"] for m in reversed(final) if m["role"] == "assistant"), ""))
+        # Her last few replies: "I'm the girl who just asked you about Kindred builds" came three turns in a row,
+        # not only twice.
+        earlier = [_opening(m["content"]) for m in final if m["role"] == "assistant"][-3:]
+        earlier = [o[:_OPENING_CHARS] for o in earlier if o]
         limit = _sentence_limit(req)
         try:
             for attempt in range(2):
                 # A small model sometimes starts its previous reply over, word for word. The first few words are
                 # held back (~0.1 s) and compared; a repeat is dropped and regenerated with more randomness.
-                checking, repeated, reply, sent = bool(previous) and attempt == 0, False, "", 0
+                checking, repeated, reply, sent = bool(earlier) and attempt == 0, False, "", 0
                 params = sampling if attempt == 0 else {**sampling, "temperature": min(1.2, sampling["temperature"] + 0.3)}
-                async with contextlib.aclosing(astream_chat(final, stats=stats, **params)) as deltas:
+                prompt = final
+                if attempt == 1 and len(final) >= 2 and final[-2]["role"] == "system":  # the reply guidance
+                    # More randomness alone often gave the same opening again; saying which one to avoid works.
+                    note = f'\n- Don\'t start like you did before ("{repeat_of}..."); say something different.'
+                    prompt = final[:-2] + [{**final[-2], "content": final[-2]["content"] + note}, final[-1]]
+                async with contextlib.aclosing(astream_chat(prompt, stats=stats, **params)) as deltas:
                     async for delta in deltas:
                         if first_token is None:
                             first_token = time.perf_counter() - start
@@ -458,8 +471,8 @@ async def chat_stream(req: ChatRequest, request: Request):
                             if len(opening) < _OPENING_CHARS:
                                 continue
                             checking = False
-                            if opening[:_OPENING_CHARS] == previous[:_OPENING_CHARS]:
-                                repeated = True
+                            if opening[:_OPENING_CHARS] in earlier:
+                                repeated, repeat_of = True, reply.strip()[:60]
                                 break  # closing the stream stops the generation
                         # Spoken replies stop after `limit` sentences: she rambled for 18 seconds in one go.
                         end = _sentence_end(reply, limit) if limit else -1
@@ -472,7 +485,8 @@ async def chat_stream(req: ChatRequest, request: Request):
                             print(f"✂️ Stopped the spoken reply after {limit} sentences")
                             break
                 if checking:  # the whole reply was shorter than the check
-                    repeated = _opening(reply) == previous
+                    repeated = bool(_opening(reply)) and any(o.startswith(_opening(reply)) for o in earlier)
+                    repeat_of = reply.strip()[:60]
                     if not repeated:
                         yield json.dumps({"delta": reply}) + "\n"
                 if not repeated:

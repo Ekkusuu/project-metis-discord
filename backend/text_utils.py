@@ -224,6 +224,8 @@ def take_emotion(text: str, known: List[str]) -> tuple[Optional[str], str]:
         return " "
 
     text = _TAG.sub(drop, text)
+    # "[happy]: Hey you." (written like a speaker label) left a ": " that the voice read out.
+    text = re.sub(r"^\s*:\s*", "", text) if emotion else text
     return emotion, re.sub(r"\s{2,}", " ", text).strip()
 
 

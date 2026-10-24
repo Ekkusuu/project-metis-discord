@@ -55,7 +55,7 @@ def fake_model(monkeypatch):
     import backend.tool_manager as tm
 
     calls = {"decide": [], "query": []}
-    state = {"choice": "none", "query": "f1 race winner"}
+    state = {"choice": "none", "query": None}  # None: the query is the latest message (on topic, like a real one)
 
     def fake_json(messages, schema, *args, **kwargs):
         calls["decide"].append(schema)
@@ -63,7 +63,9 @@ def fake_model(monkeypatch):
 
     def fake_chat(messages, *args, **kwargs):
         calls["query"].append(messages)
-        return state["query"]
+        if state["query"] is not None:
+            return state["query"]
+        return messages[-1]["content"].split("Latest message:")[-1].split("]:", 1)[-1].strip()
 
     monkeypatch.setattr(tm, "json_completion", fake_json)
     monkeypatch.setattr(tm, "chat_completion", fake_chat)
@@ -88,6 +90,7 @@ async def test_web_search_choice_gets_a_generated_query(fake_model):
 
     state, _ = fake_model
     state["choice"] = "web_search"
+    state["query"] = "f1 race winner"
     result = await select_tools([], "[Sava]: who won the f1 race yesterday?", 2)
     assert ("web_search", {"query": "f1 race winner", "search_type": "news"}) in [(c.tool_name, c.arguments) for c in result]
 
@@ -268,3 +271,31 @@ async def test_last_search_is_per_conversation(fake_model, monkeypatch):
     calls = await tm.decide_tools([], "[Sava]: could you double-check, but this time for Emerald Plus?", 2,
                                   conversation_id="voice-2")
     assert "web_search" not in [c.tool_name for c in calls]
+
+
+async def test_search_with_no_word_from_what_was_just_said_is_dropped(fake_model):
+    """"How would you go about it? What's the best way to do it?" (about something else) became a search for an
+    older topic, "Kindred build", and she answered with item builds."""
+    from backend.tool_manager import select_tools
+
+    state, _ = fake_model
+    state["query"] = "Kindred build"
+    messages = [{"role": "user", "content": "[Sava]: what's the best build for Kindred?"},
+                {"role": "assistant", "content": "Kraken Slayer and The Collector."},
+                {"role": "user", "content": "[Sava]: thank you"},
+                {"role": "user", "content": "[Sava]: are you a girl?"},
+                {"role": "user", "content": "[Sava]: let's talk about something completely different"},
+                {"role": "user", "content": "[Sava]: So how would you go about it? What's the best way to do it?"}]
+    result = await select_tools(messages, messages[-1]["content"], 2)
+    assert "web_search" not in [c.tool_name for c in result]
+
+
+async def test_no_web_search_for_people_in_the_chat(fake_model):
+    """"Who's Metis, by the way?" searched the web for "ekkusu", the speaker's own name."""
+    from backend.tool_manager import select_tools
+
+    state, _ = fake_model
+    state["choice"], state["query"] = "web_search", "ekkusu"
+    messages = [{"role": "user", "content": "[ekkusu]: Who's Metis, by the way?"}]
+    result = await select_tools(messages, messages[-1]["content"], 2)
+    assert "web_search" not in [c.tool_name for c in result]

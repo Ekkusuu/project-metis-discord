@@ -182,3 +182,42 @@ def test_made_up_voice_tags_map_to_the_nearest_emotion():
     assert take_emotion("[hmph] Whatever.", known) == ("annoyed", "Whatever.")
     assert take_emotion("[danger] Run!", known) == ("scared", "Run!")
     assert take_emotion("[lucky] Nice.", known) == (None, "Nice.")  # "happy" isn't one of this voice's moods
+
+
+async def test_stream_catches_a_repeat_of_an_older_reply_and_says_what_to_avoid(monkeypatch):
+    """"I'm the girl who just asked you about Kindred builds" came three turns in a row."""
+    import json as _json
+
+    import backend.routers.chat as chat
+
+    old = "I'm the girl who just asked you about Kindred builds, so basically your new best friend."
+    final = [{"role": "assistant", "content": old}, {"role": "user", "content": "[a]: who are you?"},
+             {"role": "assistant", "content": "Just me, hanging out."},
+             {"role": "system", "content": "How to reply:\n- Say something new."},
+             {"role": "user", "content": "[a]: are you a girl?"}]
+    prompts = []
+
+    async def fake_prepare(req, notify=None):
+        return final, {}
+
+    async def fake_stream(messages, stats=None, temperature=0.7, **kw):
+        prompts.append(messages)
+        text = old if len(prompts) == 1 else "Yep, last time I checked."
+        for word in text.split(" "):
+            yield word + " "
+
+    monkeypatch.setattr(chat, "_prepare", fake_prepare)
+    monkeypatch.setattr(chat, "astream_chat", fake_stream)
+    req = chat.ChatRequest(messages=[{"role": "user", "content": "[a]: hi"}], voice_mode=True)
+    response = await chat.chat_stream(req, None)
+    said = "".join([_json.loads(c).get("delta", "") async for c in response.body_iterator])
+    assert said.strip() == "Yep, last time I checked."
+    assert "Don't start like you did before (\"I'm the girl who just asked" in prompts[1][-2]["content"]
+    assert "Don't start like" not in prompts[0][-2]["content"]  # only on the retry
+
+
+def test_voice_tag_written_like_a_name_label_leaves_no_colon():
+    from backend.text_utils import take_emotion
+
+    assert take_emotion("[happy]: Hey you.", ["happy"]) == ("happy", "Hey you.")
+    assert take_emotion("[neutral] : Morning.", ["happy"]) == ("neutral", "Morning.")

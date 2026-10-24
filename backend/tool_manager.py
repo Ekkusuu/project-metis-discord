@@ -258,6 +258,27 @@ def grounded_query(query: str, said_by_people: str, said_by_metis: str, fallback
     return fallback if borrowed else query
 
 
+_COMMON = set("the and for you your are was what who how why when where which with this that best good about "
+               "can could would should does did tell know right now".split())
+
+
+def _query_words(text: str) -> set:
+    """Words of a query or message, by stem, without site: and very common words."""
+    text = re.sub(r"\bsite:\S+", "", text)
+    return {w[:4] for w in re.findall(r"[a-z0-9]+", text.lower()) if len(w) >= 2 and w not in _COMMON}
+
+
+def on_topic(query: str, said: str) -> bool:
+    """True if a word of the query is in what was just said."""
+    return bool(_query_words(query) & _query_words(said))
+
+
+def only_names(query: str, names: str) -> bool:
+    """True if the query is nothing but names of people in the chat (or Metis): nothing to look up on the web."""
+    words = _query_words(query)
+    return bool(words) and words <= _query_words(names)
+
+
 def keep_named_site(query: str, message: str) -> str:
     """
     The query without its "site:" if the latest message doesn't name that site. The query writer carried a
@@ -399,6 +420,18 @@ async def decide_tools(
             grounded = grounded_query(written, f"{said} {text} {last_query}", metis_said, text)
             # A follow-up ("this time for Emerald Plus") keeps the site the last search was limited to.
             query = keep_named_site(grounded, f"{text} {last_query}" if follow_up else text)
+            near = " ".join([text, *(_message_text(line) for line in said.splitlines()[-2:])])
+            speakers = " ".join(name for m in messages if m.get("role") == "user"
+                                for name in re.findall(r"^\[([^\]]+)\]", m["content"]))
+            if choice == "web_search" and only_names(query, f"metis {speakers}"):
+                # "Who's Metis, by the way?" searched the web for "ekkusu", the speaker's own name.
+                print(f"🔎 dropped web search {query!r}: it's only about people in this chat")
+                return calls
+            if choice == "web_search" and not follow_up and not on_topic(query, near):
+                # "How would you go about it? What's the best way to do it?" (about something else) became a
+                # search for an older topic, "Kindred build", and she answered with item builds.
+                print(f"🔎 dropped web search {query!r}: none of its words are in what was just said")
+                return calls
             if choice == "web_search":
                 _last_search[conversation_id] = {"time": time.time(), "query": query}
             arguments: Dict[str, Any] = {_first_string_param(decidable[choice]): query}

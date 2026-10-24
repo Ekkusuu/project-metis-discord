@@ -86,28 +86,30 @@ async def _search_once(query: str, kind: str, count: int) -> List[Dict[str, Any]
     engines = (get_config().get("tools", {}).get("web_search") or {}).get("engines") or _ENGINES
     t0 = time.perf_counter()
 
-    async def attempt(engine: str) -> tuple:
+    async def attempt(engine: str, delay: float = 0.0) -> tuple:
+        await asyncio.sleep(delay)
         return engine, await asyncio.wait_for(asyncio.to_thread(run, engine), timeout=6)
 
-    if kind == "text":
-        tasks = [asyncio.create_task(attempt(e)) for e in engines]
-        for next_done in asyncio.as_completed(tasks):
+    # The mix joins the race if the fast engines haven't answered in 2.5 s. Started only after they failed,
+    # a search took 13 s when Yandex and Yahoo were slow.
+    fast = list(engines) if kind == "text" else []
+    tasks = [asyncio.create_task(attempt(e)) for e in fast]
+    tasks.append(asyncio.create_task(attempt("auto", 2.5 if fast else 0.0)))
+    try:
+        for next_done in asyncio.as_completed(tasks, timeout=9):
             try:
                 engine, found = await next_done
             except Exception:
                 continue
             if found:
-                for t in tasks:
-                    t.cancel()
-                print(f"   {kind} search {query!r}: {len(found)} from {engine} in {time.perf_counter() - t0:.1f}s")
+                where = "the mix" if engine == "auto" else engine
+                print(f"   {kind} search {query!r}: {len(found)} from {where} in {time.perf_counter() - t0:.1f}s")
                 return found
-    try:
-        found = await asyncio.wait_for(asyncio.to_thread(run, "auto"), timeout=8)
-        print(f"   {kind} search {query!r}: {len(found)} from the mix in {time.perf_counter() - t0:.1f}s")
-        return found
-    except Exception as e:
-        print(f"   {kind} search failed for {query!r} after {time.perf_counter() - t0:.1f}s: {e}")
-        return []
+    finally:
+        for t in tasks:
+            t.cancel()
+    print(f"   {kind} search failed for {query!r} after {time.perf_counter() - t0:.1f}s")
+    return []
 
 
 async def _search(query: str, kind: str = "text", count: int = 6) -> List[Dict[str, Any]]:
