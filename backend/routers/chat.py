@@ -305,8 +305,10 @@ def reply_guidance(messages: List[Dict[str, str]], voice: bool, has_context: boo
     if found_answer:
         # The 4B model with the mean persona answered a successful lookup with "look it up yourself!" and a turn
         # later made up a different answer. The answer as the very last instruction is followed.
-        rules.append(f'Your first sentence gives them what you found, in your own words: "{found_answer}". '
-                     "Only then add your own reaction.")
+        # Given as facts to retell, not a quote: quoted, she read the research notes out ("Based on the search
+        # results, ...").
+        rules.append(f"Your first sentence tells them what you found, the way you'd say it to a friend (not "
+                     f"\"based on the search results\"). The facts: {found_answer}. Then add your own reaction.")
     return "How to reply:\n- " + "\n- ".join(rules)
 
 
@@ -423,18 +425,24 @@ async def chat_stream(req: ChatRequest, request: Request):
         # "let me look that up" she went silent for 10+ seconds while reading pages.
         heartbeat = float(get_config().get("voice", {}).get("thinking_heartbeat", 4.0))
         last_said: Optional[float] = None
-        while not preparing.done():
-            waiter = asyncio.create_task(events.get())
-            await asyncio.wait({preparing, waiter}, return_when=asyncio.FIRST_COMPLETED,
-                               timeout=heartbeat if last_said is not None else None)
-            if waiter.done():
-                last_said = time.perf_counter()
-                yield json.dumps({"thinking": waiter.result()}) + "\n"
-                continue
-            waiter.cancel()
-            if not preparing.done() and last_said is not None and time.perf_counter() - last_said >= heartbeat:
-                last_said = time.perf_counter()
-                yield json.dumps({"thinking": "still_thinking"}) + "\n"
+        try:
+            while not preparing.done():
+                waiter = asyncio.create_task(events.get())
+                await asyncio.wait({preparing, waiter}, return_when=asyncio.FIRST_COMPLETED,
+                                   timeout=heartbeat if last_said is not None else None)
+                if waiter.done():
+                    last_said = time.perf_counter()
+                    yield json.dumps({"thinking": waiter.result()}) + "\n"
+                    continue
+                waiter.cancel()
+                if not preparing.done() and last_said is not None and time.perf_counter() - last_said >= heartbeat:
+                    last_said = time.perf_counter()
+                    yield json.dumps({"thinking": "still_thinking"}) + "\n"
+        finally:
+            # The bot hung up ("no, don't look that up" while she was searching): stop the lookup too, instead
+            # of letting it run on for nobody.
+            if not preparing.done():
+                preparing.cancel()
         while not events.empty():
             yield json.dumps({"thinking": events.get_nowait()}) + "\n"
         try:

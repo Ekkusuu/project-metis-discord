@@ -163,3 +163,10 @@ def test_voice_tag_written_like_a_name_label_leaves_no_colon():
 
     assert take_emotion("[happy]: Hey you.", ["happy"]) == ("happy", "Hey you.")
     assert take_emotion("[neutral] : Morning.", ["happy"]) == ("neutral", "Morning.")
+
+
+def test_long_bracketed_text_is_spoken_without_brackets():
+    from backend.text_utils import clean_for_speech
+
+    assert clean_for_speech("[op.gg, Patch 16.21: Yasuo counters include Yone] Zed is easiest.") == \
+        "op.gg, Patch 16.21: Yasuo counters include Yone Zed is easiest."

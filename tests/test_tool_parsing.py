@@ -232,8 +232,9 @@ def test_found_answer_is_the_last_instruction():
     messages = [{"role": "user", "content": "[a]: who won the race?"}]
     guidance = reply_guidance(messages, voice=True, has_context=True, searched_web=True,
                               found_answer="Verstappen won the Singapore GP (f1.com)")
-    assert guidance.rstrip().splitlines()[-1].startswith("- Your first sentence gives them what you found")
+    assert guidance.rstrip().splitlines()[-1].startswith("- Your first sentence tells them what you found")
     assert "Verstappen" in guidance.splitlines()[-1]
+    assert "\"Verstappen" not in guidance  # facts to retell, not a quote to read out
 
 
 def test_recent_lookups_are_remembered_for_a_while(monkeypatch):
@@ -245,3 +246,30 @@ def test_recent_lookups_are_remembered_for_a_while(monkeypatch):
     assert chat.recent_lookups_text("voice-2") == ""  # another channel doesn't see it
     monkeypatch.setattr(chat, "_LOOKUP_MEMORY_SECONDS", -1)
     assert chat.recent_lookups_text("voice-1") == ""
+
+
+async def test_hanging_up_during_a_lookup_cancels_it(monkeypatch):
+    """"No, don't look that up" while she was searching: the bot drops the request, and the lookup must stop
+    too instead of running on for nobody."""
+    import asyncio as _asyncio
+
+    import backend.routers.chat as chat
+
+    state = {"cancelled": False}
+
+    async def endless_prepare(req, notify=None):
+        notify("web_search")
+        try:
+            await _asyncio.sleep(30)
+        except _asyncio.CancelledError:
+            state["cancelled"] = True
+            raise
+
+    monkeypatch.setattr(chat, "_prepare", endless_prepare)
+    req = chat.ChatRequest(messages=[{"role": "user", "content": "[a]: how do i ...?"}], voice_mode=True)
+    response = await chat.chat_stream(req, None)
+    body = response.body_iterator
+    await body.__anext__()  # {"thinking": "web_search"}
+    await body.aclose()     # the bot hung up
+    await _asyncio.sleep(0.05)
+    assert state["cancelled"]

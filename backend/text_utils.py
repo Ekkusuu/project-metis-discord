@@ -243,6 +243,8 @@ def clean_for_speech(text: str) -> str:
     text = _MARKDOWN_NOISE.sub("", text)
     text = _EMOJI.sub("", text)
     text = re.sub(r'["“”]', "", text)  # a reply wrapped in quotes; they aren't spoken anyway
+    # Long text in brackets isn't a voice tag: she once put what she found there ("[op.gg, Patch 16.21: ...]").
+    text = re.sub(r"\[([^\]]{25,})\]", r"\1", text)
     return re.sub(r"\s{2,}", " ", text).strip()
 
 

@@ -24,12 +24,16 @@ Tools:
 - search: web search. input = 2-8 keywords (add site:domain.com to search one website)
 - news: news search, newest first, for recent events. input = keywords
 - open: read pages. input = result numbers like "1" or "1,3", or a URL. You get the parts about the question.
-- answer: input = one to three plain sentences that answer the question with the exact names, numbers and \
-dates, and which site says so
+- answer: input = the facts only, as short notes: the exact names, numbers and dates, and which site says so \
+(e.g. "u.gg, patch 26.21: Thresh 52.1% win rate, Braum 52.0%"). No "based on the search results".
 - give_up: the answer can't be found. input = the closest thing you found, or empty
 Rules:
+- As soon as a page you read answers the question, answer. Don't open more sites to double-check.
+- If the question is vague (e.g. "best champion" without a role), answer with the main options from the page \
+(the top pick per role) instead of searching more.
 - Snippets are short and often outdated. Open pages before answering with numbers, prices, rankings, \
 dates or lists, unless a snippet states the answer plainly.
+- If it asks how to hurt or kill people or commit crimes, give_up at once with empty input.
 - If a page could not be read, open a different result; don't answer numbers or rankings from snippets.
 - If the pages don't have it, search again with different words or open other results. After 2-3 tries \
 that find nothing, give up with the closest thing you found.

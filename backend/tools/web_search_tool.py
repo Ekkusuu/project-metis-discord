@@ -148,7 +148,7 @@ class WebSearchTool(BaseTool):
             # Each step has its own limit too; this is the backstop so a reply can never wait forever.
             found = await asyncio.wait_for(research(
                 question, query, kwargs.get("conversation_context", ""),
-                max_steps=int(cfg.get("research_steps_voice", 5) if voice_mode else cfg.get("research_steps", 8)),
+                max_steps=int(cfg.get("research_steps_voice", 3) if voice_mode else cfg.get("research_steps", 8)),
                 time_budget=budget, first_kind="news" if search_type == "news" else "text",
                 auto_open=int(cfg.get("research_auto_open", 2)),
                 notify=kwargs.get("notify")), timeout=budget + 20)

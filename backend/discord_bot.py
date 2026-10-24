@@ -1086,7 +1086,8 @@ class VoiceReceiver:
                 print(f"🤔 {tool}: saying {line!r} while it runs")
                 await say(line, filler=True)
 
-        try:
+        async def consume() -> None:
+            nonlocal reply, pending
             async for delta in stream_reply(chat_payload(conversation, True, self.present_members()), stats,
                                             think_aloud):
                 if stopped():
@@ -1099,6 +1100,20 @@ class VoiceReceiver:
             pending += think.flush()
             if pending.strip():
                 await say(pending)
+
+        try:
+            consumer = asyncio.create_task(consume())
+            while not consumer.done():
+                await asyncio.wait({consumer}, timeout=0.2)
+                # While she's still looking things up (nothing of the answer yet), a new line from the same person
+                # ("no, don't look that up") or to her takes over: the lookup is cancelled and the new line is
+                # answered. Before, the search ran on and the new line waited until it was done.
+                if not consumer.done() and not reply and self._superseded(seq):
+                    print("✋ They said something new while she was looking it up; dropping this lookup")
+                    state["outcome"] = "yielded"
+                    consumer.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await consumer
         except Exception as e:
             print(f"Voice reply error: {e}")
         finally:

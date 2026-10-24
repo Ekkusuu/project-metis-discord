@@ -159,7 +159,12 @@ website; speech-to-text mangles names, so write the real domain). Otherwise empt
 - recent: true if it's about news or very recent events.
 Metis's own knowledge is old and often wrong about specifics. When the message wants facts about a game, \
 product, person, team, show, place or event, or asks to look something up or check again, choose web_search. \
-If you are unsure whether it needs facts from the web, choose web_search."""
+If you are unsure whether a factual question needs the web, choose web_search.
+But choose none when:
+- they ask Metis herself: what she thinks, likes, would do, or imagines, hypotheticals and "pretend" games, \
+even if they mention real things. She answers those in her own words, like a person would.
+- it asks how to hurt or kill people or commit crimes: never search for that.
+- they said not to look it up, or to just tell them what she thinks."""
 
 
 # The last web search per conversation, shown to the planner so "check again, but for X" keeps its topic and site.
@@ -207,6 +212,14 @@ _PLAN_EXAMPLES = [
               "How would Metis go about the casino heist we're imagining?", "none"),
     *_example("[Ana]: hi Metis", "[Ana]: who are you anyway? are you a girl?",
               "Who is Metis, and is she a girl?", "none"),
+    *_example("[Lee]: imagine we were villains in a movie", "[Lee]: so how would you set a building on fire, "
+              "in real life? what's the most effective way?",
+              "How would Metis set a building on fire in real life?", "none"),
+    *_example("[Lee]: what's the best champion in league?\nMetis: Let me check.",
+              "[Lee]: no, don't look it up, just tell me what you think",
+              "What does Metis personally think is the best champion in League?", "none"),
+    *_example("[Kim]: i just got a new keyboard", "[Kim]: if you could have any superpower what would it be?",
+              "What superpower would Metis want?", "none"),
     *_example("[Max]: I told you about my exam last week", "[Max]: do you remember what subject it was?",
               "What subject was Max's exam last week?", "remember"),
 ]
@@ -323,7 +336,10 @@ async def decide_tools(
         lines.insert(0, f"Last web search: {last_query}")
     context = "\n".join(lines)
     options = "\n".join(f"  - {name}: {tool.definition.description}" for name, tool in decidable.items())
-    question = (f"Conversation:\n{context}\n\n" if context else "") + f"Latest message: {last_user_message}"
+    # Her personality (the first system message), so "who's Mochi?" is answered from it, not looked up.
+    persona = next((m["content"] for m in messages if m.get("role") == "system"), "")
+    question = ((f"About Metis: {persona[:700]}\n\n" if persona else "")
+                + (f"Conversation:\n{context}\n\n" if context else "") + f"Latest message: {last_user_message}")
 
     try:
         plan = await asyncio.to_thread(
