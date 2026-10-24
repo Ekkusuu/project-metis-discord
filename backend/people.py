@@ -191,6 +191,17 @@ class PeopleStore:
                 self.save()
         return added
 
+    def update_fact(self, person_id: str, fact_id: str, text: str) -> bool:
+        """Replace what a stored fact says (it changed: a new city, a new main)."""
+        with self._lock:
+            person = self.people.get(person_id)
+            fact = next((f for f in (person or {}).get("facts", []) if f["id"] == fact_id), None)
+            if fact is None:
+                return False
+            fact["text"], fact["added"] = text.strip().rstrip("."), _now()
+            self.save()
+            return True
+
     def remove_fact(self, person_id: str, fact_id: str) -> bool:
         with self._lock:
             person = self.people.get(person_id)

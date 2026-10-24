@@ -108,24 +108,6 @@ def test_is_grounded_rejects_invented_and_misattributed_facts():
     assert not is_grounded("dislikes horror games", own)     # someone else's fact
 
 
-def test_extract_facts_filters_ungrounded_and_transient(monkeypatch):
-    import backend.learning as learning
-
-    monkeypatch.setattr(learning, "chat_completion", lambda *a, **k: (
-        "works as a nurse\n- has a cat named Pixel\nhates horror games\nis tired\nworks as a teacher\nNONE"))
-    assert extract_facts(CONVO, "Sava") == ["works as a nurse", "has a cat named Pixel"]
-
-
-def test_requests_and_facts_about_metis_are_not_remembered():
-    from backend.learning import _NOT_ABOUT_THEM
-
-    for fact in ["is asking for the exact release date of a Tesla Roadster", "wants to know what happened in France",
-                 "does not want Metis to leave", "asked the bot to search for news"]:
-        assert _NOT_ABOUT_THEM.search(fact), fact
-    for fact in ["is vegetarian", "wants to become a pilot", "is curiously good at chess", "metisse"]:
-        assert not _NOT_ABOUT_THEM.search(fact), fact
-
-
 def test_clean_fact_strips_name():
     assert _clean_fact("Sava's cat is called Pixel.", "Sava") == "cat is called Pixel"
     assert _clean_fact('"Sava likes tea"', "Sava") == "likes tea"
@@ -224,25 +206,60 @@ def test_bad_personality_names_and_empty_prompts_are_refused(prompts_copy):
         save("ok", {"text_chat": "x", "voice_chat": "  "})
 
 
-def test_passing_remarks_are_not_remembered():
-    """"mentions Emerald Plus", "thinks Claude hoarded something" came back in replies as if they mattered."""
-    from backend.learning import is_lasting
-
-    for fact in ["mentions Emerald Plus", "thinks Aatrox is useless", "suggests using a subscription API",
-                 "claims to be behaving sober", "found the purchase to be useless", "enjoys discussing Shaco counters"]:
-        assert not is_lasting(fact), fact
-    for fact in ["works as a nurse", "plays jungle in League of Legends", "trains voice models", "has a cat named Pixel"]:
-        assert is_lasting(fact), fact
-
-
-def test_only_what_they_say_about_themselves_counts(monkeypatch):
-    """Reading out someone else's list ("okeida trains voice models ...") became facts about the reader."""
+def test_extract_facts_keeps_only_grounded_ones(monkeypatch):
     import backend.learning as learning
 
-    convo = [{"role": "user", "content": "[Ekkusu]: okeida trains voice models and owns a device running Gemini",
-              "user_id": 2, "name": "Ekkusu"},
-             {"role": "user", "content": "[Ekkusu]: and i play jungle mostly, my main is Kindred",
-              "user_id": 2, "name": "Ekkusu"}]
-    monkeypatch.setattr(learning, "chat_completion", lambda *a, **k: (
-        "trains voice models\nowns a device running Gemini\nplays jungle with Kindred as main"))
-    assert extract_facts(convo, "Ekkusu") == ["plays jungle with Kindred as main"]
+    def c(quote, fact, about="themselves", kind=learning.WHO, importance=7):
+        return {"quote": quote, "about": about, "kind": kind, "importance": importance, "fact": fact}
+
+    monkeypatch.setattr(learning, "json_completion", lambda *a, **k: {"candidates": [
+        c("night shifts as a nurse", "works as a nurse"),
+        c("Pixel my cat was waiting", "- has a cat named Pixel"),
+        c("i hate horror games", "hates horror games"),                         # someone else said it
+        c("night shifts as a nurse", "works as a teacher"),                     # not what they said
+        c("night shifts are brutal", "finds night shifts brutal", kind=learning.OPINION),
+        c("i'm moving to Berlin next month", "is moving to Berlin", importance=3),  # judged unimportant
+        c("i'm moving to Berlin next month", "Lena is moving to Berlin", about="someone else")]})
+    assert extract_facts(CONVO, "Sava") == ["works as a nurse", "has a cat named Pixel"]
+
+
+def test_extraction_is_taught_by_examples_including_empty_ones():
+    """Like mem0: chatter, teasing Metis and reading out someone else's info are shown returning no facts."""
+    import json
+    from backend.learning import _FACT_EXAMPLES
+
+    answers = [json.loads(m["content"])["candidates"] for m in _FACT_EXAMPLES if m["role"] == "assistant"]
+    assert [] in answers and any(answers)
+    labels = {(c["about"], c["kind"]) for answer in answers for c in answer}
+    assert len(labels) >= 4  # kept and rejected kinds are both shown
+
+
+def test_reconcile_adds_updates_and_skips(store, monkeypatch):
+    import backend.learning as learning
+
+    monkeypatch.setattr(learning, "get_people", lambda: store)
+    store.add_facts("1", ["lives in Paris", "plays jungle"], name="Sava")
+    monkeypatch.setattr(learning, "json_completion", lambda *a, **k: {"decisions": [
+        {"event": "UPDATE", "id": "1"}, {"event": "NONE", "id": ""}, {"event": "ADD", "id": ""},
+        {"event": "UPDATE", "id": "9"}]})  # an id that doesn't exist is treated as new
+    to_add, updates = learning.reconcile("1", ["moved to Berlin", "mains jungle", "has a dog", "likes tea"])
+    paris = store.get("1")["facts"][0]["id"]
+    assert updates == {paris: "moved to Berlin"}
+    assert to_add == ["has a dog", "likes tea"]
+
+
+def test_learn_applies_updates(store, monkeypatch):
+    import backend.learning as learning
+
+    monkeypatch.setattr(learning, "get_people", lambda: store)
+    monkeypatch.setattr(learning, "_reindex", lambda paths: None)
+    store.add_facts("1", ["lives in Paris"], name="Sava")
+    moved = {"quote": "i finally moved to berlin", "about": "themselves", "kind": learning.WHO, "importance": 8,
+             "fact": "moved to Berlin"}
+    replies = iter([{"candidates": [moved]}, {"decisions": [{"event": "UPDATE", "id": "1"}]}])
+    monkeypatch.setattr(learning, "json_completion", lambda *a, **k: next(replies))
+    convo = [{"role": "user", "content": "[Sava]: i finally moved to berlin last month, loving it", "user_id": 1,
+              "name": "Sava"}]
+    learning.learn(convo)
+    assert [f["text"] for f in store.get("1")["facts"]] == ["moved to Berlin"]
+

@@ -7,43 +7,107 @@ or compacted). Designed to work with small local models (2B-8B):
 - One pass per speaker, showing only that person's own messages (each with the
   line before it as context). Asking a small model to attribute facts across a
   whole multi-person transcript mixes people up.
-- A worked example as a prior chat turn instead of a long list of rules.
+- Like mem0: the model returns facts as JSON (`{"facts": [...]}`), taught by worked examples as earlier
+  turns, including ones where the answer is empty (greetings, opinions about the topic of the moment,
+  teasing Metis, reading out someone else's info). Lists of "passing remark" phrasings kept missing new ones.
 - Every fact must be grounded: its key words have to appear in what that
   person actually wrote, which drops invented or misattributed facts.
+- New facts are reconciled with what's stored (ADD / UPDATE / NONE, as in mem0), so "moved to Berlin"
+  replaces "lives in Paris" instead of both being kept.
 """
 from __future__ import annotations
 
+import json
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-from backend.llama_engine import chat_completion
+from backend.llama_engine import json_completion
 from backend.people import get_people
 
 _SYSTEM = (
-    "You help an AI companion remember people. Given the messages one person wrote, list the lasting facts "
-    "they reveal about themselves, one short phrase per line, without their name. Only what they actually said. "
-    "Only things a friend would still remember next week: their job or studies, where they live, family, pets, "
-    "hobbies, games they play, what they like or dislike. Not what they mention, think or claim about the topic "
-    "of the moment. "
-    "Skip greetings, moods and small talk, and skip what they asked about or asked Metis to do: a question "
-    "is not a fact about the person, and asking about something once doesn't mean they love it. Don't exaggerate "
-    "what they said. If there is nothing worth remembering, write NONE."
+    "You help Metis, a girl in a Discord group, remember her friends. Given the messages one person wrote (lines "
+    "marked (context) are other people, for context only), list the lasting facts that person reveals about "
+    "themselves: things a friend would still remember next week (job or studies, where they live, family, "
+    "pets, hobbies, games they play, what they like or dislike, plans). Use only what that person said about "
+    "themselves. Not questions or requests, not opinions about the topic of the moment, not jokes or teasing, "
+    "not things they say about other people or about Metis. Short phrases without their name. If there is "
+    "nothing like that, return an empty list."
 )
 
-_EXAMPLE_IN = """Messages by Robin:
-(context) Lena: anyone up for pizza later?
-Robin: can't, i'm vegetarian and that place only does meat lol
-Robin: metis what's the weather like tomorrow?
-(context) Metis: Sunny, around 20 degrees.
-Robin: also my exam in organic chemistry is tomorrow, wish me luck
-(context) Metis: Good luck! You've got this.
-Robin: thanks! after that i'm finally adopting a puppy, gonna call him Biscuit
+# Each candidate is labelled before it's written down: their exact words, who it's about and what kind of thing
+# it is. Asked only for a list of facts, the 4B model turned "okeida trains voice models" (read out by someone
+# else), "I'm alone" and the topic of the moment into facts about the speaker. A yes/no "lasting" label was too
+# abstract for it (everything was "lasting"); picking a described kind works better.
+_KEEP_KINDS = ["who they are (job, studies, home, family, pets)", "what they like or regularly do", "a plan"]
+_OTHER_KINDS = ["an opinion about what's being talked about", "something happening right now", "a question or request"]
+_FACTS_SCHEMA = {
+    "type": "object",
+    "properties": {"candidates": {"type": "array", "maxItems": 6, "items": {
+        "type": "object",
+        "properties": {
+            "quote": {"type": "string", "maxLength": 160},
+            "about": {"enum": ["themselves", "someone else", "Metis"]},
+            "kind": {"enum": [*_KEEP_KINDS, *_OTHER_KINDS]},
+            # Generative Agents' importance score: 1 = mundane, 10 = something a friend would never forget.
+            "importance": {"enum": list(range(1, 11))},
+            "fact": {"type": "string", "maxLength": 120},
+        },
+        "required": ["quote", "about", "kind", "importance", "fact"],
+    }}},
+    "required": ["candidates"],
+}
 
-Facts about Robin:"""
 
-_EXAMPLE_OUT = """is vegetarian
-studies organic chemistry and has an exam coming up
-is adopting a puppy named Biscuit"""
+_MIN_IMPORTANCE = 6
+WHO, LIKES, PLAN = _KEEP_KINDS
+OPINION, NOW, ASKS = _OTHER_KINDS
+
+
+def _candidate(quote: str, about: str, kind: str, importance: int, fact: str) -> Dict[str, Any]:
+    return {"quote": quote, "about": about, "kind": kind, "importance": importance, "fact": fact}
+
+
+def _facts_example(lines: str, name: str, candidates: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+    return [{"role": "user", "content": f"Messages by {name}:\n{lines}\n\nFacts about {name}:"},
+            {"role": "assistant", "content": json.dumps({"candidates": candidates})}]
+
+
+# Worked examples as earlier turns, with rejected candidates too (mem0 teaches "chatter isn't a fact" the same way).
+_FACT_EXAMPLES = [
+    *_facts_example("(context) Lena: anyone up for pizza later?\n"
+                    "Robin: can't, i'm vegetarian and that place only does meat lol\n"
+                    "Robin: metis what's the weather like tomorrow?\n"
+                    "Robin: ugh i'm so tired today\n"
+                    "Robin: my exam in organic chemistry is tomorrow, and after that i'm adopting a puppy, Biscuit",
+                    "Robin", [
+                        _candidate("i'm vegetarian", "themselves", WHO, 7, "is vegetarian"),
+                        _candidate("metis what's the weather like tomorrow?", "themselves", ASKS, 1,
+                                   "asks about the weather"),
+                        _candidate("i'm so tired today", "themselves", NOW, 2, "is tired"),
+                        _candidate("my exam in organic chemistry", "themselves", WHO, 7, "studies organic chemistry"),
+                        _candidate("i'm adopting a puppy, Biscuit", "themselves", PLAN, 8,
+                                   "is adopting a puppy named Biscuit")]),
+    *_facts_example("Sam: hi\nSam: lol nice\nSam: what's the best champion right now?", "Sam", []),
+    *_facts_example("(context) Ana: aatrox is so bad now\nKai: yeah he doesn't even heal, it's a joke\n"
+                    "Kai: metis you totally like him though, admit it", "Kai", [
+                        _candidate("he doesn't even heal, it's a joke", "themselves", OPINION, 2,
+                                   "thinks Aatrox is bad"),
+                        _candidate("metis you totally like him though", "Metis", OPINION, 1, "Metis likes Aatrox")]),
+    *_facts_example("Jo: Lena trains voice models and owns a gaming laptop, by the way\n"
+                    "Jo: and i main support, been playing since season 3", "Jo", [
+                        _candidate("Lena trains voice models and owns a gaming laptop", "someone else", WHO, 5,
+                                   "Lena trains voice models"),
+                        _candidate("i main support, been playing since season 3", "themselves", LIKES, 6,
+                                   "mains support and has played since season 3")]),
+]
+
+_RECONCILE_SYSTEM = (
+    "You keep Metis's memory of a friend up to date. For each new fact, compare it with the stored facts:\n"
+    "- ADD: it's new information.\n"
+    "- UPDATE: it changes or corrects a stored fact (give that fact's id); the new fact replaces it.\n"
+    "- NONE: a stored fact already says the same thing."
+)
+
 
 # Words that carry no evidence on their own when checking that a fact is grounded.
 _STOPWORDS = set(
@@ -51,23 +115,6 @@ _STOPWORDS = set(
     "just also into your you named name likes like loves enjoys hates dislikes plays playing wants going gonna "
     "would could should will some lots".split()
 )
-# Questions and requests ("is asking about X", "wants to know Y") and anything about Metis herself
-# ("does not want Metis to leave") describe the moment, not the person; a small model often turns a
-# request into a "fact", and the next prompt then treats it as something the person cares about.
-_NOT_ABOUT_THEM = re.compile(
-    r"^(is |was )?(asking|asked|asks|wants to know|wanted to know|wondering|wonders|curious|inquiring|requesting)\b"
-    r"|^(wants|wanted|tried|is trying) to (search|look up|find|check|google)\b"
-    r"|\b(metis|the (ai|bot|assistant))\b",
-    re.IGNORECASE,
-)
-# One-off states that aren't worth remembering.
-_TRANSIENT = re.compile(
-    r"^(is|was|feels?|felt|seems?)\s+(so\s+|very\s+|really\s+|a bit\s+)?"
-    r"(tired|sleepy|bored|hungry|sad|happy|sick|busy|fine|ok|okay|good|bad|annoyed|excited|stressed|back|here|online|away)\b",
-    re.IGNORECASE,
-)
-
-
 def _speaker_name(m: Dict[str, Any]) -> Optional[str]:
     if m.get("name"):
         return m["name"]
@@ -96,28 +143,8 @@ def _speakers(messages: List[Dict[str, Any]]) -> Dict[str, str]:
     return speakers
 
 
-# Passing remarks the model turns into "facts": "mentions Emerald Plus", "thinks Claude hoarded something",
-# "suggests using a subscription API", "claims to be behaving sober". In voice, with misheard words, they also
-# go wrong ("develops a TTS model named Gwen" for Qwen), and Metis then brought them up as if they mattered.
-_PASSING_REMARK = re.compile(
-    r"^(mentions?|mentioned|thinks|thought|believes?|claims?|claimed|suggests?|suggested|says|said|talks? about|"
-    r"talked about|found|finds|knows about|is talking|was talking|agrees?|disagrees?|notes?|noticed|"
-    r"wonders?|hopes?|guesses|expects?|assumes?|wants to try|is concerned|is planning|enjoys discussing|"
-    r"likes (to talk|talking|discussing) about)\b",
-    re.IGNORECASE,
-)
-
-
-_ABOUT_SELF = re.compile(r"\b(i|i'm|im|i've|ive|i'd|i'll|my|me|mine|myself)\b", re.IGNORECASE)
-
-
-def is_lasting(fact: str) -> bool:
-    """False for remarks about the moment rather than the person (see _PASSING_REMARK, _TRANSIENT, _NOT_ABOUT_THEM)."""
-    return not (_TRANSIENT.match(fact) or _NOT_ABOUT_THEM.search(fact) or _PASSING_REMARK.match(fact))
-
-
 def person_view(messages: List[Dict[str, Any]], name: str) -> Tuple[str, str]:
-    """(prompt view of `name`'s messages with one line of context each, what they said about themselves, lowercased)."""
+    """(prompt view of `name`'s messages with one line of context each, their own text lowercased)."""
     lines: List[str] = []
     own: List[str] = []
     for i, m in enumerate(messages):
@@ -130,11 +157,7 @@ def person_view(messages: List[Dict[str, Any]], name: str) -> Tuple[str, str]:
                 lines.append(f"(context) {prev_name}: {_text(prev)[:300]}")
         text = _text(m)
         lines.append(f"{name}: {text}")
-        # Only what they say about themselves counts as evidence. Reading out someone else's list ("okeida
-        # trains voice models, owns a device running Gemini") or teasing Metis ("you do like ...") became
-        # facts about the speaker.
-        if _ABOUT_SELF.search(text):
-            own.append(text.lower())
+        own.append(text.lower())
     return "\n".join(lines), " ".join(own)
 
 
@@ -158,26 +181,62 @@ def extract_facts(messages: List[Dict[str, Any]], name: str) -> List[str]:
     view, own = person_view(messages, name)
     if not view or len(own) < 12:
         return []
-    response = chat_completion(
-        [
-            {"role": "system", "content": _SYSTEM},
-            {"role": "user", "content": _EXAMPLE_IN},
-            {"role": "assistant", "content": _EXAMPLE_OUT},
-            {"role": "user", "content": f"Messages by {name}:\n{view}\n\nFacts about {name}:"},
-        ],
-        temperature=0.1,
-        top_p=0.9,
-        max_tokens=220,
-        priority="background",
+    result = json_completion(
+        [{"role": "system", "content": _SYSTEM}, *_FACT_EXAMPLES,
+         {"role": "user", "content": f"Messages by {name}:\n{view}\n\nFacts about {name}:"}],
+        _FACTS_SCHEMA, 0.1, 600, priority="background",
     )
     facts = []
-    for line in response.splitlines():
-        fact = _clean_fact(line, name)
-        if not fact or fact.upper() == "NONE" or len(fact) > 160 or not is_lasting(fact):
+    for candidate in result.get("candidates") or []:
+        if (candidate.get("about") != "themselves" or candidate.get("kind") not in _KEEP_KINDS
+                or int(candidate.get("importance") or 0) < _MIN_IMPORTANCE):
             continue
-        if is_grounded(fact, own):
+        fact = _clean_fact(str(candidate.get("fact", "")), name)
+        # Evidence: the quote must be what they said, and the fact must come from it.
+        if fact and len(fact) <= 160 and is_grounded(str(candidate.get("quote", "")), own) and is_grounded(fact, own):
             facts.append(fact)
     return facts
+
+
+def reconcile(person_id: str, facts: List[str]) -> Tuple[List[str], Dict[str, str]]:
+    """
+    (facts to add, {stored fact id: new text}) after comparing new facts with the person's stored ones (mem0's
+    ADD / UPDATE / NONE). Ids are an enum of the real ones: a small model invents ids otherwise.
+    """
+    person = get_people().get(person_id)
+    stored = (person or {}).get("facts", [])[-15:]
+    if not facts or not stored:
+        return facts, {}
+    ids = {str(i): f["id"] for i, f in enumerate(stored, 1)}
+    schema = {
+        "type": "object",
+        "properties": {"decisions": {"type": "array", "minItems": len(facts), "maxItems": len(facts), "items": {
+            "type": "object",
+            "properties": {"event": {"enum": ["ADD", "UPDATE", "NONE"]}, "id": {"enum": ["", *ids]}},
+            "required": ["event", "id"]}}},
+        "required": ["decisions"],
+    }
+    listing = "\n".join(f"{i}. {f['text']}" for i, f in zip(ids, stored))
+    new = "\n".join(f"- {f}" for f in facts)
+    ask = "\n\nOne decision per new fact, in the same order (id only for UPDATE)."
+    result = json_completion(
+        [{"role": "system", "content": _RECONCILE_SYSTEM},
+         # A worked example: without it "moved to Berlin" was added next to "lives in Paris".
+         {"role": "user", "content": "Stored facts:\n1. lives in Rome\n2. likes cats\n3. plays guitar\n\n"
+                                     "New facts, in order:\n- moved to Madrid\n- loves cats\n- has a sister" + ask},
+         {"role": "assistant", "content": json.dumps({"decisions": [
+             {"event": "UPDATE", "id": "1"}, {"event": "NONE", "id": ""}, {"event": "ADD", "id": ""}]})},
+         {"role": "user", "content": f"Stored facts:\n{listing}\n\nNew facts, in order:\n{new}" + ask}],
+        schema, 0.0, 200, priority="background",
+    )
+    to_add, updates = [], {}
+    for fact, decision in zip(facts, result.get("decisions") or []):
+        event, ref = decision.get("event"), decision.get("id")
+        if event == "UPDATE" and ref in ids:
+            updates[ids[ref]] = fact
+        elif event != "NONE":
+            to_add.append(fact)
+    return to_add, updates
 
 
 def _chunks(messages: List[Dict[str, Any]], max_chars: int = 6000) -> List[List[Dict[str, Any]]]:
@@ -206,6 +265,15 @@ def learn(messages: List[Dict[str, Any]]) -> Dict[str, int]:
             except Exception as e:
                 print(f"Learning failed for {name}: {e}")
                 continue
+            try:
+                facts, updates = reconcile(pid, facts)
+            except Exception as e:
+                print(f"Couldn't compare new facts about {name} with what's known ({e}); adding them")
+                updates = {}
+            for fact_id, text in updates.items():
+                if people.update_fact(pid, fact_id, text):
+                    print(f"🧠 Updated a fact about {name}: {text}")
+                    touched.add(pid)
             added = people.add_facts(pid, facts, name=name)
             if added:
                 touched.add(pid)
