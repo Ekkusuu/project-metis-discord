@@ -44,6 +44,18 @@ def get_http_session() -> requests.Session:
     return _http_session
 
 
+def wait_until_ready(timeout: float = 25.0) -> bool:
+    """Wait for the LLM service to answer /health with a model loaded (it's back a few seconds after a crash)."""
+    import time
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if get_model():
+            return True
+        time.sleep(0.5)
+    return False
+
+
 def get_model() -> bool:
     """Return True if the LLM service is reachable and has a model loaded."""
     try:
@@ -68,12 +80,21 @@ def chat_completion(
         payload["json_schema"] = json_schema
     if priority != "interactive":
         payload["priority"] = priority  # "background" work yields to anyone waiting for a reply
-    try:
-        response = get_http_session().post(f"{get_llm_service_url()}/chat/completion", json=payload, timeout=timeout)
-        response.raise_for_status()
-        content: Any = response.json()["choices"][0]["message"]["content"]
-    except Exception as e:
-        raise RuntimeError(f"LLM service error: {e}") from e
+    for attempt in range(2):
+        try:
+            response = get_http_session().post(f"{get_llm_service_url()}/chat/completion", json=payload,
+                                               timeout=timeout)
+            response.raise_for_status()
+            content: Any = response.json()["choices"][0]["message"]["content"]
+            break
+        except requests.ConnectionError as e:
+            # The service is restarting (the launcher brings it back after a crash). The request never
+            # started, so it's safe to send again once the model is loaded.
+            if attempt == 0 and wait_until_ready():
+                continue
+            raise RuntimeError(f"LLM service error: {e}") from e
+        except Exception as e:
+            raise RuntimeError(f"LLM service error: {e}") from e
     return strip_thinking(content if isinstance(content, str) else str(content))
 
 
@@ -152,10 +173,20 @@ async def astream_chat(
     """
     import aiohttp
 
+    import asyncio
+
     payload = {"messages": messages, "temperature": temperature, "top_p": top_p, "max_tokens": max_tokens}
-    timeout = aiohttp.ClientTimeout(total=None, sock_connect=10, sock_read=300)
+    # 30 s without a token means the generation hung; 300 s froze the whole voice call meanwhile.
+    timeout = aiohttp.ClientTimeout(total=None, sock_connect=10, sock_read=30)
     async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.post(f"{get_llm_service_url()}/chat/stream", json=payload) as response:
+        try:
+            response = await session.post(f"{get_llm_service_url()}/chat/stream", json=payload)
+        except aiohttp.ClientConnectorError:
+            # Restarting after a crash: wait for it once, then send again (nothing was generated yet).
+            if not await asyncio.to_thread(wait_until_ready):
+                raise
+            response = await session.post(f"{get_llm_service_url()}/chat/stream", json=payload)
+        async with response:
             if response.status != 200:
                 raise RuntimeError(f"LLM service error {response.status}: {(await response.text())[:300]}")
             async for raw in response.content:

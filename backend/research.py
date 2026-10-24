@@ -165,7 +165,7 @@ def _clip(transcript: List[str], budget: int) -> str:
 
 
 async def research(question: str, query: str, earlier: str = "", *, max_steps: int = 5, page_chars: int = 1500,
-                   time_budget: float = 25.0, first_kind: str = "text",
+                   time_budget: float = 25.0, first_kind: str = "text", auto_open: int = 0,
                    notify: Optional[Callable[[str], None]] = None) -> Dict[str, Any]:
     """
     Research `question`, starting with a `first_kind` ("text" or "news") search for `query` (no model step
@@ -224,6 +224,14 @@ async def research(question: str, query: str, earlier: str = "", *, max_steps: i
         return f"open {target}{skipped}:\n" + "\n\n".join(out)
 
     transcript.append(await run_search(query, first_kind))
+    if auto_open and results:
+        # Read the top results right away, like coding agents' web tools: having the model pick them cost a
+        # step (1-2 s) every time, and it often opened one it had already read. The named site goes first.
+        site = site_in(query)
+        readable = [i for i, r in enumerate(results, 1) if not _domain(r["url"]).endswith(_UNREADABLE)]
+        readable.sort(key=lambda i: not (site and _domain(results[i - 1]["url"]).endswith(site.split("/")[0])))
+        if readable:
+            transcript.append(await run_open(",".join(str(i) for i in readable[:auto_open])))
     answer, found, steps = "", False, 0
     while True:
         steps += 1

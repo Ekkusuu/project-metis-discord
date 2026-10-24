@@ -1,8 +1,8 @@
 import { fileURLToPath } from "url";
 import { dirname, join, isAbsolute } from "path";
-import { readFileSync } from "fs";
+import { readFileSync, writeSync } from "fs";
 import net from "net";
-import { getLlama, LlamaChat, resolveChatWrapper } from "node-llama-cpp";
+import { getLlama, LlamaChat, LlamaLogLevel, resolveChatWrapper } from "node-llama-cpp";
 import express from "express";
 import cors from "cors";
 import yaml from "js-yaml";
@@ -122,7 +122,16 @@ async function initModel() {
   console.log("=".repeat(60));
 
   try {
-    llama = await getLlama();
+    llama = await getLlama({
+      logLevel: LlamaLogLevel.warn,
+      // Written out synchronously: a CUDA error aborts the process right after logging the reason, and only
+      // "ggml-cuda.cu:109: CUDA error" without the reason made it to the log.
+      logger(level, message) {
+        try {
+          writeSync(2, `[llama.cpp ${level}] ${message.trimEnd()}\n`);
+        } catch {}
+      },
+    });
     console.log(`Loading model from: ${MODEL_PATH}`);
 
     const loadOptions = {

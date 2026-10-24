@@ -90,7 +90,10 @@ class LocalEmbeddingFunction:
         import torch
         from sentence_transformers import SentenceTransformer
 
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        # rag.embedding_device: "cpu" frees ~1 GB of VRAM (weights + torch's CUDA context) for games, at the cost
+        # of slower embedding (a few ms -> tens of ms per message; reading web pages takes longer).
+        pref = str(get_config().get("rag", {}).get("embedding_device", "auto")).lower()
+        device = "cuda" if pref in ("cuda", "auto") and torch.cuda.is_available() else "cpu"
         # bfloat16 halves VRAM (~1.2 GB -> ~0.6 GB for EmbeddingGemma) with embeddings that are
         # identical in practice (cosine 0.9999 vs fp32). fp16 is not used: Gemma activations overflow.
         precision = str(get_config().get("rag", {}).get("embedding_precision", "auto")).lower()

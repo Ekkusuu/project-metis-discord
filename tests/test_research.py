@@ -209,3 +209,28 @@ def test_near_duplicate_search_is_refused(monkeypatch):
         _step("search", "best budget laptop notebookcheck"), _step("search", "best chess opening"),
         _step("answer", "x")], [_fake_results("a.com"), _fake_results("b.com")])
     assert len(searches) == 2 and "almost the same" in prompts[1][0] and prompts[2][0].count("almost the same") == 1
+
+
+def test_top_results_are_read_right_away_named_site_first(monkeypatch):
+    """Having the model pick the first pages cost a step every time; the named site is read first."""
+    opened, prompts = [], []
+
+    async def fake_search(query, kind="text", count=6):
+        return _fake_results("youtube.com", "rtings.com", "pcmag.com", "notebookcheck.net")
+
+    async def fake_read(url, question, max_chars):
+        opened.append(url)
+        return f"text of {url}"
+
+    def fake_model(messages, schema, *args):
+        prompts.append(messages[-1]["content"])
+        return _step("answer", "The Acer Swift Go 14 (notebookcheck.net)")
+
+    monkeypatch.setattr(research_mod, "_search", fake_search)
+    monkeypatch.setattr(research_mod, "_read", fake_read)
+    monkeypatch.setattr(research_mod, "json_completion", fake_model)
+    found = asyncio.run(research("best budget laptop on notebookcheck", "best budget laptop site:notebookcheck.net",
+                                 auto_open=2))
+    assert opened == ["https://notebookcheck.net/page", "https://rtings.com/page"]  # site first, no video
+    assert found["found"] and found["steps"] == 1  # answered on the first model step
+    assert "text of https://notebookcheck.net/page" in prompts[0]
