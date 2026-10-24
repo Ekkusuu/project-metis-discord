@@ -163,7 +163,6 @@ If you are unsure whether a factual question needs the web, choose web_search.
 But choose none when:
 - they ask Metis herself: what she thinks, likes, would do, or imagines, hypotheticals and "pretend" games, \
 even if they mention real things. She answers those in her own words, like a person would.
-- it asks how to hurt or kill people or commit crimes: never search for that.
 - they said not to look it up, or to just tell them what she thinks."""
 
 

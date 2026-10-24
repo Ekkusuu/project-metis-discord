@@ -33,7 +33,6 @@ Rules:
 (the top pick per role) instead of searching more.
 - Snippets are short and often outdated. Open pages before answering with numbers, prices, rankings, \
 dates or lists, unless a snippet states the answer plainly.
-- If it asks how to hurt or kill people or commit crimes, give_up at once with empty input.
 - If a page could not be read, open a different result; don't answer numbers or rankings from snippets.
 - If the pages don't have it, search again with different words or open other results. After 2-3 tries \
 that find nothing, give up with the closest thing you found.
