@@ -157,6 +157,7 @@ def train(args: argparse.Namespace) -> None:
     val_samples = (load_samples(Path(args.val), args.tasks, args.limit)
                    if args.val and Path(args.val).exists() else [])
     check_leakage(train_samples, val_samples)
+    train_samples = balance(train_samples, args.max_per_task, args.seed)
     report(train_samples)
 
     model, tokenizer = FastLanguageModel.from_pretrained(
@@ -170,7 +171,7 @@ def train(args: argparse.Namespace) -> None:
         r=args.lora_r,
         target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
         lora_alpha=args.lora_alpha,
-        lora_dropout=0.0,
+        lora_dropout=args.lora_dropout,
         bias="none",
         use_gradient_checkpointing="unsloth",
         random_state=args.seed,
@@ -217,8 +218,15 @@ def train(args: argparse.Namespace) -> None:
         logging_steps=args.log_every,
         eval_strategy=strategy,
         eval_steps=args.eval_every if eval_rows else None,
-        save_strategy="epoch",
+        # Saved when evaluated, so the best checkpoint on the held-out personas is the one kept: with few distinct
+        # conversations (augmented), the last step is not always the best.
+        save_strategy=strategy if eval_rows else "epoch",
+        save_steps=args.eval_every if eval_rows else None,
+        load_best_model_at_end=bool(eval_rows),
+        metric_for_best_model="eval_loss" if eval_rows else None,
         save_total_limit=2,
+        # NEFTune: noise on the input embeddings while training; it helps small instruction datasets generalise.
+        neftune_noise_alpha=args.neftune or None,
         seed=args.seed,
         report_to="none",
         gradient_checkpointing=True,
@@ -245,6 +253,26 @@ def train(args: argparse.Namespace) -> None:
               f"{merged.with_suffix('.gguf')} --outtype q8_0")
 
 
+def balance(samples: List[Dict[str, Any]], max_per_task: int, seed: int) -> List[Dict[str, Any]]:
+    """
+    At most `max_per_task` examples of each task (a fixed random sample). Augmentation made far more addressee
+    examples than replies; unbalanced, the reply style (what matters most) would get the least training.
+    """
+    import random
+
+    if not max_per_task:
+        return samples
+    by_task: Dict[str, List[Dict[str, Any]]] = {}
+    for sample in samples:
+        by_task.setdefault(sample["task"], []).append(sample)
+    rng = random.Random(seed)
+    kept = []
+    for task, items in by_task.items():
+        kept += items if len(items) <= max_per_task else rng.sample(items, max_per_task)
+    rng.shuffle(kept)
+    return kept
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--data", type=Path, default=DEFAULT_DATA)
@@ -255,7 +283,11 @@ def main() -> None:
     parser.add_argument("--tasks", default=None, help="comma-separated task filter (reply,planner,addressee,facts)")
     parser.add_argument("--max-seq-length", type=int, default=2048)
     parser.add_argument("--limit", type=int, default=None, help="only the first N examples (smoke test)")
-    parser.add_argument("--epochs", type=float, default=3.0)
+    # One pass is already several over each conversation: augment.py makes variants of every one.
+    parser.add_argument("--epochs", type=float, default=1.0)
+    parser.add_argument("--max-per-task", type=int, default=2000, help="balance the tasks (0: keep everything)")
+    parser.add_argument("--neftune", type=float, default=5.0, help="NEFTune noise alpha (0: off)")
+    parser.add_argument("--lora-dropout", type=float, default=0.05)
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--accumulation", type=int, default=8)
     parser.add_argument("--lr", type=float, default=1e-4)

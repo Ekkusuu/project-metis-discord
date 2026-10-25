@@ -573,9 +573,11 @@ def build(conversations: Sequence[Path], tasks: Sequence[str], mode: str, mood_t
         meta = conversation["meta"]
         entries = _entries(conversation)
         candidates = _fact_candidates(conversation)
+        # Augmented variants (augment.py) say which tasks their labels are still right for.
+        allowed = [task for task in tasks if task in (meta.get("tasks") or tasks)]
         made = 0
         for voice_mode in [v == "voice" for v in voices]:
-            if "reply" in tasks:
+            if "reply" in allowed:
                 for i, entry in enumerate(entries):
                     if entry.role != "assistant":
                         continue
@@ -583,15 +585,15 @@ def build(conversations: Sequence[Path], tasks: Sequence[str], mode: str, mood_t
                     if sample:
                         samples.append(sample)
                         made += 1
-            if "planner" in tasks:
+            if "planner" in allowed:
                 for sample in _planner_examples(conversation, entries, voice_mode, tags, decidable, context_count):
                     samples.append(sample)
                     made += 1
-            if "addressee" in tasks:
+            if "addressee" in allowed:
                 for sample in _addressee_examples(conversation, entries, voice_mode, tags):
                     samples.append(sample)
                     made += 1
-            if "facts" in tasks:
+            if "facts" in allowed:
                 for sample in _facts_examples(conversation, entries, voice_mode, tags, candidates):
                     samples.append(sample)
                     made += 1
@@ -639,6 +641,7 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=None, help="stop after this many examples")
     parser.add_argument("--now", default="2026-10-24T20:00:00", help="fixed prompt date/time")
     parser.add_argument("--preview", action="store_true", help="print the first example of each task")
+    parser.add_argument("--no-augmented", action="store_true", help="leave out training/data/augmented")
     args = parser.parse_args()
 
     tasks = [task.strip() for task in args.tasks.split(",") if task.strip()]
@@ -647,6 +650,8 @@ def main() -> None:
         parser.error(f"unknown task(s): {', '.join(unknown)}")
 
     paths = sorted(CONVERSATIONS.glob("conv_*.json"))
+    if not args.no_augmented:
+        paths += sorted((CONVERSATIONS.parent / "augmented").glob("conv_*.json"))  # augment.py (train only)
     if args.conversation:
         paths = [path for path in paths if path.stem == args.conversation]
         if not paths:
