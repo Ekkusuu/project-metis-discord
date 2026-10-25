@@ -304,6 +304,23 @@ def immediate_calls(last_user_message: str) -> List[ToolCall]:
     return calls
 
 
+def planner_messages(messages: List[Dict[str, str]], last_user_message: str, decidable: Dict[str, "BaseTool"],
+                     last_query: str = "", context_count: int = 6) -> List[Dict[str, str]]:
+    """The planning prompt (also used to render training data, so training matches what the model sees here)."""
+    recent = [m for m in messages[:-1] if m.get("role") in ("user", "assistant")][-context_count:]
+    lines = [m["content"][:240] if m["role"] == "user" else f"Metis: {m['content'][:240]}" for m in recent]
+    if last_query:
+        lines.insert(0, f"Last web search: {last_query}")
+    context = "\n".join(lines)
+    options = "\n".join(f"  - {name}: {tool.definition.description}" for name, tool in decidable.items())
+    # Her personality (the first system message), so "who's Mochi?" is answered from it, not looked up.
+    persona = next((m["content"] for m in messages if m.get("role") == "system"), "")
+    question = ((f"About Metis: {persona[:700]}\n\n" if persona else "")
+                + (f"Conversation:\n{context}\n\n" if context else "") + f"Latest message: {last_user_message}")
+    return [{"role": "system", "content": _PLAN_PROMPT.format(options=options)}, *_PLAN_EXAMPLES,
+            {"role": "user", "content": question}]
+
+
 async def decide_tools(
     messages: List[Dict[str, str]],
     last_user_message: str,
@@ -326,26 +343,15 @@ async def decide_tools(
     if not decidable or max_tools <= 0 or len(text) < 3 or is_acknowledgement(text):
         return calls
 
-    context_count = int(tools_cfg.get("context_messages", 6))
-    recent = [m for m in messages[:-1] if m.get("role") in ("user", "assistant")][-context_count:]
-    lines = [m["content"][:240] if m["role"] == "user" else f"Metis: {m['content'][:240]}" for m in recent]
     previous = _last_search.get(conversation_id) or {"time": 0.0, "query": ""}
     last_query = previous["query"] if time.time() - previous["time"] < _SEARCH_MEMORY_SECONDS else ""
-    if last_query:
-        lines.insert(0, f"Last web search: {last_query}")
-    context = "\n".join(lines)
-    options = "\n".join(f"  - {name}: {tool.definition.description}" for name, tool in decidable.items())
-    # Her personality (the first system message), so "who's Mochi?" is answered from it, not looked up.
-    persona = next((m["content"] for m in messages if m.get("role") == "system"), "")
-    question = ((f"About Metis: {persona[:700]}\n\n" if persona else "")
-                + (f"Conversation:\n{context}\n\n" if context else "") + f"Latest message: {last_user_message}")
+    context_count = int(tools_cfg.get("context_messages", 6))
+    plan_messages = planner_messages(messages, last_user_message, decidable, last_query, context_count)
+    recent = [m for m in messages[:-1] if m.get("role") in ("user", "assistant")][-context_count:]
 
     try:
         plan = await asyncio.to_thread(
-            json_completion,
-            [{"role": "system", "content": _PLAN_PROMPT.format(options=options)}, *_PLAN_EXAMPLES,
-             {"role": "user", "content": question}],
-            _plan_schema(list(decidable)), 0.0, 200,
+            json_completion, plan_messages, _plan_schema(list(decidable)), 0.0, 200,
         )
     except Exception as e:
         print(f"Tool decision failed: {e}")
