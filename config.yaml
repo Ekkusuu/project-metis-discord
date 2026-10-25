@@ -6,15 +6,16 @@
 # or from Discord with ">personality <name>".
 # This automatically selects the matching prompts from system_prompts.yaml
 # To add more: just add new personality sections in system_prompts.yaml
-personality: "flirty"
+personality: "casual"
 
 # ============================================================================
 # LLM Model Settings
 # ============================================================================
 model:
-  # Qwen 3.5 2B (unsloth/Qwen3.5-2B-GGUF, Q6_K): ~1.6 GB, fast enough for real-time voice.
-  # Previous model: model/psychologistv2-8.0B-Q4_0.gguf (Llama 3.1 8B, ~4.7 GB).
-  path: "model/Qwen3.5-2B-Q6_K.gguf"
+  # Qwen 3.5 4B (unsloth/Qwen3.5-4B-GGUF, Q4_K_M, 2.7 GB file, ~3.6 GB VRAM): small enough to leave the GPU
+  # to games. Smarter but heavier: model/Qwen3.5-9B-Q4_K_M.gguf (~6 GB VRAM) or the 4B at Q6_K (~4.3 GB).
+  # Smaller: model/Qwen3.5-2B-heretic-Q6_K.gguf (~2.4 GB, noticeably worse).
+  path: "model/Qwen3.5-4B-heretic-Q4_K_M.gguf"
   tokenizer_path: "rag-models/embeddinggemma-300m"
   n_ctx: 8192  # Context window size (in tokens)
   n_gpu_layers: -1  # -1 = auto-offload all layers to GPU if available
@@ -26,9 +27,9 @@ model:
   chat_wrapper: "auto"
   # Let reasoning models think before answering (slower replies). Off for a snappy companion.
   thinking: false
-  # Prompt batch size. 256 saves ~550 MB of VRAM vs the default with no measurable slowdown
-  # (Qwen's large vocabulary makes the per-batch compute buffer big). Don't go below 256.
-  batch_size: 256
+  # Prompt batch size. Qwen's large vocabulary makes the per-batch compute buffer big: 256 saves ~550 MB
+  # of VRAM vs the default, 128 another ~250 MB (prompts are read a little slower).
+  batch_size: 128
   # KV cache precision: f16 (default) or q8_0. q8_0 halves the cache, but Qwen 3.5 has few
   # attention layers so its cache is already small and q8_0 doesn't help there.
   kv_cache_type: "f16"
@@ -53,8 +54,12 @@ discord:
 # Text Chat Settings (Discord text channels)
 # ============================================================================
 chat:
+  # Qwen3.5's recommended sampling (non-thinking): temperature 0.7, top_p 0.8, top_k 20, presence 1.5, no repeat penalty
   temperature: 0.7
-  top_p: 0.95
+  top_p: 0.8
+  top_k: 20
+  presence_penalty: 1.5
+  repeat_penalty: 1.0
   max_tokens: 2024
 
   # Conversational etiquette (backend/turn_taking.py). Metis answers when a message is for her:
@@ -77,6 +82,38 @@ voice:
   # Audio Processing
   stt_model_path: "model/parakeet-tdt-0.6b-v2.nemo"
   stt_precision: "auto"  # auto = bfloat16 on GPU (~1 GB less VRAM, same transcripts) | fp32
+  # cpu keeps ~1.6 GB of VRAM free for games (~0.3 s slower per utterance) | cuda | auto (the GPU if ~2 GB free)
+  stt_device: "cpu"
+
+  # Voice: "qwen3" = Qwen3-TTS (custom fine-tuned voice with emotions, streamed; ~3 GB VRAM; set up as in
+  # tts_server/README.md) or "kokoro" (Kokoro-82M, settings below). Kokoro is also the fallback whenever
+  # the Qwen3-TTS server isn't running.
+  tts_engine: "qwen3"
+  qwen_tts:
+    python: "C:/Users/saval/qwen3tts/fast-venv/Scripts/python.exe"  # its own venv (tts_server/README.md)
+    model: "C:/Users/saval/voice_data/yuumi_tts/yuumi-hybrid"
+    port: 8732
+    language: "Auto"  # what the fine-tune was trained with
+    chunk_size: 4     # codec frames per streamed piece (12 = 1 s of audio); lower = sooner first audio
+    # 0.75 measured ~3x fewer sudden pitch breaks ("voice cracks") than the default 0.9, with the same
+    # expressiveness and intelligibility. The shouted "excited" clip cracks the most.
+    temperature: 0.75
+    # Her normal voice: the clip the fine-tune was conditioned on.
+    ref_audio: "C:/Users/saval/voice_data/yuumi/wavs/yuumi_0052.wav"
+    # Moods: the model copies the delivery of a clip of her saying something that way. The LLM picks one per
+    # sentence with a tag like "[teasing]" (stripped before speaking). Add, remove or swap clips freely;
+    # "text" must be exactly what the clip says.
+    emotions:
+      happy:        {audio: "C:/Users/saval/voice_data/yuumi/wavs/yuumi_0143.wav", text: "This is my favorite chapter!"}
+      excited:      {audio: "C:/Users/saval/voice_data/yuumi/wavs/yuumi_0024.wav", text: "They aren't ready for the ferocious team of... US!"}
+      teasing:      {audio: "C:/Users/saval/voice_data/yuumi/wavs/yuumi_0154.wav", text: "Heehee! They're never gonna see us coming!"}
+      affectionate: {audio: "C:/Users/saval/voice_data/yuumi/wavs/yuumi_0010.wav", text: "Don't tell anyone but... I love hugs."}
+      sleepy:       {audio: "C:/Users/saval/voice_data/yuumi/wavs/yuumi_0029.wav", text: "Do you ever get so sleepy you fall asleep sitting up? Just me?"}
+      annoyed:      {audio: "C:/Users/saval/voice_data/yuumi/wavs/yuumi_0045.wav", text: "I save my friends? No one notices. I open a teensy portal to the spirit realm? Everyone is up in my fur!"}
+      sad:          {audio: "C:/Users/saval/voice_data/yuumi/wavs/yuumi_0041.wav", text: "If I ever lost you, Book, the fabric of the spirit realm would get all torn up! And I'd lose my best friend."}
+      scared:       {audio: "C:/Users/saval/voice_data/yuumi/wavs/yuumi_0017.wav", text: "A river? Uh-uh! Book hates water!"}
+
+  # Kokoro
   tts_voice: "af_heart"  # Options: af_heart, af_sarah, etc.
   tts_lang_code: "a"  # 'a' = American English
   tts_model: "hexgrad/Kokoro-82M"
@@ -87,6 +124,9 @@ voice:
   min_speech_seconds: 0.3  # Ignore clips shorter than this (coughs, clicks)
   tts_speed: 1.0
   max_tokens: 120  # spoken replies should be one or two sentences (text chat uses chat.max_tokens)
+  # A spoken reply stops after this many sentences; more when someone asks to explain or tell a story.
+  max_sentences: 3
+  max_sentences_detail: 6
   name_correction_threshold: 0.70  # Minimum similarity (0.0-1.0) for fuzzy name matching
   # Input gain for captured audio (1.0 = 100%, 2.0 = 200%). This scales only the bot's input capture.
   input_gain: 2.0
@@ -100,6 +140,18 @@ voice:
   leave_when_asked: true
   goodbyes: ["Okay, bye!", "Alright, see you later!", "Got it, bye everyone!", "Okay, talk to you later!"]
 
+  # Said while a slow tool runs (remembering, a web search) instead of going quiet. A different one each
+  # time; a leading tag like "[teasing]" picks the voice.
+  thinking_lines:
+    remember: ["Hmm, let me think.", "Hmm... wait, let me remember.", "Ooh, let me think about that.",
+               "Hold on, I'm thinking.", "Hmm, give me a second.", "[sleepy] Mmm... let me think."]
+    web_search: ["Hmm, let me look that up.", "One sec, I'll check.", "Ooh, let me see.", "Hold on, let me find out."]
+    web_search_more: ["Hmm, not there. Let me check somewhere else.", "Wait, let me dig a bit more.", "Let me try another search."]
+    web_read: ["Okay, reading this.", "Found something, reading it.", "Let me read that.", "Ooh, this looks right. Reading."]
+    # When nothing else was said for voice.thinking_heartbeat seconds while she's still looking.
+    still_thinking: ["Hmm...", "Still on it.", "Almost there.", "Hold on...", "Mmm, one sec."]
+  thinking_heartbeat: 4
+
   # Same etiquette as text chat, plus turn-taking for speech.
   etiquette:
     engagement: "balanced"      # reserved | balanced | chatty | always
@@ -107,9 +159,11 @@ voice:
     lone_question_wait: 1.5     # (alone in voice with Metis, everything is for her: no wait at all)
     continuation_window: 30     # s an exchange with Metis stays open for follow-ups without her name
     floor_gap: 0.5              # s of silence from everyone before Metis starts talking
-    max_floor_wait: 4           # s she waits for a gap; if people keep talking she lets it go
+    max_floor_wait: 6           # s she waits for a gap; if people keep talking she lets it go
+    chime_in_after: 30          # s of people talking among themselves before she joins in (0: never)
     barge_in: true              # stop talking when someone talks over her
-    barge_in_seconds: 0.6       # how long someone must talk over her before she stops
+    barge_in_seconds: 0.6       # how long someone must talk over her before she pauses
+    barge_in_confirm: 1.5       # she only stops if they keep talking this long; shorter (a laugh, "yeah") and she carries on
     barge_in_min_rms: 0.03      # loudness that counts as speech (raise if background noise stops her)
 
 
@@ -135,8 +189,8 @@ rag:
   top_k: 6  # Number of relevant chunks to retrieve from vector DB
   max_distance: 1.5  # Maximum distance threshold - contexts farther than this are considered irrelevant (-1 = no threshold)
   embedding_model: "rag-models/embeddinggemma-300m"  # Local folder path relative to project root
+  embedding_device: "auto"  # "cpu" frees ~1 GB of VRAM for games, but reading web pages gets ~4 s slower
   persist_directory: ".chromadb"
-  query_context_messages: 3  # Number of previous messages to use for contextual query generation (0 = use last message only)
 
   # Reranker settings
   use_reranker: true  # Enable/disable reranking
@@ -146,16 +200,14 @@ rag:
   reranker_device: "cpu"  # cpu (~86 ms per message, no VRAM) | cuda / auto (~9 ms, ~560 MB VRAM)
   embedding_precision: "auto"  # auto = bfloat16 on GPU (half the VRAM of fp32) | fp32
 
-  # Query generation (used by knowledge_search in text chat, and by the plain RAG fallback)
+  # Queries the remember tool writes in text chat
   query_generation_count: 3
-  query_generation_system_prompt: "@rag.query_generation_system"
-  query_generation_user_prompt: "@rag.query_generation_user"
 
 # ============================================================================
 # Tool System Settings
 # ============================================================================
 tools:
-  # Enable/disable the tool system (if disabled, falls back to legacy RAG)
+  # Enable/disable the tool system (if disabled, replies get no tool or knowledge context)
   enabled: true
 
   # Number of previous messages to use for tool selection context
@@ -165,23 +217,40 @@ tools:
   max_tools: 3
 
   # Individual tool settings
+  # Quick lookup on every message: one vector search with the message itself (~50 ms), keeping only
+  # close matches. Notes that answer a message measured 0.94-1.14, small talk 1.41+.
   knowledge_search:
+    enabled: true
+    quick_max_distance: 1.2
+    quick_results: 2
+
+  # Thorough search the model chooses when someone asks about something to think back on (the LLM writes
+  # queries from the conversation, results are reranked; 1-2 s). In voice Metis says a filler line
+  # ("hmm, let me think", voice.thinking_lines) while it runs.
+  remember:
     enabled: true
     # Have the LLM write search queries from the conversation (names, the topic of "it"/"that")
     # instead of searching with the raw message only. rag.query_generation_count queries in text
-    # chat, voice_query_count in voice (each LLM call delays the spoken reply a little).
+    # chat, voice_query_count in voice.
     expand_queries: true
-    voice_query_count: 1
+    voice_query_count: 2
 
   # Web search using DuckDuckGo (no server or Docker needed)
   web_search:
     enabled: true
-    read_top_result: true          # also read the best result's page (text chat)
-    read_top_result_voice: false   # skipped in voice chat for latency
-    top_result_chars: 2500
+    # A research agent (backend/research.py) like the web tools of coding agents: the model searches, opens
+    # the results it wants (several pages at once, only the parts about the question are kept), searches
+    # again with other words if needed, then writes down the answer with its source; Metis says it.
+    research_steps: 8            # model steps at most (text chat)
+    research_steps_voice: 3      # in voice: the top results are read first, then usually one step answers
+    research_seconds: 60         # then it answers with what it has
+    research_seconds_voice: 20
 
   # Reads web pages (links people share are opened automatically). Private/local
   # addresses are always refused.
   fetch_webpage:
     enabled: true
     max_chars: 4000
+    # Pages built by JavaScript have almost no text in their HTML; those are read through Jina Reader
+    # (r.jina.ai: free, no key; it gets the URL). "none" = don't.
+    renderer: "jina"
