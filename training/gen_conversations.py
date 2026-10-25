@@ -170,8 +170,8 @@ def conversation_schema(people: list) -> dict:
         "recent": {"type": "boolean"}}, "required": ["action", "standalone", "query", "recent"]}
     person_line = {"type": "object", "properties": {
         "speaker": {"enum": people}, "text": {"type": "string", "maxLength": 300},
-        # The plan is always written (allowed to be null, a 9B left it out for lines meant for her); it's only
-        # used for lines meant for Metis.
+        # The plan is always written (when it could be null, a 9B left it out for lines meant for her); it's
+        # only used for lines meant for Metis.
         "for": {"enum": ADDRESSEES}, "plan": plan},
         "required": ["speaker", "text", "for", "plan"]}
     metis_line = {"type": "object", "properties": {
