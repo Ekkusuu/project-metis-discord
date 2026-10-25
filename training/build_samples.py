@@ -138,11 +138,12 @@ def _system_prompt(conversation: Dict[str, Any], voice: bool) -> str:
 
 
 def _messages(entries: Sequence[Entry], system: str, voice: bool, mood_tags: bool) -> List[Dict[str, str]]:
-    """The exact message list the chat pipeline builds for a voice/text conversation."""
+    """The exact message list the chat pipeline builds for a voice/text conversation. Her earlier replies are
+    what she said aloud, without voice tags, as the runtime history keeps them; only the answer has a tag."""
     out = [{"role": "system", "content": system}]
     for entry in _visible(entries, voice):
         if entry.role == "assistant":
-            out.append({"role": "assistant", "content": _assistant_text(entry, mood_tags)})
+            out.append({"role": "assistant", "content": _assistant_text(entry, False)})
         else:
             out.append({"role": "user", "content": entry.content})
     return out
@@ -453,7 +454,8 @@ def _addressee_examples(conversation: Dict[str, Any], entries: Sequence[Entry], 
     names_by_id: Dict[int, str] = {}
     for i, entry in enumerate(entries):
         if entry.role == "assistant":
-            turns.append(Turn(None, "Metis", _assistant_text(entry, mood_tags), i * 5.0,
+            # What she said aloud, as the runtime history keeps it: no voice tag.
+            turns.append(Turn(None, "Metis", _assistant_text(entry, False), i * 5.0,
                               to=turns[-1].speaker_id if turns and not turns[-1].is_metis else None))
             continue
         uid = entry.uid if entry.uid is not None else 1000 + i
@@ -467,7 +469,7 @@ def _addressee_examples(conversation: Dict[str, Any], entries: Sequence[Entry], 
             "task": "addressee",
             "id": f"{conversation['meta']['seed']}:addressee:{_mode_tag(voice)}:{i}",
             "messages": addressee_messages(turns, names_by_id),
-            "answer": target,
+            "answer": json.dumps(target),  # the runtime call is constrained to a JSON string: "Metis"
             "meta": {"conversation": meta.get("source", ""), "line": entry.line,
                      "persona": meta.get("persona", ""), "split": meta.get("split", "train"),
                      "voice": voice},
@@ -481,7 +483,7 @@ def _facts_examples(conversation: Dict[str, Any], entries: Sequence[Entry], voic
     raw: List[Dict[str, Any]] = []
     for entry in entries:
         if entry.role == "assistant":
-            raw.append({"role": "assistant", "content": _assistant_text(entry, mood_tags)})
+            raw.append({"role": "assistant", "content": _assistant_text(entry, False)})
         else:
             raw.append({"role": "user", "name": entry.name, "user_id": entry.uid,
                         "content": f"[{entry.name}]: {entry.text}"})

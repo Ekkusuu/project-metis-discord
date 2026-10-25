@@ -11,7 +11,7 @@ build_samples.py                     renders every example through the real runt
         │
         ▼  training/data/samples.jsonl       (train personas)
            training/data/samples.val.jsonl   (held-out personas)
-train_unsloth.py                     QLoRA, loss on Metis's reply only
+train_unsloth.py                     16-bit LoRA on the heretic base, loss on Metis's reply only
         │
         ▼  training/out/metis-lora  ->  merged 16-bit  ->  GGUF
 eval_personas.py                     same questions, unseen personas: does she become them?
@@ -35,7 +35,7 @@ lives in `_VOICE_RULES`; only the character paragraph changes.
 
 ## 0. Setup
 
-Training needs an NVIDIA GPU (a 12 GB card is enough for the defaults: 4-bit base, LoRA r=16, batch 1 × 8).
+Training needs an NVIDIA GPU (a 12 GB card is enough for the defaults, ~10 GB with nothing else on the GPU: bf16 LoRA r=16, 2048 tokens, batch 1 × 8).
 The rest of the app only needs its own venv.
 
 ```powershell
@@ -118,7 +118,7 @@ python training/train_unsloth.py                # adapter -> training/out/metis-
 python training/train_unsloth.py --merge        # + merged 16-bit -> training/out/metis-merged-16bit
 ```
 
-Defaults: Qwen3.5-4B 4-bit, LoRA r=16 / alpha=32 on all attention and MLP projections, 3 epochs, lr 1e-4 cosine,
+Defaults: Qwen3.5-4B heretic (tvall43/Qwen3.5-4B-heretic) in bf16 (Unsloth advises against 4-bit for Qwen3.5), LoRA r=16 / alpha=32 on all attention and MLP projections, 3 epochs, lr 1e-4 cosine,
 batch 1 × gradient accumulation 8, max sequence 3072, bf16 when the GPU supports it.
 
 The prompt is masked (`-100`) and the loss is only on the answer. Thinking is disabled in the chat template, the

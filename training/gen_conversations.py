@@ -11,6 +11,7 @@ Val-split personas are never used for training, only to check that the fine-tune
     python training/gen_conversations.py --count 40 --workers 4
     python training/gen_conversations.py --split val --count 25 --workers 5
     python training/gen_conversations.py --personas cowboy,radio_host --count 4
+    python training/gen_conversations.py --repair        # keep rejects whose only problem was name punctuation
 """
 from __future__ import annotations
 
@@ -56,7 +57,7 @@ CATEGORIES = [
         "about my exam?')"),
 ]
 
-NAMES = ["ekkusu", "okeida.", "Sava", "Mira", "jayden", "Kai", "lena_", "Tomas", "rin", "Ana", "max99", "Dorin",
+NAMES = ["ekkusu", "okeida", "Sava", "Mira", "jayden", "Kai", "lena_", "Tomas", "rin", "Ana", "max99", "Dorin",
          "sophie", "Vlad", "yuki", "Ben", "zara", "Nico", "Iris", "Luca"]
 EMOTIONS = ["neutral", "happy", "excited", "teasing", "affectionate", "sleepy", "annoyed", "sad", "scared"]
 ADDRESSEES = ["Metis", "talking about Metis", "another person in the chat", "everyone in the chat",
@@ -105,6 +106,32 @@ def _weighted(options):
     return random.choices([o for _, o in options], weights=[w for w, _ in options])[0]
 
 
+def _canonical(speaker: str, people: list) -> str | None:
+    """The person's name, tolerating the punctuation the teacher adds ("Tomas." / "okeida.." / "Metis,")."""
+    name = str(speaker or "").strip()
+    if name == "Metis":
+        return name
+    for person in people:
+        if name == person:
+            return person
+    trimmed = name.rstrip(".,!?:;")
+    for person in people:
+        if trimmed.casefold() == person.rstrip(".,!?:;").casefold():
+            return person
+    return None
+
+
+def normalize(data: dict, people: list) -> dict:
+    """Canonical speaker names in lines and fact keys, keeping the teacher's punctuation out of the data."""
+    for line in data.get("lines") or []:
+        name = _canonical(line.get("speaker"), people)
+        if name:
+            line["speaker"] = name
+    if isinstance(data.get("facts"), dict):
+        data["facts"] = {(_canonical(name, people) or name): facts for name, facts in data["facts"].items()}
+    return data
+
+
 def problems(data: dict, people: list) -> list:
     """Why a conversation can't be used (empty list = fine). The teacher sometimes drops the labels or invents
     someone who isn't in the call."""
@@ -137,13 +164,15 @@ def one_conversation(index: int, seed: int, persona: Persona) -> Path | None:
     prompt = PROMPT.format(persona=persona.brief, people=", ".join(people), category=category,
                            addressees=" | ".join(ADDRESSEES), emotions=" | ".join(EMOTIONS))
     data = ask_json(prompt)
+    if isinstance(data, dict) and isinstance(data.get("lines"), list):
+        data = normalize(data, people)
     issues = (["not a conversation"] if not isinstance(data, dict) or not isinstance(data.get("lines"), list)
               or len(data["lines"]) < 4 else problems(data, people))
     if issues:
         (OUT.parent / "rejected").mkdir(parents=True, exist_ok=True)
         (OUT.parent / "rejected" / f"conv_{index:05d}.json").write_text(
-            json.dumps({"issues": issues, "persona": persona.name, "split": persona.split, "data": data},
-                       ensure_ascii=False, indent=1), encoding="utf-8")
+            json.dumps({"issues": issues, "persona": persona.name, "split": persona.split, "people": people,
+                        "category": category, "data": data}, ensure_ascii=False, indent=1), encoding="utf-8")
         return None
     data["meta"] = {
         "persona": persona.name,
@@ -167,6 +196,44 @@ def _next_index() -> int:
     return max(used, default=-1) + 1
 
 
+def repair() -> None:
+    """Re-check rejects for name punctuation (the teacher writes "Tomas."/"okeida.."), keeping the good ones."""
+    from personas import BY_NAME
+
+    rejected = OUT.parent / "rejected"
+    repaired = 0
+    for path in sorted(rejected.glob("conv_*.json")):
+        try:
+            blob = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        persona_name, data = blob.get("persona"), blob.get("data")
+        if persona_name not in BY_NAME or not isinstance(data, dict) or not isinstance(data.get("lines"), list):
+            continue
+        people = blob.get("people") or list(dict.fromkeys(
+            _canonical(line.get("speaker"), NAMES) or line.get("speaker")
+            for line in data["lines"] if line.get("speaker") not in (None, "Metis")))
+        data = normalize(data, people)
+        issues = problems(data, people)
+        if issues:
+            print(f"{path.name}: still unusable ({'; '.join(issues[:2])})")
+            continue
+        persona = BY_NAME[persona_name]
+        index = int(path.stem.split("_")[1])
+        target = OUT / f"conv_{index:05d}.json"
+        if target.exists():
+            target = OUT / f"conv_{_next_index():05d}.json"
+        data["meta"] = {"persona": persona.name, "persona_prompt": persona.voice,
+                        "text_persona_prompt": persona.text, "persona_brief": persona.brief,
+                        "split": persona.split, "people": people, "category": blob.get("category", ""),
+                        "seed": 1000 + index, "generator": MODEL}
+        target.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+        path.unlink(missing_ok=True)
+        repaired += 1
+        print(f"{path.name} -> {target.name} ({persona.name})")
+    print(f"repaired {repaired} conversation(s)")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--count", type=int, default=20)
@@ -176,7 +243,12 @@ def main() -> None:
                         help="comma-separated persona names (default: the whole split); e.g. cowboy,radio_host")
     parser.add_argument("--start", type=int, default=None, help="first index (default: after existing files)")
     parser.add_argument("--seed", type=int, default=7, help="persona schedule seed")
+    parser.add_argument("--repair", action="store_true", help="re-check rejects and keep the recoverable ones")
     args = parser.parse_args()
+    OUT.mkdir(parents=True, exist_ok=True)
+    if args.repair:
+        repair()
+        return
 
     only = [name.strip() for name in args.personas.split(",") if name.strip()] if args.personas else None
     personas = schedule(args.split, args.count, args.seed, only)

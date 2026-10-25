@@ -180,3 +180,4 @@ training/data/rejected/
 training/data/*.jsonl
 training/data/*.stats.json
 training/out/
+training/data/*.log

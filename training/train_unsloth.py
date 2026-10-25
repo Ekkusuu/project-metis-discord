@@ -1,5 +1,6 @@
 """
-Step 3: fine-tune Qwen3.5-4B on the samples from build_samples.py, with LoRA on a 4-bit base (QLoRA).
+Step 3: fine-tune Qwen3.5-4B (the heretic weights, see README) on the samples from build_samples.py, with a
+16-bit LoRA. Unsloth advises against 4-bit QLoRA for Qwen3.5 (larger quantization error than usual).
 
 The loss is on Metis's answer only: the prompt (persona, history, people memory, guidance) is masked with -100.
 That is what teaches "read the system prompt and be that person" rather than "memorise a personality": the same
@@ -13,7 +14,8 @@ weights see 20+ different personas, each defined entirely by the system message.
 `--check` needs only transformers: it verifies the chat template, the prompt/target split and the lengths without
 loading the model. Run it after rebuilding the dataset.
 
-Defaults fit a 12 GB card: 4-bit base, LoRA r=16, batch 1 x 8 accumulation, 3 epochs. The adapter lands in
+Defaults fit a 12 GB card (~10 GB with nothing else on the GPU: close games and stop Metis): bf16 LoRA r=16,
+2048 tokens, batch 1 x 8 accumulation, 3 epochs. The adapter lands in
 training/out/metis-lora; `--merge` writes training/out/metis-merged-16bit.
 """
 from __future__ import annotations
@@ -26,11 +28,14 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 HERE = Path(__file__).resolve().parent
-DEFAULT_DATA = HERE / "data" / "samples.jsonl"
-DEFAULT_VAL = HERE / "data" / "samples.val.jsonl"
+# build_samples.py writes samples*.jsonl; render_prompts.mjs turns them into the runtime's exact text.
+DEFAULT_DATA = HERE / "data" / "samples.rendered.jsonl"
+DEFAULT_VAL = HERE / "data" / "samples.val.rendered.jsonl"
 DEFAULT_OUT = HERE / "out" / "metis-lora"
 DEFAULT_MERGED = HERE / "out" / "metis-merged-16bit"
-DEFAULT_MODEL = "unsloth/Qwen3.5-4B"
+# Uncensored first, then fine-tuned: training afterwards repairs most of what uncensoring costs, while running
+# heretic after training would edit the weights just trained.
+DEFAULT_MODEL = "tvall43/Qwen3.5-4B-heretic"
 
 
 def load_samples(path: Path, tasks: Optional[set[str]] = None, limit: Optional[int] = None) -> List[Dict[str, Any]]:
@@ -58,6 +63,14 @@ def encode(tokenizer: Any, sample: Dict[str, Any], max_seq_length: int) -> Optio
     trained on the exact shape it will see: no reasoning block before the answer. prompt_ids must be a prefix of
     full_ids; `--check` verifies that before any GPU time is spent.
     """
+    if "prompt_text" in sample:
+        # Rendered by render_prompts.mjs with the runtime's chat wrapper (node-llama-cpp), which is what the model
+        # really sees: the HF template refuses the reply guidance's second system message.
+        prompt_ids = tokenizer(sample["prompt_text"], add_special_tokens=False)["input_ids"]
+        answer_ids = tokenizer(sample["answer_text"] + "<|im_end|>", add_special_tokens=False)["input_ids"]
+        if len(prompt_ids) + len(answer_ids) > max_seq_length:
+            return None
+        return {"input_ids": prompt_ids + answer_ids, "labels": [-100] * len(prompt_ids) + answer_ids}
     messages = sample["messages"]
     answer = sample["answer"]
     template_args = {"tokenize": True, "enable_thinking": False}
@@ -74,6 +87,17 @@ def encode(tokenizer: Any, sample: Dict[str, Any], max_seq_length: int) -> Optio
     return {"input_ids": full_ids, "labels": labels}
 
 
+def personas_of(samples: List[Dict[str, Any]]) -> set[str]:
+    return {(sample.get("meta") or {}).get("persona", "") for sample in samples} - {""}
+
+
+def check_leakage(train_samples: List[Dict[str, Any]], val_samples: List[Dict[str, Any]]) -> None:
+    """A val persona in the training file would make the held-out evaluation meaningless."""
+    leaked = sorted(personas_of(train_samples) & personas_of(val_samples))
+    if leaked:
+        raise SystemExit(f"val personas in the training data: {', '.join(leaked)}; rebuild with --split train")
+
+
 def report(samples: List[Dict[str, Any]]) -> None:
     print(f"{len(samples)} examples")
     print("  tasks:    " + ", ".join(f"{name}: {count}" for name, count in Counter(
@@ -87,13 +111,17 @@ def report(samples: List[Dict[str, Any]]) -> None:
 def check(args: argparse.Namespace) -> None:
     from transformers import AutoTokenizer
 
-    tokenizer = AutoTokenizer.from_pretrained(args.model)
+    loaded: List[Tuple[Path, List[Dict[str, Any]]]] = []
     for path, label in ((args.data, "train"), (args.val, "val")):
         if not path.exists():
             print(f"{label}: {path} missing, skipped")
             continue
-        samples = load_samples(path, args.tasks, args.limit)
-        print(f"\n== {label}: {path}")
+        loaded.append((path, load_samples(path, args.tasks, args.limit)))
+    check_leakage(loaded[0][1], loaded[1][1] if len(loaded) > 1 else [])
+
+    tokenizer = AutoTokenizer.from_pretrained(args.model)
+    for path, samples in loaded:
+        print(f"\n== {path}")
         report(samples)
         lengths, skipped = [], 0
         for sample in samples:
@@ -125,11 +153,17 @@ def train(args: argparse.Namespace) -> None:
     from transformers import DataCollatorForSeq2Seq, Trainer, TrainingArguments
     from unsloth import FastLanguageModel
 
+    train_samples = load_samples(args.data, args.tasks, args.limit)
+    val_samples = (load_samples(Path(args.val), args.tasks, args.limit)
+                   if args.val and Path(args.val).exists() else [])
+    check_leakage(train_samples, val_samples)
+    report(train_samples)
+
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=args.model,
         max_seq_length=args.max_seq_length,
         dtype=torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16,
-        load_in_4bit=not args.no_4bit,
+        load_in_4bit=args.four_bit,
     )
     model = FastLanguageModel.get_peft_model(
         model,
@@ -142,8 +176,6 @@ def train(args: argparse.Namespace) -> None:
         random_state=args.seed,
     )
 
-    train_samples = load_samples(args.data, args.tasks, args.limit)
-    report(train_samples)
     train_rows = []
     skipped = 0
     for sample in train_samples:
@@ -158,12 +190,11 @@ def train(args: argparse.Namespace) -> None:
         raise SystemExit("no trainable examples; raise --max-seq-length")
 
     eval_rows = []
-    if args.val and Path(args.val).exists():
-        val_samples = load_samples(Path(args.val), args.tasks, args.limit)
-        for sample in val_samples:
-            encoded = encode(tokenizer, sample, args.max_seq_length)
-            if encoded is not None:
-                eval_rows.append(encoded)
+    for sample in val_samples:
+        encoded = encode(tokenizer, sample, args.max_seq_length)
+        if encoded is not None:
+            eval_rows.append(encoded)
+    if val_samples:
         print(f"validation: {len(eval_rows)} of {len(val_samples)} examples")
 
     collator = DataCollatorForSeq2Seq(tokenizer, padding=True, label_pad_token_id=-100,
@@ -222,7 +253,7 @@ def main() -> None:
     parser.add_argument("--merged", type=Path, default=DEFAULT_MERGED)
     parser.add_argument("--model", default=DEFAULT_MODEL, help="HF repo or local folder of the base model")
     parser.add_argument("--tasks", default=None, help="comma-separated task filter (reply,planner,addressee,facts)")
-    parser.add_argument("--max-seq-length", type=int, default=3072)
+    parser.add_argument("--max-seq-length", type=int, default=2048)
     parser.add_argument("--limit", type=int, default=None, help="only the first N examples (smoke test)")
     parser.add_argument("--epochs", type=float, default=3.0)
     parser.add_argument("--batch-size", type=int, default=1)
@@ -233,7 +264,8 @@ def main() -> None:
     parser.add_argument("--log-every", type=int, default=10)
     parser.add_argument("--eval-every", type=int, default=100)
     parser.add_argument("--seed", type=int, default=3407)
-    parser.add_argument("--no-4bit", action="store_true", help="bf16 LoRA instead of QLoRA (needs more VRAM)")
+    parser.add_argument("--4bit", dest="four_bit", action="store_true",
+                        help="QLoRA on a 4-bit base (less VRAM; Unsloth advises against it for Qwen3.5)")
     parser.add_argument("--merge", action="store_true", help="also write merged 16-bit weights for llama.cpp")
     parser.add_argument("--check", action="store_true", help="validate tokenization only; needs no Unsloth/GPU")
     args = parser.parse_args()
