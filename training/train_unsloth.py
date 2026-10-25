@@ -210,9 +210,10 @@ def train(args: argparse.Namespace) -> None:
         per_device_eval_batch_size=1,
         gradient_accumulation_steps=args.accumulation,
         num_train_epochs=args.epochs,
+        max_steps=args.max_steps or -1,
         learning_rate=args.lr,
         lr_scheduler_type="cosine",
-        warmup_ratio=0.05,
+        warmup_steps=0.05,  # a fraction of the run (transformers 5 dropped warmup_ratio)
         weight_decay=0.01,
         bf16=bf16,
         fp16=not bf16,
@@ -236,7 +237,7 @@ def train(args: argparse.Namespace) -> None:
 
     trainer = Trainer(
         model=model,
-        tokenizer=tokenizer,
+        processing_class=tokenizer,  # transformers 5: was tokenizer=
         args=training_args,
         train_dataset=Dataset.from_list(train_rows),
         eval_dataset=Dataset.from_list(eval_rows) if eval_rows else None,
@@ -288,16 +289,19 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=None, help="only the first N examples (smoke test)")
     # One pass is already several over each conversation: augment.py makes variants of every one.
     parser.add_argument("--epochs", type=float, default=1.0)
+    # The first run's held-out loss was best after 100 steps (1.03 base -> 0.70) and rose after (0.81 at 400): with
+    # few distinct conversations it memorises them. Stop early; the best checkpoint is kept.
+    parser.add_argument("--max-steps", type=int, default=300, help="stop after this many steps (0: full epochs)")
     parser.add_argument("--max-per-task", type=int, default=2000, help="balance the tasks (0: keep everything)")
     parser.add_argument("--neftune", type=float, default=5.0, help="NEFTune noise alpha (0: off)")
     parser.add_argument("--lora-dropout", type=float, default=0.05)
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--accumulation", type=int, default=8)
-    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--lr", type=float, default=5e-5)
     parser.add_argument("--lora-r", type=int, default=16)
     parser.add_argument("--lora-alpha", type=int, default=32)
     parser.add_argument("--log-every", type=int, default=10)
-    parser.add_argument("--eval-every", type=int, default=100)
+    parser.add_argument("--eval-every", type=int, default=25)
     parser.add_argument("--seed", type=int, default=3407)
     parser.add_argument("--4bit", dest="four_bit", action="store_true",
                         help="QLoRA on a 4-bit base (less VRAM; Unsloth advises against it for Qwen3.5)")
