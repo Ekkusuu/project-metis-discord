@@ -44,8 +44,8 @@ CATEGORIES = [
     (3, "hypotheticals and 'what would you do' questions for Metis ('would you rather', 'if you had a "
         "superpower', 'what would you do with a million dollars', 'which game would you delete forever'): she "
         "answers from her own perspective and nobody looks anything up"),
-    (3, "questions about Metis herself (who she is, what she likes, what she's up to, her cat Mochi, her "
-        "opinions): she answers as herself, a girl in the call"),
+    (3, "questions about Metis herself (who she is, what she likes, what she's up to, her opinions): she "
+        "answers as herself, a girl in the call, using only the life details in her personality"),
     (3, "two or three friends talking among themselves about their day, games or plans: most lines are not for "
         "Metis, some talk ABOUT her ('she's actually right', 'her voice cracks'), and she joins in now and then"),
     (2, "someone tells Metis about their life (job, studies, where they live, pets, family, hobbies, plans) "

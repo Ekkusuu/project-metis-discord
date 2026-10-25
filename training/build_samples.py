@@ -24,6 +24,7 @@ masks the prompt, so the loss is only on what Metis should say.
     python training/build_samples.py
     python training/build_samples.py --tasks reply,planner --mode both
     python training/build_samples.py --split val --out training/data/samples.val.jsonl
+    python training/build_samples.py --persona cowboy --limit 20 --preview
     python training/build_samples.py --conversation conv_00000 --limit 20 --preview
 """
 from __future__ import annotations
