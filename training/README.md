@@ -91,9 +91,12 @@ python training/augment.py --copies 2
 # voice and text renders of everything (augmented variants are picked up automatically)
 python training/build_samples.py --split train --mode both --out training/data/samples.jsonl
 python training/build_samples.py --split val   --mode both --out training/data/samples.val.jsonl
+# outside data, ~17% of the mix: When2Call tool calls / follow-up questions (no refusals) + No Robots general chat
+python training/external_data.py
 # the exact text the runtime's chat wrapper produces (the HF template can't render the reply prompt)
 node training/render_prompts.mjs training/data/samples.jsonl training/data/samples.rendered.jsonl
 node training/render_prompts.mjs training/data/samples.val.jsonl training/data/samples.val.rendered.jsonl
+node training/render_prompts.mjs training/data/external.jsonl training/data/external.rendered.jsonl
 
 # inspect one conversation, one example per task
 python training/build_samples.py --conversation conv_00008 --tasks reply,planner --preview

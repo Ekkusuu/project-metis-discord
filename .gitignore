@@ -183,3 +183,4 @@ training/out/
 training/data/*.log
 unsloth_compiled_cache/
 training/data/augmented/
+training/data/external/

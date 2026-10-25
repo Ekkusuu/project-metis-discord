@@ -31,6 +31,8 @@ HERE = Path(__file__).resolve().parent
 # build_samples.py writes samples*.jsonl; render_prompts.mjs turns them into the runtime's exact text.
 DEFAULT_DATA = HERE / "data" / "samples.rendered.jsonl"
 DEFAULT_VAL = HERE / "data" / "samples.val.rendered.jsonl"
+# external_data.py (When2Call tool decisions + general chat), rendered the same way.
+DEFAULT_EXTRA = HERE / "data" / "external.rendered.jsonl"
 DEFAULT_OUT = HERE / "out" / "metis-lora"
 DEFAULT_MERGED = HERE / "out" / "metis-merged-16bit"
 # Uncensored first, then fine-tuned: training afterwards repairs most of what uncensoring costs, while running
@@ -112,7 +114,7 @@ def check(args: argparse.Namespace) -> None:
     from transformers import AutoTokenizer
 
     loaded: List[Tuple[Path, List[Dict[str, Any]]]] = []
-    for path, label in ((args.data, "train"), (args.val, "val")):
+    for path, label in ((*((p, "train") for p in args.data), (args.val, "val"))):
         if not path.exists():
             print(f"{label}: {path} missing, skipped")
             continue
@@ -153,7 +155,7 @@ def train(args: argparse.Namespace) -> None:
     from transformers import DataCollatorForSeq2Seq, Trainer, TrainingArguments
     from unsloth import FastLanguageModel
 
-    train_samples = load_samples(args.data, args.tasks, args.limit)
+    train_samples = [s for path in args.data for s in load_samples(path, args.tasks, args.limit)]
     val_samples = (load_samples(Path(args.val), args.tasks, args.limit)
                    if args.val and Path(args.val).exists() else [])
     check_leakage(train_samples, val_samples)
@@ -275,7 +277,8 @@ def balance(samples: List[Dict[str, Any]], max_per_task: int, seed: int) -> List
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--data", type=Path, default=DEFAULT_DATA)
+    parser.add_argument("--data", type=Path, nargs="+",
+                        default=[DEFAULT_DATA, *([DEFAULT_EXTRA] if DEFAULT_EXTRA.exists() else [])])
     parser.add_argument("--val", type=Path, default=DEFAULT_VAL)
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
     parser.add_argument("--merged", type=Path, default=DEFAULT_MERGED)
