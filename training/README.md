@@ -86,8 +86,14 @@ silently losing data.
 ## 2. Build the SFT examples
 
 ```powershell
-python training/build_samples.py --split train --out training/data/samples.jsonl
-python training/build_samples.py --split val   --out training/data/samples.val.jsonl
+# stretch the conversations: name swaps, speech-to-text noise, persona swaps (train split only)
+python training/augment.py --copies 2
+# voice and text renders of everything (augmented variants are picked up automatically)
+python training/build_samples.py --split train --mode both --out training/data/samples.jsonl
+python training/build_samples.py --split val   --mode both --out training/data/samples.val.jsonl
+# the exact text the runtime's chat wrapper produces (the HF template can't render the reply prompt)
+node training/render_prompts.mjs training/data/samples.jsonl training/data/samples.rendered.jsonl
+node training/render_prompts.mjs training/data/samples.val.jsonl training/data/samples.val.rendered.jsonl
 
 # inspect one conversation, one example per task
 python training/build_samples.py --conversation conv_00008 --tasks reply,planner --preview
