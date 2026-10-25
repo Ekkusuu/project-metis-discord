@@ -157,13 +157,45 @@ def problems(data: dict, people: list) -> list:
     return issues
 
 
+FACT_KINDS = ["who they are", "what they like or regularly do", "a plan", "an opinion about what's being talked about",
+              "something happening right now", "a question or request"]
+
+
+def conversation_schema(people: list) -> dict:
+    """The JSON format in PROMPT as a schema, for a teacher that can be constrained (the local one)."""
+    plan = {"type": "object", "properties": {
+        "action": {"enum": ["none", "web_search", "remember"]},
+        "standalone": {"type": "string", "maxLength": 240},
+        "query": {"type": "string", "maxLength": 120},
+        "recent": {"type": "boolean"}}, "required": ["action", "standalone", "query", "recent"]}
+    person_line = {"type": "object", "properties": {
+        "speaker": {"enum": people}, "text": {"type": "string", "maxLength": 300},
+        # The plan is always written (allowed to be null, a 9B left it out for lines meant for her); it's only
+        # used for lines meant for Metis.
+        "for": {"enum": ADDRESSEES}, "plan": plan},
+        "required": ["speaker", "text", "for", "plan"]}
+    metis_line = {"type": "object", "properties": {
+        "speaker": {"enum": ["Metis"]}, "mood": {"enum": EMOTIONS}, "text": {"type": "string", "maxLength": 300},
+        "found": {"type": "string", "maxLength": 300}}, "required": ["speaker", "mood", "text", "found"]}
+    candidate = {"type": "object", "properties": {
+        "quote": {"type": "string", "maxLength": 200}, "about": {"enum": ["themselves", "someone else", "Metis"]},
+        "kind": {"enum": FACT_KINDS}, "importance": {"enum": list(range(1, 11))},
+        "fact": {"type": "string", "maxLength": 120}}, "required": ["quote", "about", "kind", "importance", "fact"]}
+    return {"type": "object", "properties": {
+        "lines": {"type": "array", "minItems": 8, "maxItems": 16, "items": {"oneOf": [person_line, metis_line]}},
+        "facts": {"type": "object", "properties": {
+            name: {"type": "array", "maxItems": 5, "items": candidate} for name in people},
+            "required": list(people)}},
+        "required": ["lines", "facts"]}
+
+
 def one_conversation(index: int, seed: int, persona: Persona) -> Path | None:
     rng = random.Random(seed)
     people = rng.sample(NAMES, rng.choice([1, 1, 2, 2, 3]))
     category = _weighted(CATEGORIES)
     prompt = PROMPT.format(persona=persona.brief, people=", ".join(people), category=category,
                            addressees=" | ".join(ADDRESSEES), emotions=" | ".join(EMOTIONS))
-    data = ask_json(prompt)
+    data = ask_json(prompt, schema=conversation_schema(people))
     if isinstance(data, dict) and isinstance(data.get("lines"), list):
         data = normalize(data, people)
     issues = (["not a conversation"] if not isinstance(data, dict) or not isinstance(data.get("lines"), list)

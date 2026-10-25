@@ -7,6 +7,7 @@ outputs can be used for training.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -15,6 +16,12 @@ from pathlib import Path
 from typing import Any, Optional
 
 MODEL = "opencode/deepseek-v4.1-flash-free"
+# METIS_TEACHER_URL=http://127.0.0.1:3941 uses a local model instead: Metis's LLM service (backend/llm_service)
+# running a bigger model, e.g. Qwen3.5-9B. It can force the output to follow a JSON schema, so a weaker teacher
+# can't break the format.
+LOCAL_URL = os.environ.get("METIS_TEACHER_URL", "").rstrip("/")
+if LOCAL_URL:
+    MODEL = "local:" + os.environ.get("METIS_TEACHER_NAME", "llm_service")
 
 
 def ask(prompt: str, model: str = MODEL, timeout: float = 240) -> str:
@@ -42,8 +49,29 @@ def ask(prompt: str, model: str = MODEL, timeout: float = 240) -> str:
     return re.sub(r"\x1b\[[0-9;]*m", "", "\n".join(lines)).strip()
 
 
-def ask_json(prompt: str, model: str = MODEL, tries: int = 2) -> Optional[Any]:
-    """Like ask(), parsed as JSON (code fences and text around the JSON are ignored). None if it never parses."""
+def ask_local(prompt: str, schema: Optional[dict] = None, max_tokens: int = 3500, timeout: float = 600) -> str:
+    """One prompt to the local teacher; with `schema`, the output is constrained to it."""
+    import requests
+
+    payload: dict = {"messages": [{"role": "user", "content": prompt}], "temperature": 0.9, "top_p": 0.95,
+                     "max_tokens": max_tokens}
+    if schema is not None:
+        payload["json_schema"] = schema
+    response = requests.post(f"{LOCAL_URL}/chat/completion", json=payload, timeout=timeout)
+    response.raise_for_status()
+    return response.json()["choices"][0]["message"]["content"]
+
+
+def ask_json(prompt: str, model: str = MODEL, tries: int = 2, schema: Optional[dict] = None) -> Optional[Any]:
+    """Like ask(), parsed as JSON (code fences and text around the JSON are ignored). None if it never parses.
+    `schema` is used by the local teacher only (the CLI can't constrain output)."""
+    if LOCAL_URL:
+        for _ in range(tries):
+            try:
+                return json.loads(ask_local(prompt, schema))
+            except (json.JSONDecodeError, ValueError):
+                continue  # cut off at max_tokens
+        return None
     for _ in range(tries):
         text = ask(prompt, model)
         match = re.search(r"[\[{].*[\]}]", text, re.DOTALL)
