@@ -168,16 +168,11 @@ async function initModel() {
     // KV cache quantization (q8_0 halves cache memory with negligible quality loss) and batch size
     // (the compute buffer grows with it; large vocabularies like Qwen's make that buffer big).
     const kvType = modelCfg.kv_cache_type || "f16";
-    // model.lora: a fine-tuned adapter (training/) on top of the base model, at model.lora_scale strength
-    // (1 = as trained; lower if she feels too set in her ways, 0 = off).
-    const loraPath = modelCfg.lora ? (isAbsolute(modelCfg.lora) ? modelCfg.lora : join(projectRoot, modelCfg.lora)) : null;
     const contextOptions = {
       threads,
       ...(modelCfg.batch_size ? { batchSize: modelCfg.batch_size } : {}),
       ...(kvType !== "f16" ? { experimentalKvCacheKeyType: kvType, experimentalKvCacheValueType: kvType } : {}),
-      ...(loraPath ? { lora: { adapters: [{ filePath: loraPath, scale: modelCfg.lora_scale ?? 1 }] } } : {}),
     };
-    if (loraPath) console.log(`✓ Adapter: ${loraPath} (scale ${modelCfg.lora_scale ?? 1})`);
     const mainContext = await model.createContext({ contextSize: CONTEXT_SIZE, ...contextOptions });
     chatLane = new Lane("chat", mainContext.getSequence());
     console.log(`✓ Chat context created (size: ${CONTEXT_SIZE})`);

@@ -154,18 +154,6 @@ Duplicates are filtered, facts are stored in `memory/people.json` and mirrored t
 `memory/long_term/people/` so `knowledge_search` can find them even when that person isn't around.
 You can review and delete anything in the dashboard's **People** tab.
 
-## Fine-tuning
-
-`training/` turns annotated, teacher-written Discord conversations into a LoRA fine-tune of Qwen3.5-4B. The
-fine-tune is **persona-agnostic**: every conversation is written for one of 27 personas from
-`training/personas.py` and stores that persona's full system prompt, so the model learns to read the prompt and
-become whoever it describes instead of memorising one character. Five personas are held out and only used to check
-that adaptation (`training/eval_personas.py`).
-
-Prompts are rendered by the app's own functions (`build_prompt`, `planner_messages`, `addressee_messages`, the
-fact-extraction prompt), the loss is on Metis's reply only, and train/val datasets are built separately. See
-[training/README.md](training/README.md) for the generation → dataset → QLoRA → GGUF → evaluation flow.
-
 ## Configuration highlights
 
 Everything lives in `config.yaml` (prompts in `system_prompts.yaml`, see

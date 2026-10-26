@@ -306,7 +306,7 @@ def immediate_calls(last_user_message: str) -> List[ToolCall]:
 
 def planner_messages(messages: List[Dict[str, str]], last_user_message: str, decidable: Dict[str, "BaseTool"],
                      last_query: str = "", context_count: int = 6) -> List[Dict[str, str]]:
-    """The planning prompt (also used to render training data, so training matches what the model sees here)."""
+    """The planning prompt."""
     recent = [m for m in messages[:-1] if m.get("role") in ("user", "assistant")][-context_count:]
     lines = [m["content"][:240] if m["role"] == "user" else f"Metis: {m['content'][:240]}" for m in recent]
     if last_query:

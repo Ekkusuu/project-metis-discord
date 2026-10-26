@@ -174,14 +174,3 @@ Desktop.ini
 # Keep node modules from accidental imports into Python virtualenvs
 site-packages/
 
-# Training data and fine-tune outputs (generated, not source)
-training/data/conversations/
-training/data/rejected/
-training/data/*.jsonl
-training/data/*.stats.json
-training/out/
-training/data/*.log
-unsloth_compiled_cache/
-training/data/augmented/
-training/data/external/
-model/metis-lora*.gguf
