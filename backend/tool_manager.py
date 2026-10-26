@@ -149,13 +149,15 @@ def get_tool_registry() -> ToolRegistry:
 _PLAN_PROMPT = """You plan the next step for Metis, a girl hanging out with friends in a Discord voice chat, \
 before she replies to the latest message.
 - standalone: the latest message rewritten so it makes sense on its own. Use the conversation and the last \
-web search to resolve "it", "that", "do it", "check again", "this time for ...", "what about ...".
+web search to resolve "it", "that", "do it", "check again", "this time for ...", "what about ...". \
+Keep names exactly as they are written, even ones you don't know: they can be newer than you.
 - action: what Metis needs before replying:
 {options}
   - none: chatting, jokes, feelings, opinions, roleplay or hypotheticals, and questions about Metis herself \
 or the people in the chat
 - query: for web_search, 2-8 search keywords for the standalone message (add site:domain.com if they name a \
-website; speech-to-text mangles names, so write the real domain). Otherwise empty.
+website; speech-to-text mangles names, so write the real domain). No year unless they said one. \
+Otherwise empty.{preferred}
 - recent: true if it's about news or very recent events.
 Metis's own knowledge is old and often wrong about specifics. When the message wants facts about a game, \
 product, person, team, show, place or event, or asks to look something up or check again, choose web_search. \
@@ -245,6 +247,45 @@ def grounded_query(query: str, said_by_people: str, said_by_metis: str, fallback
     return fallback if borrowed else query
 
 
+def keep_said_names(query: str, said: str) -> str:
+    """
+    The query with the names people actually said. The 4B model "corrected" names it didn't know into ones it
+    did (Yunara -> Yone, Yuna) and added a year from its training ("... champion 2024").
+    """
+    from difflib import SequenceMatcher
+
+    said_words = re.findall(r"[A-Za-z][\w'’.-]*[\w]", said)
+    said_lower = {w.lower() for w in said_words}
+    names = [w for w in said_words if w[0].isupper()]
+    for word in re.findall(r"[A-Za-z][\w'’.-]*[\w]", query):
+        if word.lower() in said_lower or not word[0].isupper():
+            continue
+        best = max(names, key=lambda n: SequenceMatcher(None, word.lower(), n.lower()).ratio(), default="")
+        if best and best.lower() not in query.lower() and best[0].lower() == word[0].lower() \
+                and SequenceMatcher(None, word.lower(), best.lower()).ratio() >= 0.34:
+            query = re.sub(rf"(?<![\w']){re.escape(word)}(?![\w'])", best, query)
+    for year in re.findall(r"\b(?:19|20)\d\d\b", query):
+        if year not in said:
+            query = re.sub(rf"\s*\b{year}\b", "", query)
+    return query.strip()
+
+
+def preferred_sites() -> List[Dict[str, str]]:
+    """tools.web_search.preferred_sites: [{site, for}], the websites the user wants used for a topic."""
+    entries = (get_config().get("tools", {}).get("web_search") or {}).get("preferred_sites") or []
+    return [{"site": str(e["site"]).lower(), "for": str(e.get("for") or "")} for e in entries
+            if isinstance(e, dict) and e.get("site")]
+
+
+def preferred_sites_text(intro: str) -> str:
+    sites = preferred_sites()
+    return (intro + "".join(f"\n  - {e['for']}: {e['site']}" for e in sites)) if sites else ""
+
+
+def _stems4(text: str) -> set:
+    return {w[:4] for w in re.findall(r"[a-z0-9]+", text.lower()) if len(w) >= 4}
+
+
 def keep_named_site(query: str, message: str) -> str:
     """
     The query without its "site:" if the latest message doesn't name that site. The query writer carried a
@@ -256,7 +297,12 @@ def keep_named_site(query: str, message: str) -> str:
     match = re.search(r"\s*\bsite:(\S+)", query)
     if not match:
         return query
-    labels = match.group(1).lower().removeprefix("www.").split(".")
+    site = match.group(1).lower().removeprefix("www.")
+    # A preferred site (tools.web_search.preferred_sites) stays even if nobody named it ("best counter for
+    # Kha'Zix" -> u.gg), as long as the message is about its topic.
+    if any(site == e["site"] and _stems4(e["for"]) & _stems4(message) for e in preferred_sites()):
+        return query
+    labels = site.split(".")
     letters = re.sub(r"[^a-z0-9]", "", message.lower())
     for target in {"".join(labels), "".join(labels[:-1]) or labels[0]}:
         if len(target) < 2:
@@ -317,7 +363,9 @@ def planner_messages(messages: List[Dict[str, str]], last_user_message: str, dec
     persona = next((m["content"] for m in messages if m.get("role") == "system"), "")
     question = ((f"About Metis: {persona[:700]}\n\n" if persona else "")
                 + (f"Conversation:\n{context}\n\n" if context else "") + f"Latest message: {last_user_message}")
-    return [{"role": "system", "content": _PLAN_PROMPT.format(options=options)}, *_PLAN_EXAMPLES,
+    preferred = preferred_sites_text("\n  Preferred websites: for these topics add site: with this website, unless they "
+                                     "name a different one:")
+    return [{"role": "system", "content": _PLAN_PROMPT.format(options=options, preferred=preferred)}, *_PLAN_EXAMPLES,
             {"role": "user", "content": question}]
 
 
@@ -368,7 +416,8 @@ async def decide_tools(
         said = " ".join(m["content"][:240] for m in recent if m["role"] == "user")
         metis_said = " ".join(m["content"][:240] for m in recent if m["role"] == "assistant")
         grounded = grounded_query(written, f"{said} {text} {standalone} {last_query}", metis_said, standalone)
-        query = keep_named_site(grounded, f"{text} {standalone}")
+        named = keep_said_names(grounded, f"{said} {text}")
+        query = keep_named_site(named, f"{text} {standalone}")
         arguments: Dict[str, Any] = {_first_string_param(decidable[action]): query}
         if action == "web_search":
             _last_search[conversation_id] = {"time": time.time(), "query": query}
@@ -377,7 +426,8 @@ async def decide_tools(
         print(f"🔎 {action} query {query!r}" + (f" ({arguments['search_type']})" if "search_type" in arguments else "")
               + f"\n   made from: {last_user_message!r}"
               + (f"\n   model wrote {written!r}, replaced: it used words only Metis said" if written and grounded != written else "")
-              + (f"\n   dropped the site: from {grounded!r}, nobody named that site" if query != grounded else ""))
+              + (f"\n   model wrote {grounded!r}, put back the names they said" if named != grounded else "")
+              + (f"\n   dropped the site: from {named!r}, nobody named that site" if query != named else ""))
         calls.append(ToolCall(action, arguments, f"chose {action}"))
     return calls
 

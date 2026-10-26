@@ -22,7 +22,8 @@ trafilatura>=2.0
 lxml_html_clean>=0.4  # needed by trafilatura with lxml>=5.2
 
 # Voice support (STT + TTS)
-nemo_toolkit[asr]>=2.2.0
+nemo_toolkit[asr]>=2.7.0  # 2.5+ for phrase boosting (voice.stt_vocabulary)
+g2p_en>=2.1.0  # phonetic name correction (voice.stt_vocabulary)
 kokoro>=0.9.4
 soundfile>=0.12.1
 scipy>=1.11.0

@@ -61,6 +61,7 @@ class VoiceService:
         self._tts_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="TTS")
         self._names: List[str] = self._load_names()
         self._aliases: Dict[str, str] = self._load_aliases()
+        self._vocabulary: Optional[Any] = None  # PhoneticCorrector for voice.stt_vocabulary
 
     async def initialize(self) -> None:
         if self._initialized:
@@ -104,11 +105,32 @@ class VoiceService:
                     precision = "bf16"
             self.stt_model.eval()
             print(f"✓ STT model loaded ({'cuda' if on_gpu else 'cpu'}, {precision})")
+            self._init_vocabulary()
             # The first transcription pays a one-time GPU warm-up (~0.3 s); do it now, not on a real speaker.
             self._transcribe_sync(np.zeros(STT_SAMPLE_RATE, dtype=np.float32))
         except Exception as e:
             print(f"❌ Failed to initialize STT: {e}")
             self.stt_model = None
+
+    def _init_vocabulary(self) -> None:
+        """voice.stt_vocabulary: names to boost while decoding and to correct afterwards (backend/stt_vocabulary.py)."""
+        entries = self.config.get("stt_vocabulary") or []
+        if not entries:
+            return
+        try:
+            from backend.stt_vocabulary import PhoneticCorrector, boost_phrases, enable_boosting, load_vocabularies
+
+            vocabularies = load_vocabularies(entries)
+            if not vocabularies:
+                return
+            boosted = enable_boosting(self.stt_model, boost_phrases(vocabularies, self._names),
+                                      float(self.config.get("stt_boost_alpha", 1.0)))
+            self._vocabulary = PhoneticCorrector(vocabularies, protected=self._names)
+            print("✓ STT vocabulary: " + ", ".join(f"{v.topic} ({len(v.terms)} names)" for v in vocabularies)
+                  + (", boosted while decoding" if boosted else ""))
+        except Exception as e:
+            print(f"⚠️ STT vocabulary unavailable: {e}")
+            self._vocabulary = None
 
     def _stt_on_gpu(self, torch) -> bool:
         """
@@ -205,6 +227,8 @@ class VoiceService:
             print(f"Transcription error: {e}")
             return None
         text = self._correct_names(text.strip()) if text else ""
+        if text and self._vocabulary:
+            text = self._vocabulary.correct(text)
         return text or None
 
     def _transcribe_sync(self, audio: np.ndarray) -> str:
@@ -248,6 +272,8 @@ class VoiceService:
             if len(spoken) >= 3 and spoken.lower() not in known:
                 self._names.append(spoken)
                 known.add(spoken.lower())
+                if self._vocabulary:
+                    self._vocabulary.protect([spoken])
 
     @staticmethod
     def _load_aliases() -> Dict[str, str]:
@@ -279,6 +305,8 @@ class VoiceService:
             exact = lowered.get(word.lower())
             if exact:
                 return exact
+            if word.lower().endswith("'s") and word.lower()[:-2] in lowered:
+                return lowered[word.lower()[:-2]] + word[-2:]  # "Kindred's" stays possessive
             best, ratio = max(((n, SequenceMatcher(None, word.lower(), n.lower()).ratio()) for n in self._names),
                               key=lambda x: x[1])
             if ratio >= threshold:

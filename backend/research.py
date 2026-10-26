@@ -38,7 +38,7 @@ dates or lists, unless a snippet states the answer plainly.
 that find nothing, give up with the closest thing you found.
 - Don't open a result you already read; it gives the same text.
 - If they asked about a particular website, answer with what that website says.
-- Use only what you read. Never guess or fill in from memory.
+- Use only what you read. Never guess or fill in from memory.{preferred}
 Write `thought` as one short sentence about what to do next."""
 
 _ACTIONS = ["search", "news", "open", "answer", "give_up"]
@@ -186,7 +186,10 @@ async def research(question: str, query: str, earlier: str = "", *, max_steps: i
     sources: List[str] = []
     transcript: List[str] = []
     opened: set = set()
-    system = _SYSTEM.format(today=datetime.date.today().strftime("%d %B %Y"))
+    from backend.tool_manager import preferred_sites_text
+
+    system = _SYSTEM.format(today=datetime.date.today().strftime("%d %B %Y"), preferred=preferred_sites_text(
+        "\n- The user prefers these websites for these topics; search and read them first:"))
 
     async def run_search(q: str, kind: str) -> str:
         # Adding a word to the last search ("... Patch 26.20" then "... Patch 26.20 tier list") gave the same
@@ -265,6 +268,11 @@ async def research(question: str, query: str, earlier: str = "", *, max_steps: i
         print(f"🔬 step {steps} ({time.perf_counter() - t:.1f}s): {action} {arg[:120]!r}  ({step.get('thought', '')[:100]})")
         if action in ("answer", "give_up"):
             answer, found = arg, action == "answer" and bool(arg)
+            if found and not adds_information(arg, question):
+                # "Kazik win rate vs Kindred on Yudor.gg" came back as the answer: the question with no facts.
+                # Passed on as found, Metis made up "a 32% win rate".
+                print("🔬 the answer only repeats the question; treating it as not found")
+                found = False
             break
         if action in ("search", "news"):
             transcript.append(await run_search(arg, "news" if action == "news" else "text"))
@@ -273,6 +281,15 @@ async def research(question: str, query: str, earlier: str = "", *, max_steps: i
     print(f"🔬 {'found' if found else 'not found'} in {time.perf_counter() - start:.1f}s, {steps} step(s): {answer[:160]!r}")
     return {"answer": answer, "found": found, "sources": list(dict.fromkeys(sources)) or [_domain(r["url"]) for r in results[:1]],
             "searches": searches, "steps": steps}
+
+
+def adds_information(answer: str, question: str) -> bool:
+    """False if the answer is just the question's own words (no number, no new name or fact)."""
+    words = [w for w in re.findall(r"[a-z0-9]+", answer.lower()) if len(w) >= 3 or w.isdigit()]
+    if not words or any(c.isdigit() for c in answer):
+        return bool(words)
+    asked = {w[:5] for w in re.findall(r"[a-z0-9]+", question.lower())}
+    return sum(w[:5] in asked for w in words) / len(words) < 0.6
 
 
 def format_brief(result: Dict[str, Any], question: str) -> str:
