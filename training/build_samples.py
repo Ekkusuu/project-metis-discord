@@ -577,24 +577,27 @@ def build(conversations: Sequence[Path], tasks: Sequence[str], mode: str, mood_t
         allowed = [task for task in tasks if task in (meta.get("tasks") or tasks)]
         made = 0
         for voice_mode in [v == "voice" for v in voices]:
+            # Mood tags exist only for the voice engine; a text reply that starts with [happy] would show it to
+            # the user verbatim, so never put one in a text target.
+            mode_tags = tags and voice_mode
             if "reply" in allowed:
                 for i, entry in enumerate(entries):
                     if entry.role != "assistant":
                         continue
-                    sample = _reply_example(entries, i, conversation, voice_mode, tags, candidates, now)
+                    sample = _reply_example(entries, i, conversation, voice_mode, mode_tags, candidates, now)
                     if sample:
                         samples.append(sample)
                         made += 1
             if "planner" in allowed:
-                for sample in _planner_examples(conversation, entries, voice_mode, tags, decidable, context_count):
+                for sample in _planner_examples(conversation, entries, voice_mode, mode_tags, decidable, context_count):
                     samples.append(sample)
                     made += 1
             if "addressee" in allowed:
-                for sample in _addressee_examples(conversation, entries, voice_mode, tags):
+                for sample in _addressee_examples(conversation, entries, voice_mode, mode_tags):
                     samples.append(sample)
                     made += 1
             if "facts" in allowed:
-                for sample in _facts_examples(conversation, entries, voice_mode, tags, candidates):
+                for sample in _facts_examples(conversation, entries, voice_mode, mode_tags, candidates):
                     samples.append(sample)
                     made += 1
         if made:

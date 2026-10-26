@@ -106,7 +106,7 @@ Four tasks come out of each conversation, all rendered by the functions the app 
 
 | task | prompt | target |
 | --- | --- | --- |
-| `reply` | `build_prompt()`: persona, history, people memory, recent lookups, reply guidance | Metis's line (`[mood]` prefix only when TTS emotions are configured) |
+| `reply` | `build_prompt()`: persona, history, people memory, recent lookups, reply guidance | Metis's line (a `[mood]` prefix only on **voice** targets, when TTS emotions are configured) |
 | `planner` | `planner_messages()`: tool menu and worked examples | the JSON plan |
 | `addressee` | `addressee_messages()`: who each line was for | `Metis` / `another person in the chat` / ... |
 | `facts` | `learning.py` fact-extraction prompt | labelled candidates for one speaker |
@@ -118,6 +118,12 @@ split and persona counts.
 Only replies Metis actually made are targets; chat lines from other people are never imitated. Chime-ins use
 `chiming_in=True` (she adds a comment instead of answering), and replies about a web lookup keep the `found` notes
 so the model learns to retell them in her own words.
+
+The addressee labels are skewed: about 80% are `Metis`, because the teacher conversations are mostly people
+talking to her. A strong adapter can learn that prior and answer `Metis` for everything, which looks good on raw
+accuracy and is wrong in a group call. `compare.py` therefore scores addressee with **balanced accuracy** across
+labels and lists the per-label detail. If a future run collapses, balance or downsample the `Metis` examples
+before training rather than turning the adapter up.
 
 ## 3. Train
 
@@ -163,6 +169,40 @@ This calls the app's own LLM service, so it tests exactly the configured model. 
 - **Voice shape**: one or two speakable sentences, a `[mood]` tag, no narration or emoji.
 
 A loss curve alone does not show any of that, which is why this comparison is the real acceptance test.
+
+### Base vs adapter, side by side
+
+`eval_personas.py` shows one configured model at a time. `compare.py` runs the base model and the adapter at
+several strengths over the same fixed suite and scores them identically:
+
+```powershell
+python training/compare.py --build
+python training/compare.py --run --scales 0,0.25,0.5,1.0
+python training/compare.py --chat --scales 0,0.25,0.5,1.0
+python training/compare.py --judge --scales 0,0.25,0.5,1.0
+python training/compare.py --report
+```
+
+The suite has 175 cases: held-out conversation replies, the same questions asked of all five held-out personas
+in voice and text, trained-persona replies, chime-ins, replies after a web lookup, the real planner prompt
+(held-out and curated regression cases), the addressee prompt, and fact extraction. Every prompt comes from the
+runtime, and every condition goes through the app's node-llama-cpp service with the production sampling
+settings. The base and each adapter strength run on their own port, one at a time, so they cannot share a cache.
+
+A separate multi-turn probe runs four nine-turn conversations, feeding each reply back as Metis's own previous
+line. That is the test that catches a model repeating one of its own sentences, which single-turn cases cannot.
+
+Automatic metrics cover length, mood tag, forbidden output (emoji, markdown, narration, AI self-reference),
+persona vocabulary, exact duplicates, pairwise 4-gram overlap and latency. A second local model, Qwen3.5-9B,
+blind-judges the replies for being in character, sounding like speech, answering the message and not sounding
+like an assistant.
+
+Results land in `training/out/compare/report.md` (tables) and `transcripts.md` (every reply side by side).
+Runs are resumable and skip completed conditions unless `--force` is given. The app's LLM service must not be
+using the comparison port (default 3931).
+
+`eval_personas.py` remains the quick check while iterating; `compare.py` is the acceptance test before turning
+an adapter on.
 
 ## Cost and scale
 
