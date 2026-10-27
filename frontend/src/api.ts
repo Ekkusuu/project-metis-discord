@@ -87,6 +87,15 @@ export interface Fact {
   id: string;
   text: string;
   added: string;
+  /** 1-10; how much it matters. Facts and episodes only (not general notes). */
+  importance?: number;
+  /** 0-1; how well she still remembers it (it fades unless it comes up again). */
+  retention?: number;
+}
+
+/** A summary of a past conversation: what happened, with whom. */
+export interface Episode extends Fact {
+  people: string[];
 }
 
 export interface Person {
@@ -97,6 +106,7 @@ export interface Person {
   last_seen: string;
   message_count: number;
   facts: Fact[];
+  episodes: Episode[];
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -132,6 +142,11 @@ export const getNotes = () => request<{ notes: Fact[] }>('/memory/notes');
 export const deletePersonFact = (personId: string, factId: string) =>
   request<{ status: string }>(
     `/memory/people/${encodeURIComponent(personId)}/facts/${encodeURIComponent(factId)}`,
+    { method: 'DELETE' },
+  );
+export const deletePersonEpisode = (personId: string, episodeId: string) =>
+  request<{ status: string }>(
+    `/memory/people/${encodeURIComponent(personId)}/episodes/${encodeURIComponent(episodeId)}`,
     { method: 'DELETE' },
   );
 export const forgetPerson = (personId: string) =>

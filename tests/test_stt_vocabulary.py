@@ -103,3 +103,25 @@ def test_query_keeps_the_names_people_said(query, said, expected):
     from backend.tool_manager import keep_said_names
 
     assert keep_said_names(query, said) == expected
+
+
+@pytest.mark.parametrize("heard, fixed", [
+    ("Matisse, what do you think?", "Metis, what do you think?"),  # heard in a real call
+    ("What do you think, Matisse?", "What do you think, Metis?"),
+    ("Hey Matthis, are you there?", "Hey Metis, are you there?"),
+    ("Hello Madis.", "Hello Metis."),
+    ("Medis is so slow today", "Metis is so slow today"),  # not a word: sounds like her name anywhere
+])
+def test_her_own_name_is_fixed_by_sound(corrector, heard, fixed):
+    assert corrector.correct_own_name(heard, ["Metis"]) == fixed
+
+
+@pytest.mark.parametrize("text", [
+    "I love Matisse paintings.",  # a real name, nobody is talking to her
+    "Matthews scored twice last night.",
+    "Hey mates, what's up?",
+    "Sava, are you there?",  # someone in the call
+    "Metis, you there?",
+])
+def test_other_words_are_not_turned_into_her_name(corrector, text):
+    assert corrector.correct_own_name(text, ["Metis"]) == text

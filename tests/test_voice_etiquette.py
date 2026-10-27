@@ -313,3 +313,35 @@ def test_backchannel_between_people_is_left_out_of_the_prompt():
     texts = [m["content"] for m in conv.prompt()[1:]]
     assert texts == ["[A]: aatrox is useless now", "[A]: Metis, want to play later?", "Sure, after dinner?",
                      "[A]: Yeah.", "[B]: Mm-hmm."]
+
+
+def test_reset_clears_the_history_and_starts_the_conversation_again():
+    conv = bot_mod.Conversation(mode="voice")
+    conv.add_user(SimpleNamespace(id=1, name="A", display_name="A", bot=False), "remember my cat Pixel")
+    conv.add_assistant("Got it.")
+    for message in conv.messages:  # already learned and consolidated, so reset() queues nothing in the test
+        message["learned"] = message["consolidated"] = True
+    conv.started = 1.0
+
+    assert conv.reset() == 2
+    assert conv.messages == []
+    assert conv.started > 1.0
+
+
+def test_chat_payload_tells_the_backend_when_the_conversation_started():
+    conv = bot_mod.Conversation(mode="voice", key="voice-1")
+    conv.started = 1234.5
+    payload = bot_mod.chat_payload(conv, voice_mode=True)
+    assert payload["started_at"] == 1234.5 and payload["conversation_id"] == "voice-1"
+
+
+def test_each_voice_join_starts_a_new_conversation(receiver):
+    """She answered "Hello, Metis" as if the call from the day before had never ended."""
+    receiver.conversation.add_user(
+        SimpleNamespace(id=1, name="A", display_name="A", bot=False), "see you tomorrow")["learned"] = True
+    receiver.conversation.started = 1.0
+
+    joined_again = bot_mod.VoiceReceiver(FakeVoiceClient(), text_channel=None)
+    assert joined_again.conversation is receiver.conversation  # one conversation per voice channel
+    assert joined_again.conversation.messages == []
+    assert joined_again.conversation.started > 1.0

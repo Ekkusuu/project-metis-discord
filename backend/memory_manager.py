@@ -3,8 +3,9 @@ Memory orchestration.
 
 Metis learns continuously: every few messages (and when a conversation is
 reset, compacted or the bot shuts down) the new part of the conversation is
-handed to backend.learning, which stores facts per person in memory/people.json
-and mirrors them to memory/long_term/ for the knowledge base.
+handed to backend.learning, which stores facts per person in the memory store
+(memory/memories.db). When a conversation ends it is also consolidated into
+episodes (see backend/learning.py).
 
 All learning runs on one background worker so replies never wait for it and
 two learning passes never race on the same files.
@@ -24,7 +25,7 @@ MEMORY_DIR.mkdir(exist_ok=True)
 
 _worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="memory")
 _stats_lock = threading.Lock()
-stats: Dict[str, Any] = {"facts_learned": 0, "notes_learned": 0, "passes": 0, "pending": 0}
+stats: Dict[str, Any] = {"facts_learned": 0, "notes_learned": 0, "episodes_learned": 0, "passes": 0, "pending": 0}
 
 
 def _safe(fn, *args):
@@ -37,22 +38,28 @@ def _safe(fn, *args):
         return None
 
 
-def _learn(messages: List[Dict[str, Any]]) -> Dict[str, int]:
-    from backend.learning import learn
+def _run_task(task, messages: List[Dict[str, Any]], session: str):
+    """`task(messages, session)`, tried a second time if the LLM service was restarting."""
     from backend.llama_engine import wait_until_ready
 
     try:
         try:
-            result = learn(messages)
+            return task(messages, session)
         except RuntimeError:
             # The LLM service was restarting (after a crash). The messages are already marked as learned, so
             # without a second try what they said would be lost.
             if not wait_until_ready(60):
                 raise
-            result = learn(messages)
+            return task(messages, session)
     finally:
         with _stats_lock:
             stats["pending"] -= 1
+
+
+def _learn(messages: List[Dict[str, Any]], session: str = "") -> Dict[str, int]:
+    from backend.learning import learn
+
+    result = _run_task(learn, messages, session)
     with _stats_lock:
         stats["passes"] += 1
         stats["facts_learned"] += result["facts"]
@@ -60,12 +67,30 @@ def _learn(messages: List[Dict[str, Any]]) -> Dict[str, int]:
     return result
 
 
-def learn_from(messages: List[Dict[str, Any]]) -> Future:
-    """Queue messages for learning without blocking the caller."""
+def _consolidate(messages: List[Dict[str, Any]], session: str = "") -> int:
+    from backend.learning import consolidate
+
+    episodes = _run_task(consolidate, messages, session)
+    with _stats_lock:
+        stats["episodes_learned"] += episodes
+    return episodes
+
+
+def _queue(task, messages: List[Dict[str, Any]], session: str) -> Future:
     messages = [m for m in messages if m.get("role") in ("user", "assistant") and m.get("content")]
     with _stats_lock:
         stats["pending"] += 1
-    return _worker.submit(_safe, _learn, messages)
+    return _worker.submit(_safe, task, messages, session)
+
+
+def learn_from(messages: List[Dict[str, Any]], session: str = "") -> Future:
+    """Queue messages for learning without blocking the caller."""
+    return _queue(_learn, messages, session)
+
+
+def consolidate_from(messages: List[Dict[str, Any]], session: str = "") -> Future:
+    """Queue a conversation that ended to be turned into episodes (after the facts queued before it)."""
+    return _queue(_consolidate, messages, session)
 
 
 def migrate_legacy_memory() -> Future | None:

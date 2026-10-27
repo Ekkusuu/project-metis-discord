@@ -206,6 +206,19 @@
   overflow-wrap: anywhere;
 }
 
+.people-subtitle {
+  margin-top: var(--space-3);
+  color: var(--text-faint);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.people-subtitle + .people-facts {
+  margin-top: var(--space-1);
+}
+
 .people-nothing {
   margin-top: var(--space-3);
   color: var(--text-faint);

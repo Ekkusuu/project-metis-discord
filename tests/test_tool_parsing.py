@@ -248,6 +248,45 @@ def test_recent_lookups_are_remembered_for_a_while(monkeypatch):
     assert chat.recent_lookups_text("voice-1") == ""
 
 
+def test_lookups_from_before_this_call_are_not_remembered(monkeypatch):
+    """A lookup from the last voice call ("the Shaco counters") must not come back in the next one."""
+    import time
+
+    import backend.routers.chat as chat
+
+    now = time.time()
+    monkeypatch.setattr(chat, "_recent_lookups", {"voice-1": [
+        (now - 60, "best jungler?", "Master Yi (u.gg)"),  # looked up in the previous call
+        (now - 1, "best support?", "Lulu (u.gg)"),        # looked up in this one
+    ]})
+    text = chat.recent_lookups_text("voice-1", since=now - 5)  # this call started five seconds ago
+    assert "Lulu" in text and "Master Yi" not in text
+    assert "Master Yi" in chat.recent_lookups_text("voice-1")  # no start time: every fresh lookup counts
+    assert chat.recent_lookups_text("voice-1", since=now + 1) == ""  # the call began after both
+
+
+def test_build_prompt_hides_lookups_from_before_the_conversation_started(monkeypatch):
+    import time
+
+    import backend.routers.chat as chat
+
+    now = time.time()
+    monkeypatch.setattr(chat, "_recent_lookups", {"voice-1": [(now - 60, "best jungler?", "Master Yi (u.gg)")]})
+    messages = [{"role": "user", "content": "[a]: what did we look up?"}]
+    assert "Master Yi" in chat.build_prompt(messages, "", "", "How to reply:\n- x", "voice-1")[-2]["content"]
+    assert "Master Yi" not in chat.build_prompt(messages, "", "", "How to reply:\n- x", "voice-1",
+                                                since=now - 5)[-2]["content"]
+
+
+def test_chat_request_carries_when_the_conversation_started():
+    import backend.routers.chat as chat
+
+    request = chat.ChatRequest(messages=[{"role": "user", "content": "hi"}], conversation_id="voice-1",
+                               started_at=1234.5)
+    assert request.started_at == 1234.5
+    assert chat.ChatRequest(messages=[{"role": "user", "content": "hi"}]).started_at is None
+
+
 async def test_hanging_up_during_a_lookup_cancels_it(monkeypatch):
     """"No, don't look that up" while she was searching: the bot drops the request, and the lookup must stop
     too instead of running on for nobody."""
@@ -273,3 +312,75 @@ async def test_hanging_up_during_a_lookup_cancels_it(monkeypatch):
     await body.aclose()     # the bot hung up
     await _asyncio.sleep(0.05)
     assert state["cancelled"]
+
+
+# --- the planner must not search for what Metis herself said ----------------------------------------------------
+HORROR = [{"role": "user", "content": "[ekkusu]: hey"},
+          {"role": "assistant", "content": "Did you see that horror movie about the haunted lighthouse last night?"}]
+
+
+async def test_a_question_about_her_own_last_line_gets_no_tool_and_no_planning(planner):
+    """"What are you talking about?" became a web search for a horror movie Metis had invented."""
+    from backend.tool_manager import decide_tools
+
+    state, seen = planner
+    plan(state, "web_search", "horror movie haunted lighthouse", "What horror movie is Metis talking about?")
+    for question in ("What are you talking about?", "what do you mean?", "why did you say that?",
+                     "where did you get that from"):
+        messages = [*HORROR, {"role": "user", "content": f"[ekkusu]: {question}"}]
+        assert await decide_tools(messages, messages[-1]["content"]) == [], question
+    assert seen["calls"] == []  # decided without asking the model
+
+
+async def test_a_search_built_from_her_invention_is_dropped(planner):
+    """Even if the question isn't a recognisable "what do you mean": a rewrite made of her words isn't speech."""
+    from backend.tool_manager import decide_tools
+
+    state, _ = planner
+    plan(state, "web_search", "haunted lighthouse horror movie", "What is the haunted lighthouse horror movie called?")
+    messages = [*HORROR, {"role": "user", "content": "[ekkusu]: ok but what was it called"}]
+    assert await decide_tools(messages, messages[-1]["content"]) == []
+
+    plan(state, "web_search", "", "What is the haunted lighthouse horror movie called?")  # no query: the rewrite is used
+    assert await decide_tools(messages, messages[-1]["content"]) == []
+
+
+async def test_a_search_on_a_topic_people_raised_still_runs(planner):
+    from backend.tool_manager import decide_tools
+
+    state, _ = planner
+    plan(state, "web_search", "haunted lighthouse horror movie", "What is the haunted lighthouse horror movie called?")
+    messages = [{"role": "user", "content": "[ekkusu]: i watched a horror movie about a haunted lighthouse"},
+                {"role": "assistant", "content": "Spooky! Did you like it?"},
+                {"role": "user", "content": "[ekkusu]: yes but what was it called"}]
+    calls = await decide_tools(messages, messages[-1]["content"])
+    assert [c.tool_name for c in calls] == ["web_search"]
+
+
+async def test_a_follow_up_on_what_her_search_found_still_runs(planner):
+    """Her words that came from a lookup aren't made up: a follow-up on the result is searched."""
+    from backend.routers import chat
+    from backend.tool_manager import decide_tools
+
+    state, _ = planner
+    chat.remember_lookup("top horror movie this fall", "Obsession is the top-searched horror movie", "voice-9")
+    plan(state, "web_search", "Obsession horror movie cast", "Who is in the horror movie Obsession?")
+    messages = [{"role": "user", "content": "[ekkusu]: what's the top horror movie this fall"},
+                {"role": "assistant", "content": "Obsession is the top-searched horror movie right now."},
+                {"role": "user", "content": "[ekkusu]: who's in it"}]
+    calls = await decide_tools(messages, messages[-1]["content"], conversation_id="voice-9")
+    assert [c.tool_name for c in calls] == ["web_search"]
+    assert "Obsession" in calls[0].arguments["query"]
+
+
+def test_invented_by_metis_and_the_rewrite_that_carries_her_words():
+    from backend.tool_manager import asks_about_her_last_line, invented_by_metis, without_metis_words
+
+    people, metis = "hey what are you talking about", "the haunted lighthouse horror movie was terrifying"
+    assert invented_by_metis("haunted lighthouse horror movie", people, metis)
+    assert not invented_by_metis("lighthouse tours", "i visited a lighthouse tour", metis)
+    assert not invented_by_metis("tesla roadster release date", "when was the tesla roadster released", "")
+    assert without_metis_words("What is the haunted lighthouse movie called?", people, metis) == "What is the called?"
+    assert asks_about_her_last_line("Wait, what are you even talking about?")
+    assert not asks_about_her_last_line("what are you doing tonight?")
+    assert not asks_about_her_last_line("what do you think of aatrox?")

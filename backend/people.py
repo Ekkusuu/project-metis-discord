@@ -2,10 +2,12 @@
 Who Metis knows: one profile per Discord user, keyed by their stable user id.
 
 Display names change and collide; user ids don't. Every message (text or
-voice) updates the speaker's profile, and facts learned from conversations
-(see backend/learning.py) are attached to the right person here. Profiles are
-also written out as Markdown under memory/long_term/people/ so the knowledge
-base can retrieve facts about people who aren't in the current conversation.
+voice) updates the speaker's profile (names, aliases, last seen). What she has
+learned about people lives in the memory store (backend/memory_store.py, memory/memories.db):
+facts about one person and episodes of conversations; this class is the registry
+in front of it, so a person's facts and episodes are read and written through it.
+General notes that aren't about one person stay here and are written out as Markdown
+for the knowledge base.
 
 People only known by name (e.g. learned from an old transcript without ids)
 get a pseudo id "name:<lowercase name>" and are merged into the real profile
@@ -23,10 +25,14 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 from backend.config import MEMORY_DIR, get_config
+from backend.memory_store import MemoryStore, retention
 
 PEOPLE_FILE = MEMORY_DIR / "people.json"
-PROFILE_DIR = MEMORY_DIR / "long_term" / "people"
+PROFILE_DIR = MEMORY_DIR / "long_term" / "people"  # the old Markdown profiles, removed on load
 NOTES_FILE = MEMORY_DIR / "long_term" / "learned_notes.md"
+
+# Importance given to facts that were stored before facts were rated (the migration).
+MIGRATED_IMPORTANCE = 6
 
 
 def _now() -> str:
@@ -37,42 +43,58 @@ def _norm(text: str) -> str:
     return re.sub(r"[^a-z0-9 ]+", "", text.lower()).strip()
 
 
+def _same(a: str, b: str, threshold: float) -> bool:
+    return a == b or (a in b and len(a) > 12) or SequenceMatcher(None, a, b).ratio() >= threshold
+
+
 def is_duplicate(fact: str, existing: Iterable[str], threshold: float = 0.82) -> bool:
     """True if `fact` says (nearly) the same thing as an existing fact."""
     a = _norm(fact)
     if not a:
         return True
-    for other in existing:
-        b = _norm(other)
-        if a == b or (a in b and len(a) > 12) or SequenceMatcher(None, a, b).ratio() >= threshold:
-            return True
-    return False
-
-
-def _slug(name: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "person"
+    return any(_same(a, _norm(other), threshold) for other in existing)
 
 
 class PeopleStore:
-    def __init__(self, path: Path = PEOPLE_FILE) -> None:
+    def __init__(self, path: Path = PEOPLE_FILE, memories: Optional[MemoryStore] = None) -> None:
         self.path = path
         self._lock = threading.RLock()
         self.people: Dict[str, Dict[str, Any]] = {}
         self.notes: List[Dict[str, Any]] = []
+        self.memories = memories or MemoryStore(path.with_name("memories.db"))
         self._load()
 
     # ------------------------------------------------------------------
     # Persistence
     # ------------------------------------------------------------------
     def _load(self) -> None:
-        if not self.path.exists():
-            return
-        try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
-            self.people = data.get("people", {})
-            self.notes = data.get("notes", [])
-        except Exception as e:
-            print(f"Warning: could not read {self.path.name}: {e}")
+        if self.path.exists():
+            try:
+                data = json.loads(self.path.read_text(encoding="utf-8"))
+                self.people = data.get("people", {})
+                self.notes = data.get("notes", [])
+            except Exception as e:
+                print(f"Warning: could not read {self.path.name}: {e}")
+                return
+        self._migrate_facts()
+        for old_profile in PROFILE_DIR.glob("*.md"):  # facts are in the store now; don't also index them as notes
+            old_profile.unlink(missing_ok=True)
+
+    def _migrate_facts(self) -> None:
+        """
+        Facts used to be a list inside each profile. They move into the memory store once (same ids, so a crash
+        between the two writes can be repeated), as importance 6 facts created when they were added.
+        """
+        moved = 0
+        with self._lock:
+            for pid, person in self.people.items():
+                for fact in person.pop("facts", None) or []:
+                    self.memories.add("fact", [pid], fact["text"], importance=MIGRATED_IMPORTANCE,
+                                      created=fact.get("added"), memory_id=fact.get("id"), embed=False)
+                    moved += 1
+            if moved:
+                self.save()
+                print(f"🧠 Moved {moved} fact(s) from {self.path.name} into the memory store")
 
     def save_soon(self, delay: float = 5.0) -> None:
         """Coalesce frequent, low-value writes (last seen / message counts) into one save."""
@@ -97,15 +119,18 @@ class PeopleStore:
     # ------------------------------------------------------------------
     # Identity
     # ------------------------------------------------------------------
+    def _new_person(self, pid: str, name: str) -> Dict[str, Any]:
+        person = {"id": pid, "name": name, "aliases": [], "first_seen": _now(), "last_seen": _now(), "message_count": 0}
+        self.people[pid] = person
+        return person
+
     def seen(self, user_id: int | str, name: str, aliases: Iterable[str] = ()) -> Dict[str, Any]:
         """Record that a user spoke. Returns their profile."""
         pid = str(user_id)
         with self._lock:
             person = self.people.get(pid)
             if person is None:
-                person = {"id": pid, "name": name, "aliases": [], "first_seen": _now(), "last_seen": _now(),
-                          "message_count": 0, "facts": []}
-                self.people[pid] = person
+                person = self._new_person(pid, name)
                 self._merge_pseudo(pid, [name, *aliases])
             if person["name"] != name:
                 if person["name"] not in person["aliases"]:
@@ -123,11 +148,13 @@ class PeopleStore:
         for name in names:
             pseudo = self.people.pop(f"name:{name.lower()}", None)
             if pseudo:
-                target = self.people[pid]
-                for fact in pseudo["facts"]:
-                    if not is_duplicate(fact["text"], (f["text"] for f in target["facts"])):
-                        target["facts"].append(fact)
-                (PROFILE_DIR / f"{_slug(pseudo['name'])}-{_slug(pseudo['id'])}.md").unlink(missing_ok=True)
+                self.memories.reassign_person(pseudo["id"], pid)
+                kept: List[str] = []
+                for fact in self.memories.active("fact", [pid]):
+                    if is_duplicate(fact["text"], kept):
+                        self.memories.delete(fact["id"])
+                    else:
+                        kept.append(fact["text"])
                 print(f"Merged name-only profile '{pseudo['name']}' into user {pid}")
 
     def resolve(self, name: str, candidates: Optional[Dict[str, str]] = None) -> Optional[str]:
@@ -152,30 +179,82 @@ class PeopleStore:
                 return cid
         return None
 
-    # ------------------------------------------------------------------
-    # Facts
-    # ------------------------------------------------------------------
-    def add_facts(self, person_id: str, facts: Iterable[str], name: Optional[str] = None) -> int:
-        """Attach new facts to a person (creating a name-only profile if needed). Returns how many were new."""
-        limit = int(get_config().get("memory", {}).get("max_facts_per_person", 80))
-        added = 0
+    def names_of(self, person_ids: Iterable[str]) -> Dict[str, List[str]]:
+        """person id -> every name they go by (current name first), for the ones we know."""
         with self._lock:
-            person = self.people.get(person_id)
-            if person is None:
-                person = {"id": person_id, "name": name or person_id, "aliases": [], "first_seen": _now(),
-                          "last_seen": _now(), "message_count": 0, "facts": []}
-                self.people[person_id] = person
-            for fact in facts:
-                fact = fact.strip().rstrip(".")
-                if len(fact) < 3 or is_duplicate(fact, (f["text"] for f in person["facts"])):
-                    continue
-                person["facts"].append({"id": uuid.uuid4().hex[:10], "text": fact, "added": _now()})
-                added += 1
-            if len(person["facts"]) > limit:
-                person["facts"] = person["facts"][-limit:]
-            if added:
-                self.save()
-        return added
+            return {pid: [p["name"], *p.get("aliases", [])] for pid in (str(i) for i in person_ids)
+                    if (p := self.people.get(pid))}
+
+    # ------------------------------------------------------------------
+    # Facts (in the memory store)
+    # ------------------------------------------------------------------
+    def _ensure_person(self, person_id: str, name: Optional[str]) -> None:
+        if person_id not in self.people:
+            self._new_person(person_id, name or person_id)
+
+    def add_fact(self, person_id: str, text: str, importance: int = MIGRATED_IMPORTANCE, quote: str = "",
+                 name: Optional[str] = None, session: str = "") -> Optional[Dict[str, Any]]:
+        """
+        Store a new fact about a person (creating a name-only profile if needed). If it only repeats a stored
+        fact, that one is confirmed instead (it lasts longer) and None is returned.
+        """
+        text = text.strip().rstrip(".")
+        if len(text) < 3:
+            return None
+        with self._lock:
+            self._ensure_person(person_id, name)
+            same = next((f for f in self.memories.active("fact", [person_id]) if is_duplicate(text, [f["text"]])), None)
+            if same:
+                self.memories.reinforce(same["id"], importance)
+                return None
+            fact = self.memories.add("fact", [person_id], text, quote=quote, importance=importance, session=session)
+            limit = int(get_config().get("memory", {}).get("max_facts_per_person", 80))
+            self.memories.forget_weakest(person_id, limit)
+            self.save()
+            return fact
+
+    def add_facts(self, person_id: str, facts: Iterable[str], name: Optional[str] = None) -> int:
+        """Attach new facts to a person. Returns how many were new."""
+        return sum(1 for fact in facts if self.add_fact(person_id, fact, name=name))
+
+    def supersede_fact(self, person_id: str, old_id: str, text: str, importance: int = MIGRATED_IMPORTANCE,
+                       quote: str = "", session: str = "") -> bool:
+        """The fact changed (moved city, new main): the old one is kept as superseded, pointing at the new one."""
+        old = self.memories.get(old_id)
+        if not old or old["kind"] != "fact" or person_id not in old["person_ids"]:
+            return False
+        new = self.memories.add("fact", [person_id], text.strip().rstrip("."), quote=quote,
+                                importance=max(importance, old["importance"]), session=session)
+        return self.memories.supersede(old_id, new["id"])
+
+    def reinforce_fact(self, person_id: str, fact_id: str, importance: int = 0) -> bool:
+        fact = self.memories.get(fact_id)
+        return bool(fact and person_id in fact["person_ids"] and self.memories.reinforce(fact_id, importance))
+
+    def update_fact(self, person_id: str, fact_id: str, text: str) -> bool:
+        """Replace what a stored fact says (a correction by hand)."""
+        fact = self.memories.get(fact_id)
+        return bool(fact and fact["kind"] == "fact" and person_id in fact["person_ids"]
+                    and self.memories.set_text(fact_id, text.rstrip(".")))
+
+    def remove_fact(self, person_id: str, fact_id: str) -> bool:
+        fact = self.memories.get(fact_id)
+        return bool(fact and fact["kind"] == "fact" and person_id in fact["person_ids"] and self.memories.delete(fact_id))
+
+    def add_episode(self, person_ids: Iterable[str], text: str, importance: int = 5, session: str = "",
+                    names: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+        """An episode shared by everyone in `person_ids` (`names`: id -> name, for ones without a profile yet)."""
+        ids = [str(p) for p in person_ids]
+        with self._lock:
+            for pid in ids:
+                self._ensure_person(pid, (names or {}).get(pid))
+            self.save()
+        return self.memories.add("episode", ids, text, importance=importance, session=session)
+
+    def remove_episode(self, person_id: str, episode_id: str) -> bool:
+        episode = self.memories.get(episode_id)
+        return bool(episode and episode["kind"] == "episode" and person_id in episode["person_ids"]
+                    and self.memories.delete(episode_id))
 
     def add_notes(self, notes: Iterable[str]) -> int:
         added = 0
@@ -191,27 +270,6 @@ class PeopleStore:
                 self.save()
         return added
 
-    def update_fact(self, person_id: str, fact_id: str, text: str) -> bool:
-        """Replace what a stored fact says (it changed: a new city, a new main)."""
-        with self._lock:
-            person = self.people.get(person_id)
-            fact = next((f for f in (person or {}).get("facts", []) if f["id"] == fact_id), None)
-            if fact is None:
-                return False
-            fact["text"], fact["added"] = text.strip().rstrip("."), _now()
-            self.save()
-            return True
-
-    def remove_fact(self, person_id: str, fact_id: str) -> bool:
-        with self._lock:
-            person = self.people.get(person_id)
-            if not person:
-                return False
-            before = len(person["facts"])
-            person["facts"] = [f for f in person["facts"] if f["id"] != fact_id]
-            self.save()
-            return len(person["facts"]) != before
-
     def remove_note(self, note_id: str) -> bool:
         with self._lock:
             before = len(self.notes)
@@ -223,68 +281,55 @@ class PeopleStore:
         with self._lock:
             person = self.people.pop(person_id, None)
             self.save()
-        if person:
-            (PROFILE_DIR / f"{_slug(person['name'])}-{_slug(person_id)}.md").unlink(missing_ok=True)
+        self.memories.delete_person(person_id)
         return person is not None
 
     # ------------------------------------------------------------------
     # Views
     # ------------------------------------------------------------------
+    def _with_memories(self, person: Dict[str, Any], active: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """The profile plus what's remembered about the person: `facts`, and `episodes` they were part of."""
+        mine = [m for m in active if person["id"] in m["person_ids"]]
+        names = {pid: ns[0] for pid, ns in self.names_of({p for m in mine for p in m["person_ids"]}).items()}
+
+        def view(m: Dict[str, Any]) -> Dict[str, Any]:
+            return {"id": m["id"], "text": m["text"], "added": m["created"], "importance": m["importance"],
+                    "confirmations": m["confirmations"], "recalls": m["recalls"], "retention": round(retention(m), 2)}
+
+        return {**json.loads(json.dumps(person)),
+                "facts": [view(m) for m in mine if m["kind"] == "fact"],
+                "episodes": [{**view(m), "people": [names.get(p, p) for p in m["person_ids"]]}
+                             for m in mine if m["kind"] == "episode"]}
+
     def get(self, person_id: str) -> Optional[Dict[str, Any]]:
         with self._lock:
             person = self.people.get(str(person_id))
-            return json.loads(json.dumps(person)) if person else None
+            return self._with_memories(person, self.memories.active()) if person else None
 
     def all(self) -> List[Dict[str, Any]]:
         with self._lock:
-            people = json.loads(json.dumps(list(self.people.values())))
+            active = self.memories.active()
+            people = [self._with_memories(p, active) for p in self.people.values()]
         return sorted(people, key=lambda p: p.get("last_seen", ""), reverse=True)
 
-    def profile_block(self, person_ids: Iterable[str], max_facts: int = 8, others_max_facts: int = 4) -> str:
-        """
-        Prompt text describing the given people, most recent facts first. The first person (the one Metis is
-        answering) gets `max_facts`, the others fewer: 15 facts for everyone in a group call buried a small
-        model in trivia it then brought up out of nowhere.
-        """
-        lines = []
+    def who_is_who(self, person_ids: Iterable[str]) -> str:
+        """The people by name (and the other names they go by): what's always in the prompt, with no facts."""
         with self._lock:
-            for i, pid in enumerate(dict.fromkeys(str(p) for p in person_ids)):
-                person = self.people.get(pid)
-                if not person:
-                    continue
-                aka = f" (also known as {', '.join(person['aliases'][-3:])})" if person.get("aliases") else ""
-                limit = max_facts if i == 0 else others_max_facts
-                facts = [f["text"] for f in reversed(person["facts"][-limit:])]
-                body = "; ".join(facts) if facts else "nothing known yet"
-                lines.append(f"- {person['name']}{aka}: {body}")
-        return "\n".join(lines)
+            people = [self.people[pid] for pid in dict.fromkeys(str(p) for p in person_ids) if pid in self.people]
+        return ", ".join(p["name"] + (f" (also known as {', '.join(p['aliases'][-3:])})" if p.get("aliases") else "")
+                         for p in people)
 
     # ------------------------------------------------------------------
-    # Markdown export for the knowledge base
+    # Markdown export of the general notes for the knowledge base
     # ------------------------------------------------------------------
-    def export_markdown(self, person_ids: Optional[Iterable[str]] = None) -> List[Path]:
-        written: List[Path] = []
+    def export_notes(self) -> List[Path]:
         with self._lock:
-            ids = list(person_ids) if person_ids is not None else list(self.people)
-            PROFILE_DIR.mkdir(parents=True, exist_ok=True)
-            for pid in ids:
-                person = self.people.get(pid)
-                if not person:
-                    continue
-                path = PROFILE_DIR / f"{_slug(person['name'])}-{_slug(pid)}.md"
-                for stale in PROFILE_DIR.glob(f"*-{_slug(pid)}.md"):
-                    if stale != path:
-                        stale.unlink(missing_ok=True)
-                names = ", ".join([person["name"], *person.get("aliases", [])])
-                facts = "\n".join(f"- user personal information: {person['name']} {f['text']}" for f in person["facts"])
-                path.write_text(f"# {person['name']}\nNames: {names}\n\n{facts}\n", encoding="utf-8")
-                written.append(path)
-            if self.notes:
-                NOTES_FILE.parent.mkdir(parents=True, exist_ok=True)
-                NOTES_FILE.write_text("# Things Metis learned\n\n" + "\n".join(f"- {n['text']}" for n in self.notes) + "\n",
-                                      encoding="utf-8")
-                written.append(NOTES_FILE)
-        return written
+            if not self.notes:
+                return []
+            NOTES_FILE.parent.mkdir(parents=True, exist_ok=True)
+            NOTES_FILE.write_text("# Things Metis learned\n\n" + "\n".join(f"- {n['text']}" for n in self.notes) + "\n",
+                                  encoding="utf-8")
+            return [NOTES_FILE]
 
 
 _store: Optional[PeopleStore] = None
@@ -297,3 +342,7 @@ def get_people() -> PeopleStore:
         if _store is None:
             _store = PeopleStore()
         return _store
+
+
+def get_memories() -> MemoryStore:
+    return get_people().memories

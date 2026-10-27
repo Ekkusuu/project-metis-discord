@@ -54,6 +54,7 @@ from backend.turn_taking import (
 )
 from backend.voice_service import TTS_SAMPLE_RATE, get_voice_service
 from backend import voice_compat
+from backend.hesitation import bank as hesitations, drop_interjection
 
 voice_compat.apply()  # survive frames that DAVE (E2EE voice) leaves undecodable
 
@@ -99,6 +100,7 @@ class Conversation:
     messages: List[Dict[str, Any]] = field(default_factory=list)
     latest_id: int = 0  # id of the newest user message; older in-flight replies abort
     chiming_in: bool = False  # the reply being made joins a conversation between other people
+    started: float = field(default_factory=time.time)  # when this conversation (a voice call: the join) began
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     @property
@@ -134,6 +136,7 @@ class Conversation:
 
     def add_user(self, user: discord.abc.User, text: str, mentions: Tuple[int, ...] = (),
                  reply_to: Optional[int] = None) -> Dict[str, Any]:
+        self.end_episode_if_idle()
         label = self.label_for(user)
         msg = {
             "role": "user",
@@ -146,6 +149,7 @@ class Conversation:
             "reply_to": reply_to,
             "ts": time.time(),
             "learned": False,
+            "consolidated": False,
         }
         self.messages.append(msg)
         return msg
@@ -156,7 +160,8 @@ class Conversation:
         end, a line said while she was talking ended up before her reply, the history ended with her, and the
         next turn was refused ("the last message must be from the user"): 14 lines went unanswered in a call.
         """
-        msg = {"role": "assistant", "content": text, "to": to, "ts": time.time(), "learned": False}
+        msg = {"role": "assistant", "content": text, "to": to, "ts": time.time(), "learned": False,
+               "consolidated": False}
         index = next((i for i, m in enumerate(self.messages) if m is after), None) if after is not None else None
         if index is None:
             self.messages.append(msg)
@@ -207,13 +212,49 @@ class Conversation:
             m["learned"] = True
         return batch if any(m["role"] == "user" for m in batch) else []
 
+    @property
+    def session(self) -> str:
+        """Which conversation an episode came from: the channel and when it began."""
+        return f"{self.key}@{datetime.fromtimestamp(self.started).strftime('%Y-%m-%d %H:%M')}"
+
+    def take_unconsolidated(self) -> List[Dict[str, Any]]:
+        """The whole conversation so far that hasn't been turned into episodes yet; marks it."""
+        batch = [dict(m) for m in self.messages if not m.get("consolidated")]
+        for m in self.messages:
+            m["consolidated"] = True
+        return batch
+
+    def end_episode(self) -> None:
+        """
+        The conversation is over (call ended, >reset, shutdown, or the channel went quiet): learn the facts not
+        learned yet, then consolidate the conversation into episodes. Queued after the facts, on the same worker.
+        """
+        from backend.memory_manager import consolidate_from, learn_from
+
+        pending = self.take_unlearned()
+        if pending:
+            learn_from(pending, self.session)
+        episode = self.take_unconsolidated()
+        if episode:
+            consolidate_from(episode, self.session)
+
+    def end_episode_if_idle(self) -> None:
+        """
+        A text channel that was quiet for `memory.episode_idle_minutes` (10) ended its conversation: what came
+        before is an episode of its own, whatever is said next. (A voice call ends when it ends.)
+        """
+        gap = float(config.get("memory", {}).get("episode_idle_minutes", 10)) * 60
+        last = self.messages[-1].get("ts", time.time()) if self.messages else time.time()
+        if self.mode == "text" and 0 < gap <= time.time() - last:
+            self.end_episode()
+
     def maybe_learn(self) -> None:
         """Learn every `memory.learn_every_messages` user messages."""
         every = int(config.get("memory", {}).get("learn_every_messages", 6))
         unlearned = sum(1 for m in self.messages if m["role"] == "user" and not m.get("learned"))
         if every > 0 and unlearned >= every:
             from backend.memory_manager import learn_from
-            learn_from(self.take_unlearned())
+            learn_from(self.take_unlearned(), self.session)
 
     async def compact(self) -> None:
         """
@@ -223,7 +264,7 @@ class Conversation:
         the LLM service reuse its KV cache.
         """
         from backend.context_manager import context_budget, split_to_fit
-        from backend.memory_manager import learn_from
+        from backend.memory_manager import consolidate_from, learn_from
         from backend.token_utils import count_message_tokens
 
         async with self.lock:
@@ -239,33 +280,40 @@ class Conversation:
             if removed:
                 pending = self.take_unlearned()
                 if pending:
-                    learn_from(pending)
+                    learn_from(pending, self.session)
+                # What is dropped is gone for good: it becomes an episode now.
+                dropped = [dict(m) for m in self.messages[: len(removed)] if not m.get("consolidated")]
+                if dropped:
+                    consolidate_from(dropped, self.session)
                 del self.messages[: len(removed)]
                 print(f"🗜️  Compacted {self.mode} conversation: dropped {len(removed)} old message(s)")
 
     def reset(self) -> int:
-        from backend.memory_manager import learn_from
-
         count = len(self.messages)
-        pending = self.take_unlearned()
-        if pending:
-            learn_from(pending)
+        self.end_episode()
         self.messages = []
+        self.started = time.time()
         return count
 
 
 conversations: Dict[Tuple[str, int], Conversation] = {}
 
 
-def flush_learning() -> List[Any]:
-    """Queue learning for everything not learned yet in all conversations (callable from any thread)."""
+def flush_learning(end_episodes: bool = False) -> List[Any]:
+    """
+    Queue learning for everything not learned yet in all conversations (callable from any thread).
+    `end_episodes` (shutdown): the conversations are over, so they are consolidated into episodes too.
+    """
     async def collect() -> List[Any]:
-        from backend.memory_manager import learn_from
+        from backend.memory_manager import consolidate_from, learn_from
         futures = []
         for conversation in list(conversations.values()):
             pending = conversation.take_unlearned()
             if pending:
-                futures.append(learn_from(pending))
+                futures.append(learn_from(pending, conversation.session))
+            episode = conversation.take_unconsolidated() if end_episodes else []
+            if episode:
+                futures.append(consolidate_from(episode, conversation.session))
         return futures
 
     if _loop and _loop.is_running():
@@ -482,6 +530,7 @@ def chat_payload(conversation: Conversation, voice_mode: bool, present: Optional
         "voice_mode": voice_mode,
         "chiming_in": conversation.chiming_in,
         "conversation_id": conversation.key,
+        "started_at": conversation.started,
     }
     if voice_mode:
         payload["max_tools"] = 1
@@ -742,7 +791,10 @@ class VoiceReceiver:
         self._talk_over: Dict[str, List[float]] = {}
         self._active = True
         self._monitor: Optional[asyncio.Task] = None
+        # Every join is a new call: what was said in an earlier one (learned from first) isn't carried over.
+        # Kept, she answered "Hello, Metis" as if the call from the day before had never ended.
         self.conversation = get_conversation(self.channel_id, "voice")
+        self.conversation.reset()
 
     # -- capture (runs on the voice-recv thread) --------------------------
     def buffer_audio(self, user, pcm: bytes) -> None:
@@ -824,6 +876,7 @@ class VoiceReceiver:
 
     def stop(self) -> None:
         self._active = False
+        self.conversation.end_episode()  # the call is over
         if self._monitor:
             self._monitor.cancel()
         if self.voice_client.is_listening():
@@ -1001,8 +1054,9 @@ class VoiceReceiver:
         sentences: asyncio.Queue[Optional[Tuple[str, Optional[str]]]] = asyncio.Queue()
         audio: asyncio.Queue[Optional[Tuple[str, SpeechStream]]] = asyncio.Queue()
         stats: Dict[str, Any] = {}
-        state = {"outcome": "done", "spoken": []}
+        state = {"outcome": "done", "spoken": [], "queued": False, "hesitated": False}
         fillers: set = set()  # filler lines said while tools run ("one sec, I'll check")
+        filler_audio: set = set()  # ids of pre-made sounds ("hmm...") played before the reply
         to_user = self._said.get(seq, (None, ""))[0]  # who she's answering
         filler_times: List[float] = []
 
@@ -1045,10 +1099,11 @@ class VoiceReceiver:
                         continue
                     timings["first_audio"] = time.perf_counter() - t0
                     first = False
-                if not await self._play(speech, can_interrupt=sentence not in fillers, to_user=to_user):
+                filler = sentence in fillers or id(speech) in filler_audio
+                if not await self._play(speech, can_interrupt=not filler, to_user=to_user):
                     state["outcome"] = "interrupted"
                     continue
-                if sentence not in fillers:
+                if not filler:
                     # Fillers stay out of the history: with "One sec, I'll check. Okay, reading this." in her
                     # past replies, the model started saying "I'll check" without anything being looked up.
                     state["spoken"].append(sentence)
@@ -1068,7 +1123,27 @@ class VoiceReceiver:
             if len(spoken) > 1:
                 if filler:
                     fillers.add(spoken)
+                state["queued"] = True
                 await sentences.put((spoken, emotion))
+
+        async def hesitate() -> None:
+            # Nothing to say yet a second or so after they stopped: a "hmm..." (made when she joined) instead
+            # of dead air. Only when the reply really is late, and not every time (voice.hesitations).
+            await asyncio.sleep(max(0.1, t0 + hesitations.delay() - time.perf_counter()))
+            if stopped() or state["queued"] or self._speaking or self.someone_speaking():
+                return  # the reply (or a "let me look that up") is already coming, or someone's talking
+            picked = hesitations.pick()
+            if not picked:
+                print(f"🤫 no hesitation: {hesitations.why_not}")
+                return
+            line, pcm = picked
+            speech = SpeechStream()
+            speech.feed(pcm)
+            speech.finish()
+            filler_audio.add(id(speech))
+            state["hesitated"] = True
+            print(f"🤔 nothing to say yet; {line!r}")
+            await audio.put((line, speech))
 
         async def think_aloud(tool: str) -> None:
             # Remembering or searching takes a second or two: say so instead of going quiet, like a person would.
@@ -1081,6 +1156,8 @@ class VoiceReceiver:
             if len(filler_times) >= int(self.cfg.get("thinking_max", 3)) or (filler_times and now - filler_times[-1] < gap):
                 return
             line = self._thinking_line(tool)
+            if line and state["hesitated"]:
+                line = drop_interjection(line)  # not "Hmm... Hmm, let me look that up."
             if line:
                 filler_times.append(now)
                 print(f"🤔 {tool}: saying {line!r} while it runs")
@@ -1101,6 +1178,7 @@ class VoiceReceiver:
             if pending.strip():
                 await say(pending)
 
+        hesitation = asyncio.create_task(hesitate())
         try:
             consumer = asyncio.create_task(consume())
             while not consumer.done():
@@ -1117,6 +1195,8 @@ class VoiceReceiver:
         except Exception as e:
             print(f"Voice reply error: {e}")
         finally:
+            hesitation.cancel()
+            await asyncio.gather(hesitation, return_exceptions=True)
             await sentences.put(None)
             await asyncio.gather(synth_task, play_task, return_exceptions=True)
         # What people actually heard (no *actions*, cut short if interrupted). It's also what goes into the
@@ -1327,6 +1407,7 @@ async def join_voice(ctx: commands.Context):
         receiver = VoiceReceiver(voice_client, ctx.channel)
         receiver.start()
         (await get_voice_service()).add_names(receiver.present_members())
+        hesitations.prepare(await get_voice_service())
         voice_receivers[ctx.guild.id] = receiver
         await notice.edit(content=(
             f"🔊 Joined **{target.name}** — just talk, I'm listening.\n"

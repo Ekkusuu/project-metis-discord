@@ -262,6 +262,41 @@ class PhoneticCorrector:
                 self._last_on_topic[vocab.topic] = now
         return text
 
+    def correct_own_name(self, text: str, names: Sequence[str], threshold: float = 0.82,
+                         addressed_threshold: float = 0.7) -> str:
+        """
+        Her own name, by sound: "Matisse, what do you think?" is someone talking to Metis. A fixed list of
+        mishearings kept missing new ones. A made-up word that sounds like it is corrected anywhere; one only
+        roughly like it, or a real word ("Matisse"), only where someone is addressed: after a greeting, opening
+        the sentence before a comma, or closing it after one ("what do you think, Matisse?").
+        """
+        targets = [(n, self.phonemes(n)) for n in names if n]
+        own = {n.lower() for n in names}
+
+        def fix(match: re.Match) -> str:
+            word = match.group(0)
+            if not word[0].isupper() or word.lower() in own or word.lower() in self._protected:
+                return word
+            sounds = self.phonemes(word)
+            if len(sounds) < 4:
+                return word
+            score, name = max((phonetic_similarity(sounds, p), n) for n, p in targets)
+            before, after = text[:match.start()], text[match.end():]
+            greeted = re.search(r"\b(hey|hi|hello|yo|okay|ok|oh|so|well|thanks|thank you|sorry|please)[,!.]?\s+$",
+                                before, re.IGNORECASE)
+            opens = re.search(r"(^|[.!?]\s+)$", before) and re.match(r"\s*,", after)
+            closes = re.search(r",\s+$", before) and re.match(r"\s*([.!?]|$)", after)
+            addressed = bool(greeted or opens or closes)
+            # Talking to someone in her call, a word like her name is her name, even a surname in the dictionary
+            # ("Madis", "Matthis"); elsewhere only a made-up word is.
+            needed = addressed_threshold if addressed else (2.0 if self._english(word) else threshold)
+            if score < needed:
+                return word
+            print(f"🔧 Own name ({score:.0%}): '{word}' → '{name}'")
+            return name
+
+        return re.sub(r"[A-Za-z][A-Za-z']*", fix, text) if targets else text
+
 
 def boost_phrases(vocabularies: Sequence[Vocabulary], extra: Sequence[str] = ()) -> List[str]:
     """Phrases for decoder boosting, written the way the recogniser writes them (capitalised, no '&')."""

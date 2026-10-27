@@ -223,6 +223,9 @@ _PLAN_EXAMPLES = [
               "What superpower would Metis want?", "none"),
     *_example("[Max]: I told you about my exam last week", "[Max]: do you remember what subject it was?",
               "What subject was Max's exam last week?", "remember"),
+    # Her own line is the topic: nothing to look up (see asks_about_her_last_line).
+    *_example("[Kim]: hey\nMetis: Did you see that horror movie about the haunted lighthouse?",
+              "[Kim]: what are you talking about?", "What is Metis talking about?", "none"),
 ]
 
 
@@ -245,6 +248,38 @@ def grounded_query(query: str, said_by_people: str, said_by_metis: str, fallback
         return fallback
     borrowed = (_words(query) & _words(said_by_metis)) - _words(said_by_people)
     return fallback if borrowed else query
+
+
+def invented_by_metis(text: str, said_by_people: str, said_by_metis: str) -> bool:
+    """
+    True if `text` is built on words only Metis used. Her replies can be made up, and a search for what she
+    invented finds nothing: "What are you talking about?" became a web search for a horror movie she had
+    described. More of its distinctive words from her than from people, not none from people: filler like
+    "talking" is in the question as well.
+    """
+    words = _words(text)
+    only_metis = (words & _words(said_by_metis)) - _words(said_by_people)
+    return len(only_metis) > len(words & _words(said_by_people))
+
+
+def without_metis_words(text: str, said_by_people: str, said_by_metis: str) -> str:
+    """`text` without the distinctive words only Metis used (the planner's rewrite of a message may carry hers)."""
+    only_metis = _words(said_by_metis) - _words(said_by_people)
+    kept = re.sub(r"[A-Za-z0-9]{5,}", lambda m: "" if m.group(0).lower()[:5] in only_metis else m.group(0), text)
+    return re.sub(r"\s+", " ", kept).strip()
+
+
+# Questions about what she just said ("what are you talking about?", "why did you say that?") are answered from
+# the conversation: a search for her words looks up what she may have made up.
+_ABOUT_HER_LINE = re.compile(
+    r"\bwhat\b[^?.!]*\b(are|were) you (even |actually |really )?(talking|going on|on) about\b|\bwhat (do|did) you (just )?(mean|say)\b|"
+    r"\bwhat are you (saying|on about)\b|\bwhat (was|is) that (about|supposed to)\b|"
+    r"\bwhy (did|would|do) you (just )?(say|bring up|mention)\b|\bwhere did you (get|hear|read|see) (that|this)\b|"
+    r"\byou (just )?made (that|it) up\b", re.IGNORECASE)
+
+
+def asks_about_her_last_line(text: str) -> bool:
+    return bool(_ABOUT_HER_LINE.search(text))
 
 
 def keep_said_names(query: str, said: str) -> str:
@@ -394,8 +429,11 @@ async def decide_tools(
     previous = _last_search.get(conversation_id) or {"time": 0.0, "query": ""}
     last_query = previous["query"] if time.time() - previous["time"] < _SEARCH_MEMORY_SECONDS else ""
     context_count = int(tools_cfg.get("context_messages", 6))
-    plan_messages = planner_messages(messages, last_user_message, decidable, last_query, context_count)
     recent = [m for m in messages[:-1] if m.get("role") in ("user", "assistant")][-context_count:]
+    if asks_about_her_last_line(text) and any(m["role"] == "assistant" for m in recent):
+        print(f"🧭 plan: none | {text!r} is about her own last line")
+        return calls
+    plan_messages = planner_messages(messages, last_user_message, decidable, last_query, context_count)
 
     try:
         plan = await asyncio.to_thread(
@@ -415,7 +453,17 @@ async def decide_tools(
         # can be made up), and a site stays only if this message or the follow-up names it.
         said = " ".join(m["content"][:240] for m in recent if m["role"] == "user")
         metis_said = " ".join(m["content"][:240] for m in recent if m["role"] == "assistant")
-        grounded = grounded_query(written, f"{said} {text} {standalone} {last_query}", metis_said, standalone)
+        # The planner's rewrite counts as something people said only without the words that are hers alone;
+        # counted whole, a topic she invented was "said" by the rewrite and then searched.
+        # What her lookups found counts as evidence too: "tell me more about Obsession" after she read out a search
+        # result is a real follow-up, not a topic she invented.
+        from backend.routers.chat import recent_findings
+        said_by_people = f"{said} {text} {last_query} {recent_findings(conversation_id)}"
+        rewrite = without_metis_words(standalone, said_by_people, metis_said)
+        grounded = grounded_query(written, f"{said_by_people} {rewrite}", metis_said, standalone)
+        if invented_by_metis(grounded, said_by_people, metis_said):
+            print(f"🔎 no {action}: {grounded!r} is made of words only Metis used\n   made from: {last_user_message!r}")
+            return calls
         named = keep_said_names(grounded, f"{said} {text}")
         query = keep_named_site(named, f"{text} {standalone}")
         arguments: Dict[str, Any] = {_first_string_param(decidable[action]): query}

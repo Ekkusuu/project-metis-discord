@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AI_MESSAGE_EVENT,
   deleteNote,
+  deletePersonEpisode,
   deletePersonFact,
   forgetPerson,
   getNotes,
@@ -40,14 +41,20 @@ function relativeTime(iso: string): string {
 }
 
 function FactRow({ fact, onDelete }: { fact: Fact; onDelete: () => void }) {
+  // Faded memories are dimmed: she no longer brings them up unless something reminds her.
+  const faded = fact.retention !== undefined && fact.retention < 0.25;
   return (
-    <li className="people-fact">
+    <li
+      className="people-fact"
+      style={faded ? { opacity: 0.55 } : undefined}
+      title={fact.retention !== undefined ? `remembered ${Math.round(fact.retention * 100)}%` : undefined}
+    >
       <span className="people-fact-text">{fact.text}</span>
       <button
         type="button"
         className="people-icon-button"
-        title="Forget this fact"
-        aria-label="Forget this fact"
+        title="Forget this"
+        aria-label="Forget this"
         onClick={onDelete}
       >
         <Icon name="x" size={13} />
@@ -60,13 +67,14 @@ interface PersonCardProps {
   person: Person;
   forceExpand: boolean;
   onDeleteFact: (person: Person, fact: Fact) => void;
+  onDeleteEpisode: (person: Person, episode: Fact) => void;
   onForget: (person: Person) => void;
 }
 
-function PersonCard({ person, forceExpand, onDeleteFact, onForget }: PersonCardProps) {
+function PersonCard({ person, forceExpand, onDeleteFact, onDeleteEpisode, onForget }: PersonCardProps) {
   const [showAll, setShowAll] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
-  const total = person.facts.length;
+  const total = person.facts.length + person.episodes.length;
   const open = forceExpand || !collapsed;
   const visible =
     showAll || forceExpand ? person.facts : person.facts.slice(0, FACTS_COLLAPSED_LIMIT);
@@ -129,6 +137,20 @@ function PersonCard({ person, forceExpand, onDeleteFact, onForget }: PersonCardP
                 <FactRow key={fact.id} fact={fact} onDelete={() => onDeleteFact(person, fact)} />
               ))}
             </ul>
+            {person.episodes.length > 0 && (
+              <>
+                <div className="people-subtitle">Remembered together</div>
+                <ul className="people-facts">
+                  {person.episodes.map((episode) => (
+                    <FactRow
+                      key={episode.id}
+                      fact={episode}
+                      onDelete={() => onDeleteEpisode(person, episode)}
+                    />
+                  ))}
+                </ul>
+              </>
+            )}
             {hasMore && !forceExpand && (
               <button
                 type="button"
@@ -232,6 +254,23 @@ function PeoplePanel() {
     }
   };
 
+  const handleDeleteEpisode = async (person: Person, episode: Fact) => {
+    const previous = people;
+    setPeople((list) =>
+      list
+        ? list.map((p) =>
+            p.id === person.id ? { ...p, episodes: p.episodes.filter((e) => e.id !== episode.id) } : p,
+          )
+        : list,
+    );
+    try {
+      await deletePersonEpisode(person.id, episode.id);
+    } catch (err) {
+      setPeople(previous);
+      fail('Could not forget memory', err);
+    }
+  };
+
   const handleForget = async (person: Person) => {
     if (!confirm(`Forget ${person.name} and everything learned about them?`)) return;
     const previous = people;
@@ -263,7 +302,8 @@ function PeoplePanel() {
       (p) =>
         p.name.toLowerCase().includes(needle) ||
         p.aliases.some((a) => a.toLowerCase().includes(needle)) ||
-        p.facts.some((f) => f.text.toLowerCase().includes(needle)),
+        p.facts.some((f) => f.text.toLowerCase().includes(needle)) ||
+        p.episodes.some((e) => e.text.toLowerCase().includes(needle)),
     );
   }, [people, needle]);
   const filteredNotes = useMemo(
@@ -317,6 +357,7 @@ function PeoplePanel() {
               person={person}
               forceExpand={needle.length > 0}
               onDeleteFact={handleDeleteFact}
+              onDeleteEpisode={handleDeleteEpisode}
               onForget={handleForget}
             />
           ))}

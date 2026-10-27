@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import threading
+import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -176,6 +177,27 @@ def get_collection() -> chromadb.Collection:
 def get_embedder() -> LocalEmbeddingFunction:
     """The knowledge base's embedding model (also used to pick the relevant parts of web pages)."""
     return get_collection()._embedding_function
+
+
+_embedder_failed_at = 0.0
+
+
+def embed_texts(texts: List[str], query: bool = False) -> Optional[List[List[float]]]:
+    """
+    Vectors for `texts` (as search queries, or as documents) from the knowledge base's model, or None when it
+    isn't available (knowledge base off, model missing): the memory system then matches by words. After a
+    failure it doesn't retry for a minute, so every reply doesn't wait on a model that isn't there.
+    """
+    global _embedder_failed_at
+    if not _rag_cfg().get("enabled", False) or not texts or time.time() - _embedder_failed_at < 60:
+        return None
+    try:
+        embedder = get_embedder()
+        return embedder.embed_query(list(texts)) if query else embedder.embed_documents(list(texts))
+    except Exception as e:
+        _embedder_failed_at = time.time()
+        print(f"Warning: embedding model unavailable ({e}); memories are matched by words")
+        return None
 
 
 def clear_collection() -> int:

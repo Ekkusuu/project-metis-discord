@@ -25,10 +25,15 @@ async def get_person(person_id: str):
 
 @router.delete("/people/{person_id}/facts/{fact_id}")
 async def delete_fact(person_id: str, fact_id: str):
-    people = get_people()
-    if not people.remove_fact(person_id, fact_id):
+    if not get_people().remove_fact(person_id, fact_id):
         raise HTTPException(status_code=404, detail="Fact not found")
-    await asyncio.to_thread(people.export_markdown, [person_id])
+    return {"status": "ok"}
+
+
+@router.delete("/people/{person_id}/episodes/{episode_id}")
+async def delete_episode(person_id: str, episode_id: str):
+    if not get_people().remove_episode(person_id, episode_id):
+        raise HTTPException(status_code=404, detail="Episode not found")
     return {"status": "ok"}
 
 
@@ -49,7 +54,7 @@ async def delete_note(note_id: str):
     people = get_people()
     if not people.remove_note(note_id):
         raise HTTPException(status_code=404, detail="Note not found")
-    await asyncio.to_thread(people.export_markdown, [])
+    await asyncio.to_thread(people.export_notes)
     return {"status": "ok"}
 
 
@@ -75,6 +80,7 @@ async def memory_stats():
     return {
         **stats,
         "people_known": len(people.people),
-        "facts_total": sum(len(p["facts"]) for p in people.people.values()),
+        "facts_total": people.memories.count("fact"),
+        "episodes_total": people.memories.count("episode"),
         "notes_total": len(people.notes),
     }

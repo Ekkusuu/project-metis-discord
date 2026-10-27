@@ -17,6 +17,29 @@ def test_text_guidance_has_no_voice_rule():
     assert "spoken aloud" not in reply_guidance([{"role": "user", "content": "[a]: hi"}], voice=False, has_context=False)
 
 
+def test_guidance_does_not_invent_a_conversation_that_never_happened():
+    """With only persona and memory above it, "Hello, Metis" got "I told you the cat will steal your snacks"."""
+    messages = [{"role": "system", "content": "persona"}, {"role": "user", "content": "[a]: hello Metis"}]
+    guidance = reply_guidance(messages, voice=True, has_context=False)
+    assert "This conversation just started" in guidance
+    assert "Only refer to things actually said" not in guidance
+
+    messages = [*messages, {"role": "assistant", "content": "hey"}, {"role": "user", "content": "[a]: what's up?"}]
+    guidance = reply_guidance(messages, voice=True, has_context=False)
+    assert "Only refer to things actually said in this conversation" in guidance
+    assert "This conversation just started" not in guidance
+
+
+def test_voice_guidance_stays_on_topic_and_flags_misheard_speech():
+    """"Say something new" sent her on random remarks; a misheard line was answered as if it made sense."""
+    messages = [{"role": "user", "content": "[a]: no matter doing"}]
+    guidance = reply_guidance(messages, voice=True, has_context=False)
+    assert "Stay on what they're talking about" in guidance
+    assert "Say something new" not in guidance
+    assert "probably misheard" in guidance
+    assert "Stay on what they're talking about" not in reply_guidance(messages, voice=False, has_context=False)
+
+
 def test_voice_name_aliases():
     import backend.voice_service as vs
 

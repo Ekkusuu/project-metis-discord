@@ -71,6 +71,8 @@ class ChatRequest(BaseModel):
     voice_mode: bool = Field(default=False, description="Favour latency over recall (voice chat)")
     chiming_in: bool = Field(default=False, description="Metis joins a conversation between other people")
     conversation_id: str = Field(default="", description="Which conversation (channel) this is, for per-channel state")
+    started_at: Optional[float] = Field(default=None, description="When this conversation began (unix time); "
+                                                                 "a voice call starts when Metis joins")
     participants: List[Participant] = Field(
         default_factory=list, description="Recent speakers; what Metis knows about them is added to the prompt"
     )
@@ -123,15 +125,22 @@ def remember_lookup(question: str, answer: str, conversation: str = "") -> None:
     del lookups[:-3]
 
 
-def recent_lookups_text(conversation: str = "") -> str:
+def recent_lookups_text(conversation: str = "", since: float = 0.0) -> str:
+    """Lookups of the last few minutes, and only from this conversation (`since` it began: not the last call)."""
     fresh = [(q, a) for t, q, a in _recent_lookups.get(conversation, [])
-             if time.time() - t < _LOOKUP_MEMORY_SECONDS]
+             if time.time() - t < _LOOKUP_MEMORY_SECONDS and t >= since]
     if not fresh:
         return ""
     # "Only if asked": with the Shaco counters here she steered every reply back to them for ten minutes.
     return ("What you looked up on the web in the last few minutes (only bring it up if they ask about it "
             "again):\n") + "\n".join(
         f"- {q[:150]} -> {a}" for q, a in fresh)
+
+
+def recent_findings(conversation: str = "") -> str:
+    """What this conversation's lookups of the last few minutes found: facts from the web, not things she made up."""
+    return " ".join(a for t, _, a in _recent_lookups.get(conversation, [])
+                    if time.time() - t < _LOOKUP_MEMORY_SECONDS)
 
 
 async def _run_tools(messages: List[Dict[str, str]], req: ChatRequest, timings: Dict[str, float],
@@ -210,9 +219,14 @@ async def gather_context(messages: List[Dict[str, str]], req: ChatRequest,
     return "", tool_timings
 
 
-def people_context(req: ChatRequest) -> str:
-    """What Metis knows about the people in this conversation, plus who is in the voice channel."""
+def people_context(req: ChatRequest, messages: Optional[List[Dict[str, str]]] = None) -> str:
+    """
+    Who is in this conversation and who is in the voice channel, always; and the memories the latest message
+    brings to mind (backend/recall.py), only those. Pasting every known fact into every prompt had her bring up
+    a cat and a game to a plain "how are you?".
+    """
     from backend.people import get_people
+    from backend.recall import bot_names, recall_block
 
     parts = []
     if req.participants:
@@ -232,13 +246,16 @@ def people_context(req: ChatRequest) -> str:
         )
     if req.present:
         parts.append("In the voice channel right now: " + ", ".join(req.present))
-    profiles = get_people().profile_block([p.id for p in req.participants])
-    if profiles:
-        parts.append(
-            "What you remember about the people in this conversation (use it naturally, like a friend would; "
-            "don't recite it). These are your friends on Discord, not celebrities or historical figures with the "
-            "same name: when asked about them, use only this, and say so if you don't know something:\n" + profiles
-        )
+    people = get_people()
+    known = people.who_is_who([p.id for p in req.participants])
+    if known:
+        parts.append("The people in this conversation are your friends on Discord, not celebrities or historical "
+                     "figures with the same name: " + known)
+    said = messages or [{"role": m.role, "content": m.content} for m in req.messages or []] \
+        or [{"role": "user", "content": req.prompt or ""}]
+    memories = recall_block(people.memories, people, said, [p.id for p in req.participants], req.present, bot_names())
+    if memories:
+        parts.append(memories)
     return "\n\n".join(parts)
 
 
@@ -266,6 +283,14 @@ def reply_guidance(messages: List[Dict[str, str]], voice: bool, has_context: boo
          f"Reply to {who}'s last message. If they asked a question or asked you to do something, "
          "answer or do exactly that in your first sentence."),
         "Your personality is flavour, never a replacement for answering.",
+        # With nothing above but persona and memory, the 4B model made up a shared past: "Hello, Metis" got
+        # "You finally admit it? I told you the cat will steal your snacks", and "you're actually awake at this
+        # hour?" at 9 in the morning.
+        ("This conversation just started: nothing was said before this message. Greet them or answer them, "
+         "and don't act like you're continuing an earlier talk." if not any(m["role"] == "assistant"
+                                                                            for m in messages[:-1]) else
+         "Only refer to things actually said in this conversation; don't claim you said or told them "
+         "something that isn't above."),
         ("Facts, dates and numbers must come from the information above; if it isn't there, say you don't know "
          "instead of guessing." if has_context else
          "Never invent facts, dates or numbers; if you don't know, say so."),
@@ -295,12 +320,16 @@ def reply_guidance(messages: List[Dict[str, str]], voice: bool, has_context: boo
                          + " (only these words in brackets). Pick what fits what you're saying and the mood.")
         # Quoting her last reply here ("don't reuse its words") stopped word-for-word copies, but also brought the
         # old topic back every turn; the presence penalty in the sampler now keeps her from repeating herself.
-        rules.append("Say something new; don't repeat what you said before.")
+        # "Say something new" alone pushed her off topic: random remarks about her cat and horror movies.
+        rules.append("Stay on what they're talking about, and don't repeat what you said before.")
+        # Speech-to-text mishears ("No matter doing."): she made up a meaning and ran with it.
+        rules.append("If their message makes no sense, it was probably misheard: say you didn't catch that "
+                     "instead of guessing what they meant.")
     # Said positively: listing "never say you're an AI, a bot, a model" put exactly those words in the small
     # model's mouth ("weird question for an AI bot").
     # Not "you're real, answer as yourself": she then answered "am I real?" to every question about herself
     # ("Who is Metis?" "It's just me, I'm real"; "Are you a girl?" "I'm the real deal").
-    rules.append("Talk as Metis, the person described at the top, with her own life, tastes and opinions. "
+    rules.append("Talk as Metis, the person described at the top, with her own tastes and opinions. "
                  "Speak about yourself as \"I\".")
     if found_answer:
         # The 4B model with the mean persona answered a successful lookup with "look it up yourself!" and a turn
@@ -313,7 +342,7 @@ def reply_guidance(messages: List[Dict[str, str]], voice: bool, has_context: boo
 
 
 def build_prompt(messages: List[Dict[str, str]], context_text: str, people_text: str = "",
-                 guidance: str = "", conversation: str = "") -> List[Dict[str, str]]:
+                 guidance: str = "", conversation: str = "", since: float = 0.0) -> List[Dict[str, str]]:
     """
     Insert people memory, gathered information and reply guidance as a system message right
     before the latest user message. Keeping the system prompt and earlier history
@@ -325,7 +354,7 @@ def build_prompt(messages: List[Dict[str, str]], context_text: str, people_text:
     sections = [f"Current date and time: {now}"]
     if people_text:
         sections.append(people_text)
-    lookups = recent_lookups_text(conversation)
+    lookups = recent_lookups_text(conversation, since)
     if lookups:
         sections.append(lookups)
     if context_text:
@@ -354,8 +383,10 @@ async def _prepare(req: ChatRequest, notify: Optional[Callable[[str], None]] = N
     found = re.search(r"What you found: (.+)", context_text)
     guidance = reply_guidance(messages, req.voice_mode, bool(context_text), "[web_search]" in context_text,
                               found.group(1).strip() if found else "", chiming_in=req.chiming_in)
-    final = trim_messages_to_context(build_prompt(messages, context_text, people_context(req), guidance,
-                                                  req.conversation_id))
+    # Recalling embeds the cue and records what was recalled: off the event loop.
+    people_text = await asyncio.to_thread(people_context, req, messages)
+    final = trim_messages_to_context(build_prompt(messages, context_text, people_text, guidance,
+                                                  req.conversation_id, req.started_at or 0.0))
     if found:  # for the next few turns (it's in this prompt already)
         remember_lookup(re.sub(r"^\[[^\]]+\]:?\s*", "", messages[-1]["content"]), found.group(1).strip(),
                         req.conversation_id)

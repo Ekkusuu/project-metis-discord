@@ -18,6 +18,12 @@ import yaml
 
 from backend.config import PROJECT_ROOT, get_config, resolve_path
 
+
+def own_names() -> List[str]:
+    """What people call her: Metis and any chat.bot_names."""
+    return list(dict.fromkeys(["Metis", *(get_config().get("chat", {}).get("bot_names") or [])]))
+
+
 # NeMo and Kokoro are imported when voice is first used (>join), not at startup: importing them
 # costs ~5.6 s and ~270 MB of RAM, which is wasted whenever nobody uses voice chat.
 
@@ -113,21 +119,20 @@ class VoiceService:
             self.stt_model = None
 
     def _init_vocabulary(self) -> None:
-        """voice.stt_vocabulary: names to boost while decoding and to correct afterwards (backend/stt_vocabulary.py)."""
-        entries = self.config.get("stt_vocabulary") or []
-        if not entries:
-            return
+        """
+        voice.stt_vocabulary: names to boost while decoding and to correct afterwards (backend/stt_vocabulary.py).
+        The corrector is made without vocabularies too: it also fixes her own name.
+        """
         try:
             from backend.stt_vocabulary import PhoneticCorrector, boost_phrases, enable_boosting, load_vocabularies
 
-            vocabularies = load_vocabularies(entries)
-            if not vocabularies:
-                return
-            boosted = enable_boosting(self.stt_model, boost_phrases(vocabularies, self._names),
-                                      float(self.config.get("stt_boost_alpha", 1.0)))
+            vocabularies = load_vocabularies(self.config.get("stt_vocabulary") or [])
             self._vocabulary = PhoneticCorrector(vocabularies, protected=self._names)
-            print("✓ STT vocabulary: " + ", ".join(f"{v.topic} ({len(v.terms)} names)" for v in vocabularies)
-                  + (", boosted while decoding" if boosted else ""))
+            if vocabularies:
+                boosted = enable_boosting(self.stt_model, boost_phrases(vocabularies, self._names),
+                                          float(self.config.get("stt_boost_alpha", 1.0)))
+                print("✓ STT vocabulary: " + ", ".join(f"{v.topic} ({len(v.terms)} names)" for v in vocabularies)
+                      + (", boosted while decoding" if boosted else ""))
         except Exception as e:
             print(f"⚠️ STT vocabulary unavailable: {e}")
             self._vocabulary = None
@@ -228,6 +233,7 @@ class VoiceService:
             return None
         text = self._correct_names(text.strip()) if text else ""
         if text and self._vocabulary:
+            text = self._vocabulary.correct_own_name(text, own_names())
             text = self._vocabulary.correct(text)
         return text or None
 

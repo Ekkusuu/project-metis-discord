@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import pytest
 
-from backend.learning import _clean_fact, _speakers, extract_facts, is_grounded, parse_legacy_transcript, person_view
+from backend.learning import (
+    _clean_fact, _speakers, extract_facts, is_grounded, parse_legacy_transcript, person_view, statements,
+)
 from backend.people import PeopleStore, is_duplicate
 from backend.tools.web_page_tool import UnsafeURLError, _check_public, find_urls
 
@@ -68,13 +70,20 @@ def test_persistence_roundtrip(store, tmp_path):
     assert again.notes[0]["text"] == "movie night is on Fridays"
 
 
-def test_profile_block_and_export(store, tmp_path):
+def test_who_is_who_names_people_without_their_facts(store):
     store.seen(1, "Sava", ["sava_x"])
     store.add_facts("1", ["works as a nurse"])
-    block = store.profile_block(["1", "unknown"])
-    assert block == "- Sava (also known as sava_x): works as a nurse"
-    written = store.export_markdown(["1"])
-    assert "Sava works as a nurse" in written[0].read_text(encoding="utf-8")
+    assert store.who_is_who(["1", "unknown"]) == "Sava (also known as sava_x)"
+
+
+def test_notes_are_exported_for_the_knowledge_base_but_facts_are_not(store, tmp_path):
+    store.seen(1, "Sava")
+    store.add_facts("1", ["works as a nurse"])
+    assert store.export_notes() == []
+    store.add_notes(["movie night is on Fridays"])
+    written = store.export_notes()
+    assert "movie night is on Fridays" in written[0].read_text(encoding="utf-8")
+    assert not (tmp_path / "people").exists()  # no per-person Markdown profile: facts live in the store only
 
 
 def test_is_duplicate():
@@ -98,6 +107,31 @@ def test_person_view_shows_only_their_messages_with_context():
         "Sava: also i'm moving to Berlin next month",
     ]
     assert "horror" not in own
+
+
+def test_statements_leave_out_the_questions():
+    """Only what someone states is evidence of a fact; asking about something isn't."""
+    assert statements("Who's Mochi?") == ""
+    assert statements("my cat is Pixel. who's Mochi? i'm moving to Berlin!") == \
+        "my cat is Pixel. i'm moving to Berlin!"
+
+
+def test_a_question_cannot_ground_a_fact_about_the_person_asking():
+    """Asked "Who's Mochi?" about Metis's cat, "has a cat named Mochi" was filed under the person asking."""
+    convo = [{"role": "user", "content": "[Sava]: who's Mochi? has she got a cat named Mochi?",
+              "user_id": 1, "name": "Sava"}]
+    view, own = person_view(convo, "Sava")
+    assert "who's Mochi?" in view  # still shown: it is what they said, for the extractor to read
+    assert "Mochi" not in own
+    assert not is_grounded("has a cat named Mochi", own)
+
+
+def test_statements_next_to_questions_still_ground_facts():
+    convo = [{"role": "user", "content": "[Sava]: who said I work nights? i'm a nurse on night shifts",
+              "user_id": 1, "name": "Sava"}]
+    _, own = person_view(convo, "Sava")
+    assert own == "i'm a nurse on night shifts"
+    assert is_grounded("works night shifts as a nurse", own)
 
 
 def test_is_grounded_rejects_invented_and_misattributed_facts():
@@ -234,25 +268,61 @@ def test_extraction_is_taught_by_examples_including_empty_ones():
     assert len(labels) >= 4  # kept and rejected kinds are both shown
 
 
-def test_reconcile_adds_updates_and_skips(store, monkeypatch):
+def fact(text, importance=7):
+    return {"fact": text, "quote": text, "importance": importance}
+
+
+def test_reconcile_adds_updates_and_confirms(store, monkeypatch):
+    """NONE now says which stored fact was repeated, so that fact is confirmed instead of the repeat being dropped."""
     import backend.learning as learning
 
     monkeypatch.setattr(learning, "get_people", lambda: store)
     store.add_facts("1", ["lives in Paris", "plays jungle"], name="Sava")
     monkeypatch.setattr(learning, "json_completion", lambda *a, **k: {"decisions": [
-        {"event": "UPDATE", "id": "1"}, {"event": "NONE", "id": ""}, {"event": "ADD", "id": ""},
+        {"event": "UPDATE", "id": "1"}, {"event": "NONE", "id": "2"}, {"event": "ADD", "id": ""},
         {"event": "UPDATE", "id": "9"}]})  # an id that doesn't exist is treated as new
-    to_add, updates = learning.reconcile("1", ["moved to Berlin", "mains jungle", "has a dog", "likes tea"])
-    paris = store.get("1")["facts"][0]["id"]
-    assert updates == {paris: "moved to Berlin"}
-    assert to_add == ["has a dog", "likes tea"]
+    new = [fact("moved to Berlin"), fact("mains jungle"), fact("has a dog"), fact("likes tea")]
+    to_add, updates, same = learning.reconcile("1", new)
+    paris, jungle = (f["id"] for f in store.get("1")["facts"])
+    assert updates == {paris: new[0]}
+    assert same == {jungle: new[1]}
+    assert to_add == new[2:]
 
 
-def test_learn_applies_updates(store, monkeypatch):
+def test_reconcile_compares_with_the_most_similar_facts_not_the_latest(store, monkeypatch):
+    """With only the last 15 facts shown, a paraphrase of an older one was added a second time."""
     import backend.learning as learning
 
     monkeypatch.setattr(learning, "get_people", lambda: store)
-    monkeypatch.setattr(learning, "_reindex", lambda paths: None)
+    store.add_facts("1", ["has a dog named Biscuit"] + [f"hobby number {i} is {w}" for i, w in enumerate(
+        "chess painting hiking baking singing sailing pottery skiing cycling surfing".split())], name="Sava")
+    shown = []
+
+    def fake(messages, *a, **k):
+        shown.append(messages[-1]["content"])
+        return {"decisions": [{"event": "NONE", "id": "1"}]}
+
+    monkeypatch.setattr(learning, "json_completion", fake)
+    to_add, updates, same = learning.reconcile("1", [fact("owns a dog called Biscuit")])
+    assert len(shown[0].split("New facts")[0].splitlines()) <= 10  # "Stored facts:", a blank line and at most 8 facts
+    assert "has a dog named Biscuit" in shown[0]  # the oldest fact, but the closest one
+    assert to_add == [] and list(same) == [store.get("1")["facts"][0]["id"]]
+
+
+def test_reconcile_skips_the_model_for_near_identical_wording(store, monkeypatch):
+    import backend.learning as learning
+
+    monkeypatch.setattr(learning, "get_people", lambda: store)
+    store.add_facts("1", ["works as a nurse"], name="Sava")
+    monkeypatch.setattr(learning, "json_completion", lambda *a, **k: pytest.fail("no model call needed"))
+    to_add, updates, same = learning.reconcile("1", [fact("Works as a nurse.")])
+    assert to_add == [] and updates == {} and len(same) == 1
+
+
+def test_learn_supersedes_a_changed_fact_and_keeps_the_old_one(store, monkeypatch):
+    import backend.learning as learning
+
+    monkeypatch.setattr(learning, "get_people", lambda: store)
     store.add_facts("1", ["lives in Paris"], name="Sava")
     moved = {"quote": "i finally moved to berlin", "about": "themselves", "kind": learning.WHO, "importance": 8,
              "fact": "moved to Berlin"}
@@ -262,4 +332,51 @@ def test_learn_applies_updates(store, monkeypatch):
               "name": "Sava"}]
     learning.learn(convo)
     assert [f["text"] for f in store.get("1")["facts"]] == ["moved to Berlin"]
+    paris = next(m for m in store.memories._inactive() if m["text"] == "lives in Paris")
+    berlin = store.get("1")["facts"][0]
+    assert paris["status"] == "superseded" and paris["superseded_by"] == berlin["id"]
+    assert berlin["importance"] == 8
+    assert store.memories.get(berlin["id"])["quote"] == "i finally moved to berlin"
+
+
+def test_grounding_compares_stems_and_allows_short_words():
+    """5-character prefixes and 4+ letter words dropped "has a dog" and let "plays" match "playground"."""
+    own = "my dog needs a walk. i've been playing a lot of guitar lately"
+    assert is_grounded("has a dog", own)
+    assert is_grounded("plays guitar", own)
+    assert not is_grounded("has a cat", own)
+    assert not is_grounded("works at a playground", own)  # "playg" is no longer a prefix of anything said
+    assert not is_grounded("has a dog", "my dogma professor is up")  # whole stems, not substrings
+
+
+def test_a_quote_must_be_one_of_the_speakers_own_sentences():
+    from backend.learning import own_sentences, quote_supported
+
+    convo = [{"role": "user", "content": "[Sava]: i work nights. who's Mochi? my cat is called Pixel", "user_id": 1,
+              "name": "Sava"},
+             {"role": "assistant", "content": "I have a dog named Rex, obviously"}]
+    sentences = own_sentences(convo, "Sava")
+    assert sentences == ["i work nights.", "my cat is called Pixel"]
+    assert quote_supported("my cat is called Pixel", sentences)
+    assert not quote_supported("i have a dog named Rex", sentences)       # Metis said it
+    assert not quote_supported("who's Mochi", sentences)                   # a question
+    assert not quote_supported("i work nights and my cat is Pixel", sentences)  # stitched from two sentences
+
+
+def test_nothing_about_metis_or_that_only_metis_said_is_stored(monkeypatch):
+    import backend.learning as learning
+
+    convo = [{"role": "assistant", "content": "I have a cat named Mochi and I adore pineapple pizza"},
+             {"role": "user", "content": "[Sava]: ha, sure. i adore pineapple pizza too lol",
+              "user_id": 1, "name": "Sava"}]
+
+    def c(quote, fact, about="themselves"):
+        return {"quote": quote, "about": about, "kind": learning.LIKES, "importance": 7, "fact": fact}
+
+    monkeypatch.setattr(learning, "json_completion", lambda *a, **k: {"candidates": [
+        c("i adore pineapple pizza too", "loves pineapple pizza"),             # theirs
+        c("a cat named Mochi", "has a cat named Mochi"),                       # a cat only Metis mentioned
+        c("i adore pineapple pizza too", "Metis loves pineapple pizza"),       # about her
+        c("I have a cat named Mochi", "has a cat named Mochi")]})              # her words as the quote
+    assert [x["fact"] for x in learning.extract_candidates(convo, "Sava")] == ["loves pineapple pizza"]
 

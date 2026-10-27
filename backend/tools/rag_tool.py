@@ -119,3 +119,17 @@ class RememberTool(RAGTool):
         queries = self._queries(query, conversation_context, voice_mode, message)
         print(f"🧠 Remember queries: {queries}" + (f"\n   made from: {message!r}" if message else ""))
         return search(queries, top_k=int(num_results) if num_results else None)
+
+    def _run(self, query: str, num_results: Optional[int], conversation_context: str, voice_mode: bool,
+             message: str = "") -> Dict[str, Any]:
+        """The notes, and first of all what she remembers of people (facts and episodes: the memory store)."""
+        from backend.people import get_people
+        from backend.recall import bot_names, think_back
+
+        out = super()._run(query, num_results, conversation_context, voice_mode, message)
+        people = get_people()
+        memories = think_back(people.memories, people, query, conversation_context, bot_names())
+        if memories:
+            out["result"] = memories + ("\n\n" + out["result"] if out["result"] else "")
+            out["message"] = None
+        return out

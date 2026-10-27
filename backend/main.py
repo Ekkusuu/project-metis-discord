@@ -72,7 +72,7 @@ async def lifespan(app: FastAPI):
     yield
     from backend import discord_bot
     # Learn from whatever was said since the last pass before going down.
-    pending = await asyncio.to_thread(discord_bot.flush_learning)
+    pending = await asyncio.to_thread(discord_bot.flush_learning, True)
     if pending:
         print("Learning from the end of the conversation before shutting down...")
         await asyncio.wait([asyncio.wrap_future(f) for f in pending], timeout=90)
